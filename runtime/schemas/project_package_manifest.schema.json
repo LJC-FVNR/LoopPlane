@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "LoopPlane project package manifest",
+  "type": "object",
+  "required": ["schema_version", "package_name", "package_version", "package_metadata_schema_version", "runtime_version", "tool_version", "layout", "workflow_root", "project_root", "workflow_id", "package_roots", "project_managed_files", "protected_project_paths"],
+  "properties": {
+    "schema_version": {"const": "loopplane-project-package-manifest-1"},
+    "package_name": {"type": "string", "minLength": 1},
+    "package_version": {"type": "string"},
+    "package_metadata_schema_version": {"type": "string"},
+    "runtime_version": {"type": "string", "minLength": 1},
+    "tool_version": {"type": "string", "minLength": 1},
+    "layout": {"type": "string", "minLength": 1},
+    "workflow_root": {"type": "string", "minLength": 1},
+    "project_root": {"const": "."},
+    "workflow_id": {"type": "string"},
+    "package_roots": {"type": "array", "items": {"type": "string"}},
+    "project_managed_files": {"type": "array", "items": {"type": "string"}},
+    "protected_project_paths": {"type": "array", "items": {"type": "string"}}
+  },
+  "additionalProperties": true
+}

@@ -1,0 +1,294 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>LoopPlane Showcase Frames</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #07111f;
+      --panel: #101827;
+      --panel-2: #151f32;
+      --line: #2a3a57;
+      --text: #f8fafc;
+      --muted: #9fb0c9;
+      --cyan: #38bdf8;
+      --green: #2dd4bf;
+      --violet: #a78bfa;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+    }
+    .frame {
+      min-height: 100vh;
+      overflow: hidden;
+      padding: 48px;
+      position: relative;
+    }
+    .frame::before {
+      background-image:
+        linear-gradient(rgba(56, 189, 248, 0.06) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(56, 189, 248, 0.06) 1px, transparent 1px);
+      background-size: 44px 44px;
+      content: "";
+      inset: 0;
+      mask-image: linear-gradient(to bottom, black, transparent 86%);
+      pointer-events: none;
+      position: absolute;
+    }
+    .content {
+      margin: 0 auto;
+      max-width: 1504px;
+      position: relative;
+      z-index: 1;
+    }
+    .brand {
+      align-items: center;
+      display: flex;
+      gap: 14px;
+      margin-bottom: 34px;
+    }
+    .brand img {
+      height: 62px;
+      width: 62px;
+    }
+    .eyebrow {
+      color: #93c5fd;
+      font-size: 13px;
+      font-weight: 800;
+      letter-spacing: 1.8px;
+      margin: 0 0 5px;
+      text-transform: uppercase;
+    }
+    .brand strong {
+      display: block;
+      font-size: 17px;
+    }
+    h1 {
+      font-size: 56px;
+      line-height: 1.03;
+      letter-spacing: 0;
+      margin: 0;
+      max-width: 850px;
+    }
+    .subhead {
+      color: var(--muted);
+      font-size: 20px;
+      line-height: 1.5;
+      margin: 22px 0 30px;
+      max-width: 770px;
+    }
+    .hero-grid,
+    .surface-grid {
+      align-items: start;
+      display: grid;
+      gap: 34px;
+      grid-template-columns: minmax(0, 0.39fr) minmax(0, 0.61fr);
+    }
+    .metrics {
+      display: grid;
+      gap: 12px;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      margin-top: 24px;
+    }
+    .metric,
+    .package-card,
+    .principle-card {
+      background: color-mix(in srgb, var(--panel) 88%, #ffffff 12%);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 18px;
+    }
+    .metric strong {
+      display: block;
+      font-size: 28px;
+      line-height: 1.1;
+    }
+    .metric span,
+    .package-card span,
+    .principle-card span {
+      color: var(--muted);
+      display: block;
+      font-size: 13px;
+      font-weight: 700;
+      line-height: 1.45;
+      margin-top: 8px;
+      text-transform: uppercase;
+    }
+    .diagram-shell,
+    .dashboard-shell {
+      background: #0b1323;
+      border: 1px solid var(--line);
+      border-radius: 24px;
+      box-shadow: 0 28px 90px rgba(0, 0, 0, 0.44);
+      overflow: hidden;
+    }
+    .diagram-shell img,
+    .dashboard-shell img {
+      display: block;
+      width: 100%;
+    }
+    .browser-bar {
+      align-items: center;
+      border-bottom: 1px solid var(--line);
+      display: flex;
+      gap: 8px;
+      height: 42px;
+      padding: 0 16px;
+    }
+    .dot {
+      border-radius: 999px;
+      height: 10px;
+      width: 10px;
+    }
+    .dot.a { background: #fb7185; }
+    .dot.b { background: #facc15; }
+    .dot.c { background: #34d399; }
+    .url {
+      background: #111827;
+      border: 1px solid #26344d;
+      border-radius: 999px;
+      color: var(--muted);
+      flex: 1;
+      font-size: 13px;
+      margin-left: 10px;
+      padding: 6px 14px;
+    }
+    .tilt {
+      transform: perspective(1600px) rotateX(1.2deg) rotateY(-3deg);
+      transform-origin: center;
+    }
+    .package-card h2,
+    .principle-card h2 {
+      font-size: 24px;
+      line-height: 1.2;
+      margin: 0;
+    }
+    .file-list {
+      display: grid;
+      gap: 8px;
+      margin-top: 18px;
+    }
+    .file-row {
+      align-items: center;
+      border: 1px solid #22314a;
+      display: grid;
+      gap: 12px;
+      grid-template-columns: 116px 1fr;
+      padding: 10px 12px;
+    }
+    .file-row strong {
+      color: #67e8f9;
+      font-size: 13px;
+    }
+    .file-row small {
+      color: var(--muted);
+      font-size: 13px;
+    }
+    .principles {
+      display: grid;
+      gap: 14px;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      margin-top: 18px;
+    }
+    .principle-card {
+      min-height: 132px;
+    }
+    .chip-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 20px;
+    }
+    .chip {
+      border: 1px solid #1f6f56;
+      border-radius: 999px;
+      color: #6ee7b7;
+      font-size: 12px;
+      font-weight: 800;
+      padding: 7px 11px;
+      text-transform: uppercase;
+    }
+  </style>
+</head>
+<body>
+  <section class="frame" id="hero">
+    <div class="content">
+      <div class="hero-grid">
+        <div>
+          <div class="brand">
+            <img src="../../dashboard/public/loopplane_logo_dark.png" alt="LoopPlane logo">
+            <div>
+              <p class="eyebrow">LoopPlane</p>
+              <strong>Durable Agent Workflow Runtime</strong>
+            </div>
+          </div>
+          <h1>Agent loops that survive the first prompt.</h1>
+          <p class="subhead">LoopPlane packages local agent work as a durable workflow: a static task plan, dynamic objective gates, agent-written evidence, self-expansion when gaps remain, and projections that make the run reviewable after it finishes.</p>
+          <div class="metrics">
+            <div class="metric"><strong>PLAN.md</strong><span>portable execution contract</span></div>
+            <div class="metric"><strong>Agents</strong><span>worker, verifier, summary, inspector</span></div>
+            <div class="metric"><strong>Loop</strong><span>validate, verify, expand, continue</span></div>
+            <div class="metric"><strong>.loopplane</strong><span>local state that can migrate</span></div>
+          </div>
+        </div>
+        <div class="diagram-shell tilt">
+          <img src="loopplane_workflow_diagram.png" alt="LoopPlane workflow architecture">
+        </div>
+      </div>
+    </div>
+  </section>
+  <section class="frame" id="surface">
+    <div class="content">
+      <div class="brand">
+        <img src="../../dashboard/public/loopplane_logo_dark.png" alt="LoopPlane logo">
+        <div>
+          <p class="eyebrow">Portable And Reviewable</p>
+          <h1>Move the workflow, keep the reasoning trail.</h1>
+        </div>
+      </div>
+      <div class="surface-grid">
+        <div>
+          <div class="package-card">
+            <h2>A LoopPlane project carries the loop with it.</h2>
+            <span>Workflow state is project-local; machine secrets and CLI paths stay local-only.</span>
+            <div class="file-list">
+              <div class="file-row"><strong>PLAN.md</strong><small>tasks, phase objectives, workflow objectives</small></div>
+              <div class="file-row"><strong>.loopplane/</strong><small>events, leases, results, read models, registries</small></div>
+              <div class="file-row"><strong>results/</strong><small>agent evidence, validation, summaries, artifacts</small></div>
+              <div class="file-row"><strong>config/local</strong><small>runner overrides excluded from portable truth</small></div>
+            </div>
+            <div class="chip-row">
+              <span class="chip">migration-friendly</span>
+              <span class="chip">objective-gated</span>
+              <span class="chip">agent-first</span>
+            </div>
+          </div>
+          <div class="principles">
+            <div class="principle-card">
+              <h2>Dynamic delivery</h2>
+              <span>Objectives let an agent judge whether the evidence satisfies the promise.</span>
+            </div>
+            <div class="principle-card">
+              <h2>Bounded expansion</h2>
+              <span>Gaps become scoped follow-up tasks, not silent success.</span>
+            </div>
+          </div>
+        </div>
+        <div class="dashboard-shell">
+          <div class="browser-bar">
+            <span class="dot a"></span><span class="dot b"></span><span class="dot c"></span>
+            <span class="url">operator review: objectives, evidence, graph, summaries</span>
+          </div>
+          <img src="dashboard_overview.png" alt="LoopPlane operator dashboard">
+        </div>
+      </div>
+    </div>
+  </section>
+</body>
+</html>

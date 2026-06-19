@@ -1,0 +1,1 @@
+{"schema_version":"loopplane-event-snapshot-1","event_id":"evt_example_000001","event_type":"workflow_initialized","timestamp":"2026-06-12T00:00:00Z","workflow_id":"wf_example","sequence":1,"payload":{"summary":"Example parseable LoopPlane JSONL event record for release validation."}}

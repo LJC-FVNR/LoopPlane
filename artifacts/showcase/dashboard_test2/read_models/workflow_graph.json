@@ -1,0 +1,3613 @@
+{
+  "edges": [
+    {
+      "edge_id": "edge_node_event_000000000001_to_node_event_000000000002",
+      "source": "node_event_000000000001",
+      "target": "node_event_000000000002",
+      "type": "event_sequence"
+    },
+    {
+      "edge_id": "edge_node_event_000000000002_to_node_event_000000000003",
+      "source": "node_event_000000000002",
+      "target": "node_event_000000000003",
+      "type": "event_sequence"
+    },
+    {
+      "edge_id": "edge_node_event_000000000003_to_node_event_000000000004",
+      "source": "node_event_000000000003",
+      "target": "node_event_000000000004",
+      "type": "event_sequence"
+    },
+    {
+      "edge_id": "edge_node_event_000000000004_to_node_event_000000000005",
+      "source": "node_event_000000000004",
+      "target": "node_event_000000000005",
+      "type": "event_sequence"
+    },
+    {
+      "edge_id": "edge_node_event_000000000005_to_node_event_000000000006",
+      "source": "node_event_000000000005",
+      "target": "node_event_000000000006",
+      "type": "event_sequence"
+    },
+    {
+      "edge_id": "edge_node_event_000000000006_to_node_event_000000000007",
+      "source": "node_event_000000000006",
+      "target": "node_event_000000000007",
+      "type": "event_sequence"
+    },
+    {
+      "edge_id": "edge_node_event_000000000007_to_node_event_000000000008",
+      "source": "node_event_000000000007",
+      "target": "node_event_000000000008",
+      "type": "event_sequence"
+    },
+    {
+      "edge_id": "edge_node_event_000000000008_to_node_event_000000000009",
+      "source": "node_event_000000000008",
+      "target": "node_event_000000000009",
+      "type": "event_sequence"
+    },
+    {
+      "edge_id": "edge_node_event_000000000009_to_node_event_000000000010",
+      "source": "node_event_000000000009",
+      "target": "node_event_000000000010",
+      "type": "event_sequence"
+    },
+    {
+      "edge_id": "edge_node_event_000000000010_to_node_event_000000000011",
+      "source": "node_event_000000000010",
+      "target": "node_event_000000000011",
+      "type": "event_sequence"
+    },
+    {
+      "edge_id": "edge_node_event_000000000011_to_node_event_000000000012",
+      "source": "node_event_000000000011",
+      "target": "node_event_000000000012",
+      "type": "event_sequence"
+    },
+    {
+      "edge_id": "edge_node_event_000000000012_to_node_event_000000000013",
+      "source": "node_event_000000000012",
+      "target": "node_event_000000000013",
+      "type": "event_sequence"
+    },
+    {
+      "edge_id": "edge_node_event_000000000013_to_node_event_000000000014",
+      "source": "node_event_000000000013",
+      "target": "node_event_000000000014",
+      "type": "event_sequence"
+    },
+    {
+      "edge_id": "edge_node_event_000000000014_to_node_event_000000000015",
+      "source": "node_event_000000000014",
+      "target": "node_event_000000000015",
+      "type": "event_sequence"
+    },
+    {
+      "edge_id": "edge_node_event_000000000015_to_node_event_000000000016",
+      "source": "node_event_000000000015",
+      "target": "node_event_000000000016",
+      "type": "event_sequence"
+    },
+    {
+      "edge_id": "edge_node_event_000000000016_to_node_event_000000000017",
+      "source": "node_event_000000000016",
+      "target": "node_event_000000000017",
+      "type": "event_sequence"
+    },
+    {
+      "edge_id": "edge_node_event_000000000017_to_node_event_000000000018",
+      "source": "node_event_000000000017",
+      "target": "node_event_000000000018",
+      "type": "event_sequence"
+    },
+    {
+      "edge_id": "edge_node_event_000000000018_to_node_event_000000000019",
+      "source": "node_event_000000000018",
+      "target": "node_event_000000000019",
+      "type": "event_sequence"
+    },
+    {
+      "edge_id": "edge_node_event_000000000019_to_node_event_000000000020",
+      "source": "node_event_000000000019",
+      "target": "node_event_000000000020",
+      "type": "event_sequence"
+    },
+    {
+      "edge_id": "edge_node_event_000000000020_to_node_event_000000000021",
+      "source": "node_event_000000000020",
+      "target": "node_event_000000000021",
+      "type": "event_sequence"
+    },
+    {
+      "edge_id": "edge_node_event_000000000021_to_node_event_000000000022",
+      "source": "node_event_000000000021",
+      "target": "node_event_000000000022",
+      "type": "event_sequence"
+    },
+    {
+      "edge_id": "edge_node_event_000000000022_to_node_event_000000000023",
+      "source": "node_event_000000000022",
+      "target": "node_event_000000000023",
+      "type": "event_sequence"
+    },
+    {
+      "edge_id": "edge_node_event_000000000023_to_node_event_000000000024",
+      "source": "node_event_000000000023",
+      "target": "node_event_000000000024",
+      "type": "event_sequence"
+    },
+    {
+      "edge_id": "edge_node_event_000000000024_to_node_event_000000000025",
+      "source": "node_event_000000000024",
+      "target": "node_event_000000000025",
+      "type": "event_sequence"
+    },
+    {
+      "edge_id": "edge_node_event_000000000025_to_node_event_000000000026",
+      "source": "node_event_000000000025",
+      "target": "node_event_000000000026",
+      "type": "event_sequence"
+    },
+    {
+      "edge_id": "edge_node_event_000000000026_to_node_event_000000000027",
+      "source": "node_event_000000000026",
+      "target": "node_event_000000000027",
+      "type": "event_sequence"
+    },
+    {
+      "edge_id": "edge_node_event_000000000027_to_node_event_000000000028",
+      "source": "node_event_000000000027",
+      "target": "node_event_000000000028",
+      "type": "event_sequence"
+    },
+    {
+      "edge_id": "edge_node_event_000000000028_to_node_event_000000000029",
+      "source": "node_event_000000000028",
+      "target": "node_event_000000000029",
+      "type": "event_sequence"
+    },
+    {
+      "edge_id": "edge_node_event_000000000029_to_node_event_000000000030",
+      "source": "node_event_000000000029",
+      "target": "node_event_000000000030",
+      "type": "event_sequence"
+    },
+    {
+      "edge_id": "edge_node_event_000000000030_to_node_event_000000000031",
+      "source": "node_event_000000000030",
+      "target": "node_event_000000000031",
+      "type": "event_sequence"
+    },
+    {
+      "edge_id": "edge_node_event_000000000031_to_node_event_000000000032",
+      "source": "node_event_000000000031",
+      "target": "node_event_000000000032",
+      "type": "event_sequence"
+    },
+    {
+      "edge_id": "edge_node_event_000000000032_to_node_event_000000000033",
+      "source": "node_event_000000000032",
+      "target": "node_event_000000000033",
+      "type": "event_sequence"
+    },
+    {
+      "edge_id": "edge_node_event_000000000033_to_node_event_000000000034",
+      "source": "node_event_000000000033",
+      "target": "node_event_000000000034",
+      "type": "event_sequence"
+    },
+    {
+      "edge_id": "edge_node_event_000000000034_to_node_event_000000000035",
+      "source": "node_event_000000000034",
+      "target": "node_event_000000000035",
+      "type": "event_sequence"
+    },
+    {
+      "edge_id": "edge_node_event_000000000035_to_node_event_000000000036",
+      "source": "node_event_000000000035",
+      "target": "node_event_000000000036",
+      "type": "event_sequence"
+    },
+    {
+      "edge_id": "edge_node_event_000000000036_to_node_event_000000000037",
+      "source": "node_event_000000000036",
+      "target": "node_event_000000000037",
+      "type": "event_sequence"
+    },
+    {
+      "edge_id": "edge_node_event_000000000037_to_node_event_000000000038",
+      "source": "node_event_000000000037",
+      "target": "node_event_000000000038",
+      "type": "event_sequence"
+    },
+    {
+      "edge_id": "edge_node_event_000000000038_to_node_event_000000000039",
+      "source": "node_event_000000000038",
+      "target": "node_event_000000000039",
+      "type": "event_sequence"
+    },
+    {
+      "edge_id": "edge_node_event_000000000039_to_node_event_000000000040",
+      "source": "node_event_000000000039",
+      "target": "node_event_000000000040",
+      "type": "event_sequence"
+    },
+    {
+      "edge_id": "edge_node_event_000000000040_to_node_event_000000000041",
+      "source": "node_event_000000000040",
+      "target": "node_event_000000000041",
+      "type": "event_sequence"
+    },
+    {
+      "edge_id": "edge_node_event_000000000041_to_node_event_000000000042",
+      "source": "node_event_000000000041",
+      "target": "node_event_000000000042",
+      "type": "event_sequence"
+    },
+    {
+      "edge_id": "edge_node_event_000000000042_to_node_event_000000000043",
+      "source": "node_event_000000000042",
+      "target": "node_event_000000000043",
+      "type": "event_sequence"
+    },
+    {
+      "edge_id": "edge_node_event_000000000043_to_node_event_000000000044",
+      "source": "node_event_000000000043",
+      "target": "node_event_000000000044",
+      "type": "event_sequence"
+    },
+    {
+      "edge_id": "edge_node_event_000000000044_to_node_event_000000000045",
+      "source": "node_event_000000000044",
+      "target": "node_event_000000000045",
+      "type": "event_sequence"
+    },
+    {
+      "edge_id": "edge_node_event_000000000045_to_node_event_000000000046",
+      "source": "node_event_000000000045",
+      "target": "node_event_000000000046",
+      "type": "event_sequence"
+    },
+    {
+      "edge_id": "edge_node_event_000000000046_to_node_event_000000000047",
+      "source": "node_event_000000000046",
+      "target": "node_event_000000000047",
+      "type": "event_sequence"
+    },
+    {
+      "edge_id": "edge_node_event_000000000047_to_node_event_000000000048",
+      "source": "node_event_000000000047",
+      "target": "node_event_000000000048",
+      "type": "event_sequence"
+    },
+    {
+      "edge_id": "edge_node_event_000000000048_to_node_event_000000000049",
+      "source": "node_event_000000000048",
+      "target": "node_event_000000000049",
+      "type": "event_sequence"
+    },
+    {
+      "edge_id": "edge_node_event_000000000049_to_node_event_000000000050",
+      "source": "node_event_000000000049",
+      "target": "node_event_000000000050",
+      "type": "event_sequence"
+    },
+    {
+      "edge_id": "edge_node_event_000000000050_to_node_event_000000000051",
+      "source": "node_event_000000000050",
+      "target": "node_event_000000000051",
+      "type": "event_sequence"
+    },
+    {
+      "edge_id": "edge_node_event_000000000051_to_node_event_000000000052",
+      "source": "node_event_000000000051",
+      "target": "node_event_000000000052",
+      "type": "event_sequence"
+    },
+    {
+      "edge_id": "edge_node_event_000000000052_to_node_event_000000000053",
+      "source": "node_event_000000000052",
+      "target": "node_event_000000000053",
+      "type": "event_sequence"
+    },
+    {
+      "edge_id": "edge_node_event_000000000053_to_node_event_000000000054",
+      "source": "node_event_000000000053",
+      "target": "node_event_000000000054",
+      "type": "event_sequence"
+    },
+    {
+      "edge_id": "edge_node_event_000000000054_to_node_event_000000000055",
+      "source": "node_event_000000000054",
+      "target": "node_event_000000000055",
+      "type": "event_sequence"
+    },
+    {
+      "edge_id": "edge_node_event_000000000055_to_node_event_000000000056",
+      "source": "node_event_000000000055",
+      "target": "node_event_000000000056",
+      "type": "event_sequence"
+    },
+    {
+      "edge_id": "edge_node_event_000000000056_to_node_event_000000000057",
+      "source": "node_event_000000000056",
+      "target": "node_event_000000000057",
+      "type": "event_sequence"
+    },
+    {
+      "edge_id": "edge_node_event_000000000057_to_node_event_000000000058",
+      "source": "node_event_000000000057",
+      "target": "node_event_000000000058",
+      "type": "event_sequence"
+    },
+    {
+      "edge_id": "edge_node_event_000000000058_to_node_event_000000000059",
+      "source": "node_event_000000000058",
+      "target": "node_event_000000000059",
+      "type": "event_sequence"
+    },
+    {
+      "edge_id": "edge_node_event_000000000059_to_node_event_000000000060",
+      "source": "node_event_000000000059",
+      "target": "node_event_000000000060",
+      "type": "event_sequence"
+    },
+    {
+      "edge_id": "edge_node_event_000000000060_to_node_event_000000000061",
+      "source": "node_event_000000000060",
+      "target": "node_event_000000000061",
+      "type": "event_sequence"
+    },
+    {
+      "edge_id": "edge_node_event_000000000061_to_node_event_000000000062",
+      "source": "node_event_000000000061",
+      "target": "node_event_000000000062",
+      "type": "event_sequence"
+    },
+    {
+      "edge_id": "edge_node_event_000000000062_to_node_event_000000000063",
+      "source": "node_event_000000000062",
+      "target": "node_event_000000000063",
+      "type": "event_sequence"
+    },
+    {
+      "edge_id": "edge_node_event_000000000063_to_node_event_000000000064",
+      "source": "node_event_000000000063",
+      "target": "node_event_000000000064",
+      "type": "event_sequence"
+    },
+    {
+      "edge_id": "edge_node_event_000000000064_to_node_event_000000000065",
+      "source": "node_event_000000000064",
+      "target": "node_event_000000000065",
+      "type": "event_sequence"
+    },
+    {
+      "edge_id": "edge_node_event_000000000065_to_node_event_000000000066",
+      "source": "node_event_000000000065",
+      "target": "node_event_000000000066",
+      "type": "event_sequence"
+    },
+    {
+      "edge_id": "edge_node_event_000000000066_to_node_event_000000000067",
+      "source": "node_event_000000000066",
+      "target": "node_event_000000000067",
+      "type": "event_sequence"
+    },
+    {
+      "edge_id": "edge_node_event_000000000067_to_node_event_000000000068",
+      "source": "node_event_000000000067",
+      "target": "node_event_000000000068",
+      "type": "event_sequence"
+    },
+    {
+      "edge_id": "edge_node_event_000000000068_to_node_event_000000000069",
+      "source": "node_event_000000000068",
+      "target": "node_event_000000000069",
+      "type": "event_sequence"
+    },
+    {
+      "edge_id": "edge_node_event_000000000069_to_node_event_000000000070",
+      "source": "node_event_000000000069",
+      "target": "node_event_000000000070",
+      "type": "event_sequence"
+    },
+    {
+      "edge_id": "edge_node_event_000000000070_to_node_event_000000000071",
+      "source": "node_event_000000000070",
+      "target": "node_event_000000000071",
+      "type": "event_sequence"
+    },
+    {
+      "edge_id": "edge_node_event_000000000071_to_node_event_000000000072",
+      "source": "node_event_000000000071",
+      "target": "node_event_000000000072",
+      "type": "event_sequence"
+    },
+    {
+      "edge_id": "edge_node_event_000000000072_to_node_event_000000000073",
+      "source": "node_event_000000000072",
+      "target": "node_event_000000000073",
+      "type": "event_sequence"
+    },
+    {
+      "edge_id": "edge_node_event_000000000073_to_node_event_000000000074",
+      "source": "node_event_000000000073",
+      "target": "node_event_000000000074",
+      "type": "event_sequence"
+    },
+    {
+      "edge_id": "edge_node_event_000000000074_to_node_event_000000000075",
+      "source": "node_event_000000000074",
+      "target": "node_event_000000000075",
+      "type": "event_sequence"
+    },
+    {
+      "edge_id": "edge_node_event_000000000075_to_node_event_000000000076",
+      "source": "node_event_000000000075",
+      "target": "node_event_000000000076",
+      "type": "event_sequence"
+    },
+    {
+      "edge_id": "edge_node_event_000000000076_to_node_event_000000000077",
+      "source": "node_event_000000000076",
+      "target": "node_event_000000000077",
+      "type": "event_sequence"
+    },
+    {
+      "edge_id": "edge_node_event_000000000077_to_node_event_000000000078",
+      "source": "node_event_000000000077",
+      "target": "node_event_000000000078",
+      "type": "event_sequence"
+    },
+    {
+      "edge_id": "edge_node_event_000000000078_to_node_event_000000000079",
+      "source": "node_event_000000000078",
+      "target": "node_event_000000000079",
+      "type": "event_sequence"
+    },
+    {
+      "edge_id": "edge_node_event_000000000079_to_node_event_000000000080",
+      "source": "node_event_000000000079",
+      "target": "node_event_000000000080",
+      "type": "event_sequence"
+    },
+    {
+      "edge_id": "edge_node_event_000000000080_to_node_event_000000000081",
+      "source": "node_event_000000000080",
+      "target": "node_event_000000000081",
+      "type": "event_sequence"
+    },
+    {
+      "edge_id": "edge_node_event_000000000081_to_node_event_000000000082",
+      "source": "node_event_000000000081",
+      "target": "node_event_000000000082",
+      "type": "event_sequence"
+    },
+    {
+      "edge_id": "edge_node_event_000000000082_to_node_event_000000000083",
+      "source": "node_event_000000000082",
+      "target": "node_event_000000000083",
+      "type": "event_sequence"
+    },
+    {
+      "edge_id": "edge_node_event_000000000083_to_node_event_000000000084",
+      "source": "node_event_000000000083",
+      "target": "node_event_000000000084",
+      "type": "event_sequence"
+    },
+    {
+      "edge_id": "edge_node_event_000000000084_to_node_event_000000000085",
+      "source": "node_event_000000000084",
+      "target": "node_event_000000000085",
+      "type": "event_sequence"
+    },
+    {
+      "edge_id": "edge_node_event_000000000085_to_node_event_000000000086",
+      "source": "node_event_000000000085",
+      "target": "node_event_000000000086",
+      "type": "event_sequence"
+    },
+    {
+      "edge_id": "edge_node_event_000000000086_to_node_event_000000000087",
+      "source": "node_event_000000000086",
+      "target": "node_event_000000000087",
+      "type": "event_sequence"
+    },
+    {
+      "edge_id": "edge_node_event_000000000087_to_node_event_000000000088",
+      "source": "node_event_000000000087",
+      "target": "node_event_000000000088",
+      "type": "event_sequence"
+    },
+    {
+      "edge_id": "edge_node_event_000000000088_to_node_event_000000000089",
+      "source": "node_event_000000000088",
+      "target": "node_event_000000000089",
+      "type": "event_sequence"
+    },
+    {
+      "edge_id": "edge_node_event_000000000089_to_node_event_000000000090",
+      "source": "node_event_000000000089",
+      "target": "node_event_000000000090",
+      "type": "event_sequence"
+    },
+    {
+      "edge_id": "edge_node_event_000000000090_to_node_event_000000000091",
+      "source": "node_event_000000000090",
+      "target": "node_event_000000000091",
+      "type": "event_sequence"
+    },
+    {
+      "edge_id": "edge_node_event_000000000091_to_node_event_000000000092",
+      "source": "node_event_000000000091",
+      "target": "node_event_000000000092",
+      "type": "event_sequence"
+    },
+    {
+      "edge_id": "edge_node_event_000000000092_to_node_event_000000000093",
+      "source": "node_event_000000000092",
+      "target": "node_event_000000000093",
+      "type": "event_sequence"
+    },
+    {
+      "edge_id": "edge_node_event_000000000093_to_node_event_000000000094",
+      "source": "node_event_000000000093",
+      "target": "node_event_000000000094",
+      "type": "event_sequence"
+    },
+    {
+      "edge_id": "edge_node_event_000000000094_to_node_event_000000000095",
+      "source": "node_event_000000000094",
+      "target": "node_event_000000000095",
+      "type": "event_sequence"
+    },
+    {
+      "edge_id": "edge_node_event_000000000095_to_node_event_000000000096",
+      "source": "node_event_000000000095",
+      "target": "node_event_000000000096",
+      "type": "event_sequence"
+    },
+    {
+      "edge_id": "edge_node_event_000000000096_to_node_event_000000000097",
+      "source": "node_event_000000000096",
+      "target": "node_event_000000000097",
+      "type": "event_sequence"
+    },
+    {
+      "edge_id": "edge_node_event_000000000097_to_node_event_000000000098",
+      "source": "node_event_000000000097",
+      "target": "node_event_000000000098",
+      "type": "event_sequence"
+    },
+    {
+      "edge_id": "edge_node_event_000000000098_to_node_event_000000000099",
+      "source": "node_event_000000000098",
+      "target": "node_event_000000000099",
+      "type": "event_sequence"
+    },
+    {
+      "edge_id": "edge_node_event_000000000099_to_node_event_000000000100",
+      "source": "node_event_000000000099",
+      "target": "node_event_000000000100",
+      "type": "event_sequence"
+    },
+    {
+      "edge_id": "edge_node_event_000000000100_to_node_event_000000000101",
+      "source": "node_event_000000000100",
+      "target": "node_event_000000000101",
+      "type": "event_sequence"
+    },
+    {
+      "edge_id": "edge_node_run_run_20260616_093356_97073f38_to_node_validation_run_20260616_093356_97073f38",
+      "source": "node_run_run_20260616_093356_97073f38",
+      "target": "node_validation_run_20260616_093356_97073f38",
+      "type": "validated_by"
+    },
+    {
+      "edge_id": "edge_node_run_run_20260616_093357_87635d94_to_node_validation_run_20260616_093357_87635d94",
+      "source": "node_run_run_20260616_093357_87635d94",
+      "target": "node_validation_run_20260616_093357_87635d94",
+      "type": "validated_by"
+    }
+  ],
+  "generated_at": "2026-06-16T21:26:30Z",
+  "last_event_seq": 101,
+  "nodes": [
+    {
+      "acceptance": "CSV dataset exists with scenario-specific fields.",
+      "deliverables": "subprojects/portfolio_summary/data/source.csv and data_dictionary.md",
+      "ended_at": null,
+      "evidence_root": ".loopplane/workflows/wf_20260616_085d0238/results/PF01/",
+      "input_refs": [],
+      "latest_path": ".loopplane/workflows/wf_20260616_085d0238/results/PF01/latest.json",
+      "node_id": "node_run_run_20260616_093356_97073f38",
+      "output_refs": [
+        ".loopplane/workflows/wf_20260616_085d0238/results/PF01/runs/run_20260616_093356_97073f38/agent_status.json"
+      ],
+      "phase": "Phase PF: Portfolio Evidence",
+      "run_id": "run_20260616_093356_97073f38",
+      "started_at": null,
+      "status": "completed",
+      "summary": {
+        "highlights": [
+          "CSV artifact written",
+          "Markdown report written",
+          "SVG figure written when analysis task"
+        ],
+        "one_line": "PF01 produced table/figure evidence.",
+        "risks": []
+      },
+      "task_id": "PF01",
+      "task_title": "Build civic analytics portfolio dataset",
+      "title": "PF01",
+      "type": "worker"
+    },
+    {
+      "acceptance": "Markdown report includes a ranked data table.",
+      "deliverables": "subprojects/portfolio_summary/report.md and figures/PF02_figure.svg",
+      "ended_at": null,
+      "evidence_root": ".loopplane/workflows/wf_20260616_085d0238/results/PF02/",
+      "input_refs": [],
+      "latest_path": ".loopplane/workflows/wf_20260616_085d0238/results/PF02/latest.json",
+      "node_id": "node_run_run_20260616_093357_87635d94",
+      "output_refs": [
+        ".loopplane/workflows/wf_20260616_085d0238/results/PF02/runs/run_20260616_093357_87635d94/agent_status.json"
+      ],
+      "phase": "Phase PF: Portfolio Evidence",
+      "run_id": "run_20260616_093357_87635d94",
+      "started_at": null,
+      "status": "completed",
+      "summary": {
+        "highlights": [
+          "CSV artifact written",
+          "Markdown report written",
+          "SVG figure written when analysis task"
+        ],
+        "one_line": "PF02 produced table/figure evidence.",
+        "risks": []
+      },
+      "task_id": "PF02",
+      "task_title": "Analyze civic analytics portfolio outcomes",
+      "title": "PF02",
+      "type": "worker"
+    },
+    {
+      "context_label": "objective",
+      "input_refs": [
+        ".loopplane/workflows/wf_20260616_085d0238/runtime/objectives/final_objective_verification.json"
+      ],
+      "node_id": "objective_FO1",
+      "objective_id": "FO1",
+      "output_refs": [
+        ".loopplane/workflows/wf_20260616_085d0238/runtime/objectives/final_objective_verification.json"
+      ],
+      "phase": null,
+      "run_id": null,
+      "status": "closed",
+      "summary": {
+        "highlights": [
+          "Civic Analytics Portfolio workflow is complete and dashboard-ready."
+        ],
+        "one_line": "Objective FO1: closed",
+        "risks": []
+      },
+      "task_id": null,
+      "title": "Civic Analytics Portfolio workflow is complete and dashboard-ready.",
+      "type": "objective"
+    },
+    {
+      "context_label": "Phase PF: Portfolio Evidence \u00b7 objective",
+      "input_refs": [
+        ".loopplane/workflows/wf_20260616_085d0238/runtime/objectives/phases/PF/objective_verification.json"
+      ],
+      "node_id": "objective_PF_O1",
+      "objective_id": "PF.O1",
+      "output_refs": [
+        ".loopplane/workflows/wf_20260616_085d0238/runtime/objectives/phases/PF/objective_verification.json"
+      ],
+      "phase": "Phase PF: Portfolio Evidence",
+      "run_id": null,
+      "status": "closed",
+      "summary": {
+        "highlights": [
+          "Civic Analytics Portfolio evidence is decision-useful."
+        ],
+        "one_line": "Objective PF.O1: closed",
+        "risks": []
+      },
+      "task_id": null,
+      "title": "Civic Analytics Portfolio evidence is decision-useful.",
+      "type": "objective"
+    },
+    {
+      "actor_label": "Summary",
+      "agent_role": "summary",
+      "context_label": "Summary \u00b7 summary",
+      "elapsed_seconds": 0,
+      "ended_at": "2026-06-16T09:34:07Z",
+      "event_id": "evt_000000000096",
+      "event_sequence": 96,
+      "event_type": "run_prepared",
+      "input_refs": [],
+      "node_id": "node_event_000000000096",
+      "output_refs": [],
+      "run_id": "run_20260616_093407_6bf32e00",
+      "runner_id": "summary",
+      "started_at": "2026-06-16T09:34:07Z",
+      "status": "run_prepared",
+      "summary": {
+        "highlights": [],
+        "one_line": "Event 96: Run Prepared for Summary, runner summary, run run_20260616_093407_6bf32e00.",
+        "risks": []
+      },
+      "task_id": null,
+      "title": "Event 96: Run Prepared",
+      "type": "event"
+    },
+    {
+      "actor_label": "Summary",
+      "agent_role": "summary",
+      "context_label": "Summary \u00b7 summary",
+      "elapsed_seconds": 0,
+      "ended_at": "2026-06-16T09:34:07Z",
+      "event_id": "evt_000000000097",
+      "event_sequence": 97,
+      "event_type": "run_prepared",
+      "input_refs": [],
+      "node_id": "node_event_000000000097",
+      "output_refs": [],
+      "run_id": "run_20260616_093407_3c1d4b6a",
+      "runner_id": "summary",
+      "started_at": "2026-06-16T09:34:07Z",
+      "status": "run_prepared",
+      "summary": {
+        "highlights": [],
+        "one_line": "Event 97: Run Prepared for Summary, runner summary, run run_20260616_093407_3c1d4b6a.",
+        "risks": []
+      },
+      "task_id": null,
+      "title": "Event 97: Run Prepared",
+      "type": "event"
+    },
+    {
+      "actor_label": "Summary",
+      "agent_role": "summary",
+      "context_label": "Summary \u00b7 summary",
+      "elapsed_seconds": 0,
+      "ended_at": "2026-06-16T09:34:07Z",
+      "event_id": "evt_000000000098",
+      "event_sequence": 98,
+      "event_type": "run_prepared",
+      "input_refs": [],
+      "node_id": "node_event_000000000098",
+      "output_refs": [],
+      "run_id": "run_20260616_093407_ad08737c",
+      "runner_id": "summary",
+      "started_at": "2026-06-16T09:34:07Z",
+      "status": "run_prepared",
+      "summary": {
+        "highlights": [],
+        "one_line": "Event 98: Run Prepared for Summary, runner summary, run run_20260616_093407_ad08737c.",
+        "risks": []
+      },
+      "task_id": null,
+      "title": "Event 98: Run Prepared",
+      "type": "event"
+    },
+    {
+      "acceptance": "CSV dataset exists with scenario-specific fields.",
+      "actor_label": "Workflow",
+      "agent_role": null,
+      "context_label": "Phase PF: Portfolio Evidence \u00b7 PF01 \u00b7 Workflow",
+      "deliverables": "subprojects/portfolio_summary/data/source.csv and data_dictionary.md",
+      "elapsed_seconds": 0,
+      "ended_at": "2026-06-16T09:34:07Z",
+      "event_id": "evt_000000000099",
+      "event_sequence": 99,
+      "event_type": "human_summary_written",
+      "evidence_root": ".loopplane/workflows/wf_20260616_085d0238/results/PF01/",
+      "input_refs": [],
+      "latest_path": ".loopplane/workflows/wf_20260616_085d0238/results/PF01/latest.json",
+      "node_id": "node_event_000000000099",
+      "output_refs": [],
+      "phase": "Phase PF: Portfolio Evidence",
+      "run_id": null,
+      "runner_id": null,
+      "started_at": "2026-06-16T09:34:07Z",
+      "status": "human_summary_written",
+      "summary": {
+        "highlights": [],
+        "one_line": "Event 99: Human Summary Written for task PF01, Workflow.",
+        "risks": []
+      },
+      "task_id": "PF01",
+      "task_title": "Build civic analytics portfolio dataset",
+      "title": "Event 99: Human Summary Written",
+      "type": "event"
+    },
+    {
+      "acceptance": "Markdown report includes a ranked data table.",
+      "actor_label": "Workflow",
+      "agent_role": null,
+      "context_label": "Phase PF: Portfolio Evidence \u00b7 PF02 \u00b7 Workflow",
+      "deliverables": "subprojects/portfolio_summary/report.md and figures/PF02_figure.svg",
+      "elapsed_seconds": 0,
+      "ended_at": "2026-06-16T09:34:07Z",
+      "event_id": "evt_000000000100",
+      "event_sequence": 100,
+      "event_type": "human_summary_written",
+      "evidence_root": ".loopplane/workflows/wf_20260616_085d0238/results/PF02/",
+      "input_refs": [],
+      "latest_path": ".loopplane/workflows/wf_20260616_085d0238/results/PF02/latest.json",
+      "node_id": "node_event_000000000100",
+      "output_refs": [],
+      "phase": "Phase PF: Portfolio Evidence",
+      "run_id": null,
+      "runner_id": null,
+      "started_at": "2026-06-16T09:34:07Z",
+      "status": "human_summary_written",
+      "summary": {
+        "highlights": [],
+        "one_line": "Event 100: Human Summary Written for task PF02, Workflow.",
+        "risks": []
+      },
+      "task_id": "PF02",
+      "task_title": "Analyze civic analytics portfolio outcomes",
+      "title": "Event 100: Human Summary Written",
+      "type": "event"
+    },
+    {
+      "actor_label": "Workflow",
+      "agent_role": null,
+      "context_label": "Workflow",
+      "elapsed_seconds": 0,
+      "ended_at": "2026-06-16T09:34:07Z",
+      "event_id": "evt_000000000101",
+      "event_sequence": 101,
+      "event_type": "human_summary_written",
+      "input_refs": [],
+      "node_id": "node_event_000000000101",
+      "output_refs": [],
+      "run_id": null,
+      "runner_id": null,
+      "started_at": "2026-06-16T09:34:07Z",
+      "status": "human_summary_written",
+      "summary": {
+        "highlights": [],
+        "one_line": "Event 101: Human Summary Written for Workflow.",
+        "risks": []
+      },
+      "task_id": null,
+      "title": "Event 101: Human Summary Written",
+      "type": "event"
+    },
+    {
+      "actor_label": "Final Verifier",
+      "agent_role": null,
+      "context_label": "Final Verifier",
+      "elapsed_seconds": 0,
+      "ended_at": "2026-06-16T09:34:06Z",
+      "event_id": "evt_000000000094",
+      "event_sequence": 94,
+      "event_type": "final_verification_finished",
+      "input_refs": [],
+      "node_id": "node_event_000000000094",
+      "output_refs": [],
+      "run_id": null,
+      "runner_id": null,
+      "started_at": "2026-06-16T09:34:06Z",
+      "status": "final_verification_finished",
+      "summary": {
+        "highlights": [],
+        "one_line": "Event 94: Final Verification Finished for Final Verifier.",
+        "risks": []
+      },
+      "task_id": null,
+      "title": "Event 94: Final Verification Finished",
+      "type": "event"
+    },
+    {
+      "actor_label": "Workflow",
+      "agent_role": null,
+      "context_label": "Workflow",
+      "elapsed_seconds": 0,
+      "ended_at": "2026-06-16T09:34:06Z",
+      "event_id": "evt_000000000095",
+      "event_sequence": 95,
+      "event_type": "workflow_completed",
+      "input_refs": [],
+      "node_id": "node_event_000000000095",
+      "output_refs": [],
+      "run_id": null,
+      "runner_id": null,
+      "started_at": "2026-06-16T09:34:06Z",
+      "status": "workflow_completed",
+      "summary": {
+        "highlights": [],
+        "one_line": "Event 95: Workflow Completed for Workflow.",
+        "risks": []
+      },
+      "task_id": null,
+      "title": "Event 95: Workflow Completed",
+      "type": "event"
+    },
+    {
+      "actor_label": "Scheduler",
+      "agent_role": null,
+      "context_label": "Scheduler",
+      "elapsed_seconds": 0,
+      "ended_at": "2026-06-16T09:34:05Z",
+      "event_id": "evt_000000000091",
+      "event_sequence": 91,
+      "event_type": "scheduler_started",
+      "input_refs": [],
+      "node_id": "node_event_000000000091",
+      "output_refs": [],
+      "run_id": null,
+      "runner_id": null,
+      "started_at": "2026-06-16T09:34:05Z",
+      "status": "scheduler_started",
+      "summary": {
+        "highlights": [],
+        "one_line": "Event 91: Scheduler Started for Scheduler.",
+        "risks": []
+      },
+      "task_id": null,
+      "title": "Event 91: Scheduler Started",
+      "type": "event"
+    },
+    {
+      "actor_label": "Scheduler",
+      "agent_role": null,
+      "context_label": "Scheduler",
+      "elapsed_seconds": 0,
+      "ended_at": "2026-06-16T09:34:05Z",
+      "event_id": "evt_000000000092",
+      "event_sequence": 92,
+      "event_type": "scheduler_tick",
+      "input_refs": [],
+      "node_id": "node_event_000000000092",
+      "output_refs": [],
+      "run_id": null,
+      "runner_id": null,
+      "started_at": "2026-06-16T09:34:05Z",
+      "status": "scheduler_tick",
+      "summary": {
+        "highlights": [],
+        "one_line": "Event 92: Scheduler Tick for Scheduler.",
+        "risks": []
+      },
+      "task_id": null,
+      "title": "Event 92: Scheduler Tick",
+      "type": "event"
+    },
+    {
+      "actor_label": "Scheduler",
+      "agent_role": null,
+      "context_label": "Scheduler",
+      "elapsed_seconds": 0,
+      "ended_at": "2026-06-16T09:34:05Z",
+      "event_id": "evt_000000000093",
+      "event_sequence": 93,
+      "event_type": "scheduler_action_selected",
+      "input_refs": [],
+      "node_id": "node_event_000000000093",
+      "output_refs": [],
+      "run_id": null,
+      "runner_id": null,
+      "started_at": "2026-06-16T09:34:05Z",
+      "status": "scheduler_action_selected",
+      "summary": {
+        "highlights": [],
+        "one_line": "Event 93: Scheduler Action Selected for Scheduler.",
+        "risks": []
+      },
+      "task_id": null,
+      "title": "Event 93: Scheduler Action Selected",
+      "type": "event"
+    },
+    {
+      "actor_label": "Objective Verifier",
+      "agent_role": "objective_verifier",
+      "context_label": "Objective Verifier \u00b7 objective_verifier",
+      "elapsed_seconds": 0,
+      "ended_at": "2026-06-16T09:34:04Z",
+      "event_id": "evt_000000000080",
+      "event_sequence": 80,
+      "event_type": "objective_verifier_run_classified",
+      "input_refs": [],
+      "node_id": "node_event_000000000080",
+      "output_refs": [],
+      "run_id": "run_20260616_093403_79be3aa2",
+      "runner_id": "objective_verifier",
+      "started_at": "2026-06-16T09:34:04Z",
+      "status": "objective_verifier_run_classified",
+      "summary": {
+        "highlights": [],
+        "one_line": "Event 80: Objective Verifier Run Classified for Objective Verifier, runner objective_verifier, run run_20260616_093403_79be3aa2.",
+        "risks": []
+      },
+      "task_id": null,
+      "title": "Event 80: Objective Verifier Run Classified",
+      "type": "event"
+    },
+    {
+      "actor_label": "Scheduler",
+      "agent_role": null,
+      "context_label": "Scheduler",
+      "elapsed_seconds": 0,
+      "ended_at": "2026-06-16T09:34:04Z",
+      "event_id": "evt_000000000081",
+      "event_sequence": 81,
+      "event_type": "scheduler_exited",
+      "input_refs": [],
+      "node_id": "node_event_000000000081",
+      "output_refs": [],
+      "run_id": null,
+      "runner_id": null,
+      "started_at": "2026-06-16T09:34:04Z",
+      "status": "scheduler_exited",
+      "summary": {
+        "highlights": [],
+        "one_line": "Event 81: Scheduler Exited for Scheduler.",
+        "risks": []
+      },
+      "task_id": null,
+      "title": "Event 81: Scheduler Exited",
+      "type": "event"
+    },
+    {
+      "actor_label": "Scheduler",
+      "agent_role": null,
+      "context_label": "Scheduler",
+      "elapsed_seconds": 0,
+      "ended_at": "2026-06-16T09:34:04Z",
+      "event_id": "evt_000000000082",
+      "event_sequence": 82,
+      "event_type": "scheduler_started",
+      "input_refs": [],
+      "node_id": "node_event_000000000082",
+      "output_refs": [],
+      "run_id": null,
+      "runner_id": null,
+      "started_at": "2026-06-16T09:34:04Z",
+      "status": "scheduler_started",
+      "summary": {
+        "highlights": [],
+        "one_line": "Event 82: Scheduler Started for Scheduler.",
+        "risks": []
+      },
+      "task_id": null,
+      "title": "Event 82: Scheduler Started",
+      "type": "event"
+    },
+    {
+      "actor_label": "Scheduler",
+      "agent_role": null,
+      "context_label": "Scheduler",
+      "elapsed_seconds": 0,
+      "ended_at": "2026-06-16T09:34:04Z",
+      "event_id": "evt_000000000083",
+      "event_sequence": 83,
+      "event_type": "scheduler_tick",
+      "input_refs": [],
+      "node_id": "node_event_000000000083",
+      "output_refs": [],
+      "run_id": null,
+      "runner_id": null,
+      "started_at": "2026-06-16T09:34:04Z",
+      "status": "scheduler_tick",
+      "summary": {
+        "highlights": [],
+        "one_line": "Event 83: Scheduler Tick for Scheduler.",
+        "risks": []
+      },
+      "task_id": null,
+      "title": "Event 83: Scheduler Tick",
+      "type": "event"
+    },
+    {
+      "actor_label": "Scheduler",
+      "agent_role": null,
+      "context_label": "Scheduler",
+      "elapsed_seconds": 0,
+      "ended_at": "2026-06-16T09:34:04Z",
+      "event_id": "evt_000000000084",
+      "event_sequence": 84,
+      "event_type": "scheduler_action_selected",
+      "input_refs": [],
+      "node_id": "node_event_000000000084",
+      "output_refs": [],
+      "run_id": null,
+      "runner_id": null,
+      "started_at": "2026-06-16T09:34:04Z",
+      "status": "scheduler_action_selected",
+      "summary": {
+        "highlights": [],
+        "one_line": "Event 84: Scheduler Action Selected for Scheduler.",
+        "risks": []
+      },
+      "task_id": null,
+      "title": "Event 84: Scheduler Action Selected",
+      "type": "event"
+    },
+    {
+      "actor_label": "Objective Verifier",
+      "agent_role": "objective_verifier",
+      "context_label": "Objective Verifier \u00b7 objective_verifier",
+      "elapsed_seconds": 0,
+      "ended_at": "2026-06-16T09:34:04Z",
+      "event_id": "evt_000000000085",
+      "event_sequence": 85,
+      "event_type": "run_prepared",
+      "input_refs": [],
+      "node_id": "node_event_000000000085",
+      "output_refs": [],
+      "run_id": "run_20260616_093404_0addfe8a",
+      "runner_id": "objective_verifier",
+      "started_at": "2026-06-16T09:34:04Z",
+      "status": "run_prepared",
+      "summary": {
+        "highlights": [],
+        "one_line": "Event 85: Run Prepared for Objective Verifier, runner objective_verifier, run run_20260616_093404_0addfe8a.",
+        "risks": []
+      },
+      "task_id": null,
+      "title": "Event 85: Run Prepared",
+      "type": "event"
+    },
+    {
+      "actor_label": "Workflow",
+      "agent_role": null,
+      "context_label": "Workflow \u00b7 objective_verifier",
+      "elapsed_seconds": 0,
+      "ended_at": "2026-06-16T09:34:04Z",
+      "event_id": "evt_000000000086",
+      "event_sequence": 86,
+      "event_type": "objective_verifier_adapter_started",
+      "input_refs": [],
+      "node_id": "node_event_000000000086",
+      "output_refs": [],
+      "run_id": "run_20260616_093404_0addfe8a",
+      "runner_id": "objective_verifier",
+      "started_at": "2026-06-16T09:34:04Z",
+      "status": "objective_verifier_adapter_started",
+      "summary": {
+        "highlights": [],
+        "one_line": "Event 86: Objective Verifier Adapter Started for Workflow, runner objective_verifier, run run_20260616_093404_0addfe8a.",
+        "risks": []
+      },
+      "task_id": null,
+      "title": "Event 86: Objective Verifier Adapter Started",
+      "type": "event"
+    },
+    {
+      "actor_label": "Workflow",
+      "agent_role": null,
+      "context_label": "Workflow \u00b7 objective_verifier",
+      "elapsed_seconds": 0,
+      "ended_at": "2026-06-16T09:34:04Z",
+      "event_id": "evt_000000000087",
+      "event_sequence": 87,
+      "event_type": "objective_verifier_adapter_completed",
+      "input_refs": [],
+      "node_id": "node_event_000000000087",
+      "output_refs": [],
+      "run_id": "run_20260616_093404_0addfe8a",
+      "runner_id": "objective_verifier",
+      "started_at": "2026-06-16T09:34:04Z",
+      "status": "objective_verifier_adapter_completed",
+      "summary": {
+        "highlights": [],
+        "one_line": "Event 87: Objective Verifier Adapter Completed for Workflow, runner objective_verifier, run run_20260616_093404_0addfe8a.",
+        "risks": []
+      },
+      "task_id": null,
+      "title": "Event 87: Objective Verifier Adapter Completed",
+      "type": "event"
+    },
+    {
+      "actor_label": "Workflow",
+      "agent_role": null,
+      "context_label": "Workflow",
+      "elapsed_seconds": 0,
+      "ended_at": "2026-06-16T09:34:04Z",
+      "event_id": "evt_000000000088",
+      "event_sequence": 88,
+      "event_type": "objective_verification_applied",
+      "input_refs": [],
+      "node_id": "node_event_000000000088",
+      "output_refs": [],
+      "run_id": null,
+      "runner_id": null,
+      "started_at": "2026-06-16T09:34:04Z",
+      "status": "objective_verification_applied",
+      "summary": {
+        "highlights": [],
+        "one_line": "Event 88: Objective Verification Applied for Workflow.",
+        "risks": []
+      },
+      "task_id": null,
+      "title": "Event 88: Objective Verification Applied",
+      "type": "event"
+    },
+    {
+      "actor_label": "Objective Verifier",
+      "agent_role": "objective_verifier",
+      "context_label": "Objective Verifier \u00b7 objective_verifier",
+      "elapsed_seconds": 0,
+      "ended_at": "2026-06-16T09:34:04Z",
+      "event_id": "evt_000000000089",
+      "event_sequence": 89,
+      "event_type": "objective_verifier_run_classified",
+      "input_refs": [],
+      "node_id": "node_event_000000000089",
+      "output_refs": [],
+      "run_id": "run_20260616_093404_0addfe8a",
+      "runner_id": "objective_verifier",
+      "started_at": "2026-06-16T09:34:04Z",
+      "status": "objective_verifier_run_classified",
+      "summary": {
+        "highlights": [],
+        "one_line": "Event 89: Objective Verifier Run Classified for Objective Verifier, runner objective_verifier, run run_20260616_093404_0addfe8a.",
+        "risks": []
+      },
+      "task_id": null,
+      "title": "Event 89: Objective Verifier Run Classified",
+      "type": "event"
+    },
+    {
+      "actor_label": "Scheduler",
+      "agent_role": null,
+      "context_label": "Scheduler",
+      "elapsed_seconds": 0,
+      "ended_at": "2026-06-16T09:34:04Z",
+      "event_id": "evt_000000000090",
+      "event_sequence": 90,
+      "event_type": "scheduler_exited",
+      "input_refs": [],
+      "node_id": "node_event_000000000090",
+      "output_refs": [],
+      "run_id": null,
+      "runner_id": null,
+      "started_at": "2026-06-16T09:34:04Z",
+      "status": "scheduler_exited",
+      "summary": {
+        "highlights": [],
+        "one_line": "Event 90: Scheduler Exited for Scheduler.",
+        "risks": []
+      },
+      "task_id": null,
+      "title": "Event 90: Scheduler Exited",
+      "type": "event"
+    },
+    {
+      "elapsed_seconds": 0,
+      "ended_at": "2026-06-16T09:34:04Z",
+      "input_refs": [
+        ".loopplane/workflows/wf_20260616_085d0238/runtime/objectives/run_20260616_093404_0addfe8a/agent_status.json"
+      ],
+      "node_id": "node_objective_verifier_run_20260616_093404_0addfe8a",
+      "output_refs": [
+        ".loopplane/workflows/wf_20260616_085d0238/runtime/objectives/run_20260616_093404_0addfe8a/run_execution.json"
+      ],
+      "run_id": "run_20260616_093404_0addfe8a",
+      "started_at": "2026-06-16T09:34:04Z",
+      "status": "applied",
+      "summary": {
+        "highlights": [],
+        "one_line": "Objective verifier adapter completed and agent_status.json is available.",
+        "risks": []
+      },
+      "task_id": null,
+      "title": "Objective verifier adapter completed and agent_status.json is available.",
+      "type": "objective_verifier"
+    },
+    {
+      "actor_label": "Scheduler",
+      "agent_role": null,
+      "context_label": "Scheduler",
+      "elapsed_seconds": 0,
+      "ended_at": "2026-06-16T09:34:03Z",
+      "event_id": "evt_000000000070",
+      "event_sequence": 70,
+      "event_type": "scheduler_started",
+      "input_refs": [],
+      "node_id": "node_event_000000000070",
+      "output_refs": [],
+      "run_id": null,
+      "runner_id": null,
+      "started_at": "2026-06-16T09:34:03Z",
+      "status": "scheduler_started",
+      "summary": {
+        "highlights": [],
+        "one_line": "Event 70: Scheduler Started for Scheduler.",
+        "risks": []
+      },
+      "task_id": null,
+      "title": "Event 70: Scheduler Started",
+      "type": "event"
+    },
+    {
+      "actor_label": "Scheduler",
+      "agent_role": null,
+      "context_label": "Scheduler",
+      "elapsed_seconds": 0,
+      "ended_at": "2026-06-16T09:34:03Z",
+      "event_id": "evt_000000000071",
+      "event_sequence": 71,
+      "event_type": "scheduler_tick",
+      "input_refs": [],
+      "node_id": "node_event_000000000071",
+      "output_refs": [],
+      "run_id": null,
+      "runner_id": null,
+      "started_at": "2026-06-16T09:34:03Z",
+      "status": "scheduler_tick",
+      "summary": {
+        "highlights": [],
+        "one_line": "Event 71: Scheduler Tick for Scheduler.",
+        "risks": []
+      },
+      "task_id": null,
+      "title": "Event 71: Scheduler Tick",
+      "type": "event"
+    },
+    {
+      "actor_label": "Scheduler",
+      "agent_role": null,
+      "context_label": "Scheduler",
+      "elapsed_seconds": 0,
+      "ended_at": "2026-06-16T09:34:03Z",
+      "event_id": "evt_000000000072",
+      "event_sequence": 72,
+      "event_type": "scheduler_action_selected",
+      "input_refs": [],
+      "node_id": "node_event_000000000072",
+      "output_refs": [],
+      "run_id": null,
+      "runner_id": null,
+      "started_at": "2026-06-16T09:34:03Z",
+      "status": "scheduler_action_selected",
+      "summary": {
+        "highlights": [],
+        "one_line": "Event 72: Scheduler Action Selected for Scheduler.",
+        "risks": []
+      },
+      "task_id": null,
+      "title": "Event 72: Scheduler Action Selected",
+      "type": "event"
+    },
+    {
+      "actor_label": "Scheduler",
+      "agent_role": null,
+      "context_label": "Scheduler",
+      "elapsed_seconds": 0,
+      "ended_at": "2026-06-16T09:34:03Z",
+      "event_id": "evt_000000000073",
+      "event_sequence": 73,
+      "event_type": "control_request_handled",
+      "input_refs": [],
+      "node_id": "node_event_000000000073",
+      "output_refs": [],
+      "run_id": null,
+      "runner_id": null,
+      "started_at": "2026-06-16T09:34:03Z",
+      "status": "control_request_handled",
+      "summary": {
+        "highlights": [],
+        "one_line": "Event 73: Control Request Handled for Scheduler.",
+        "risks": []
+      },
+      "task_id": null,
+      "title": "Event 73: Control Request Handled",
+      "type": "event"
+    },
+    {
+      "actor_label": "Scheduler",
+      "agent_role": null,
+      "context_label": "Scheduler",
+      "elapsed_seconds": 0,
+      "ended_at": "2026-06-16T09:34:03Z",
+      "event_id": "evt_000000000074",
+      "event_sequence": 74,
+      "event_type": "scheduler_tick",
+      "input_refs": [],
+      "node_id": "node_event_000000000074",
+      "output_refs": [],
+      "run_id": null,
+      "runner_id": null,
+      "started_at": "2026-06-16T09:34:03Z",
+      "status": "scheduler_tick",
+      "summary": {
+        "highlights": [],
+        "one_line": "Event 74: Scheduler Tick for Scheduler.",
+        "risks": []
+      },
+      "task_id": null,
+      "title": "Event 74: Scheduler Tick",
+      "type": "event"
+    },
+    {
+      "actor_label": "Scheduler",
+      "agent_role": null,
+      "context_label": "Scheduler",
+      "elapsed_seconds": 0,
+      "ended_at": "2026-06-16T09:34:03Z",
+      "event_id": "evt_000000000075",
+      "event_sequence": 75,
+      "event_type": "scheduler_action_selected",
+      "input_refs": [],
+      "node_id": "node_event_000000000075",
+      "output_refs": [],
+      "run_id": null,
+      "runner_id": null,
+      "started_at": "2026-06-16T09:34:03Z",
+      "status": "scheduler_action_selected",
+      "summary": {
+        "highlights": [],
+        "one_line": "Event 75: Scheduler Action Selected for Scheduler.",
+        "risks": []
+      },
+      "task_id": null,
+      "title": "Event 75: Scheduler Action Selected",
+      "type": "event"
+    },
+    {
+      "actor_label": "Objective Verifier",
+      "agent_role": "objective_verifier",
+      "context_label": "Objective Verifier \u00b7 objective_verifier",
+      "elapsed_seconds": 0,
+      "ended_at": "2026-06-16T09:34:03Z",
+      "event_id": "evt_000000000076",
+      "event_sequence": 76,
+      "event_type": "run_prepared",
+      "input_refs": [],
+      "node_id": "node_event_000000000076",
+      "output_refs": [],
+      "run_id": "run_20260616_093403_79be3aa2",
+      "runner_id": "objective_verifier",
+      "started_at": "2026-06-16T09:34:03Z",
+      "status": "run_prepared",
+      "summary": {
+        "highlights": [],
+        "one_line": "Event 76: Run Prepared for Objective Verifier, runner objective_verifier, run run_20260616_093403_79be3aa2.",
+        "risks": []
+      },
+      "task_id": null,
+      "title": "Event 76: Run Prepared",
+      "type": "event"
+    },
+    {
+      "actor_label": "Workflow",
+      "agent_role": null,
+      "context_label": "Workflow \u00b7 objective_verifier",
+      "elapsed_seconds": 0,
+      "ended_at": "2026-06-16T09:34:03Z",
+      "event_id": "evt_000000000077",
+      "event_sequence": 77,
+      "event_type": "objective_verifier_adapter_started",
+      "input_refs": [],
+      "node_id": "node_event_000000000077",
+      "output_refs": [],
+      "run_id": "run_20260616_093403_79be3aa2",
+      "runner_id": "objective_verifier",
+      "started_at": "2026-06-16T09:34:03Z",
+      "status": "objective_verifier_adapter_started",
+      "summary": {
+        "highlights": [],
+        "one_line": "Event 77: Objective Verifier Adapter Started for Workflow, runner objective_verifier, run run_20260616_093403_79be3aa2.",
+        "risks": []
+      },
+      "task_id": null,
+      "title": "Event 77: Objective Verifier Adapter Started",
+      "type": "event"
+    },
+    {
+      "actor_label": "Workflow",
+      "agent_role": null,
+      "context_label": "Workflow \u00b7 objective_verifier",
+      "elapsed_seconds": 0,
+      "ended_at": "2026-06-16T09:34:03Z",
+      "event_id": "evt_000000000078",
+      "event_sequence": 78,
+      "event_type": "objective_verifier_adapter_completed",
+      "input_refs": [],
+      "node_id": "node_event_000000000078",
+      "output_refs": [],
+      "run_id": "run_20260616_093403_79be3aa2",
+      "runner_id": "objective_verifier",
+      "started_at": "2026-06-16T09:34:03Z",
+      "status": "objective_verifier_adapter_completed",
+      "summary": {
+        "highlights": [],
+        "one_line": "Event 78: Objective Verifier Adapter Completed for Workflow, runner objective_verifier, run run_20260616_093403_79be3aa2.",
+        "risks": []
+      },
+      "task_id": null,
+      "title": "Event 78: Objective Verifier Adapter Completed",
+      "type": "event"
+    },
+    {
+      "actor_label": "Workflow",
+      "agent_role": null,
+      "context_label": "Workflow",
+      "elapsed_seconds": 0,
+      "ended_at": "2026-06-16T09:34:03Z",
+      "event_id": "evt_000000000079",
+      "event_sequence": 79,
+      "event_type": "objective_verification_applied",
+      "input_refs": [],
+      "node_id": "node_event_000000000079",
+      "output_refs": [],
+      "run_id": null,
+      "runner_id": null,
+      "started_at": "2026-06-16T09:34:03Z",
+      "status": "objective_verification_applied",
+      "summary": {
+        "highlights": [],
+        "one_line": "Event 79: Objective Verification Applied for Workflow.",
+        "risks": []
+      },
+      "task_id": null,
+      "title": "Event 79: Objective Verification Applied",
+      "type": "event"
+    },
+    {
+      "elapsed_seconds": 0,
+      "ended_at": "2026-06-16T09:34:03Z",
+      "input_refs": [
+        ".loopplane/workflows/wf_20260616_085d0238/runtime/objectives/run_20260616_093403_79be3aa2/agent_status.json"
+      ],
+      "node_id": "node_objective_verifier_run_20260616_093403_79be3aa2",
+      "output_refs": [
+        ".loopplane/workflows/wf_20260616_085d0238/runtime/objectives/run_20260616_093403_79be3aa2/run_execution.json"
+      ],
+      "run_id": "run_20260616_093403_79be3aa2",
+      "started_at": "2026-06-16T09:34:03Z",
+      "status": "applied",
+      "summary": {
+        "highlights": [],
+        "one_line": "Objective verifier adapter completed and agent_status.json is available.",
+        "risks": []
+      },
+      "task_id": null,
+      "title": "Objective verifier adapter completed and agent_status.json is available.",
+      "type": "objective_verifier"
+    },
+    {
+      "actor_label": "Workflow",
+      "agent_role": null,
+      "context_label": "Workflow \u00b7 objective_verifier",
+      "elapsed_seconds": 0,
+      "ended_at": "2026-06-16T09:34:02Z",
+      "event_id": "evt_000000000060",
+      "event_sequence": 60,
+      "event_type": "objective_verifier_adapter_completed",
+      "input_refs": [],
+      "node_id": "node_event_000000000060",
+      "output_refs": [],
+      "run_id": "run_20260616_093401_5bdc3dd4",
+      "runner_id": "objective_verifier",
+      "started_at": "2026-06-16T09:34:02Z",
+      "status": "objective_verifier_adapter_completed",
+      "summary": {
+        "highlights": [],
+        "one_line": "Event 60: Objective Verifier Adapter Completed for Workflow, runner objective_verifier, run run_20260616_093401_5bdc3dd4.",
+        "risks": []
+      },
+      "task_id": null,
+      "title": "Event 60: Objective Verifier Adapter Completed",
+      "type": "event"
+    },
+    {
+      "actor_label": "Workflow",
+      "agent_role": null,
+      "context_label": "Workflow",
+      "elapsed_seconds": 0,
+      "ended_at": "2026-06-16T09:34:02Z",
+      "event_id": "evt_000000000061",
+      "event_sequence": 61,
+      "event_type": "objective_verification_applied",
+      "input_refs": [],
+      "node_id": "node_event_000000000061",
+      "output_refs": [],
+      "run_id": null,
+      "runner_id": null,
+      "started_at": "2026-06-16T09:34:02Z",
+      "status": "objective_verification_applied",
+      "summary": {
+        "highlights": [],
+        "one_line": "Event 61: Objective Verification Applied for Workflow.",
+        "risks": []
+      },
+      "task_id": null,
+      "title": "Event 61: Objective Verification Applied",
+      "type": "event"
+    },
+    {
+      "actor_label": "Objective Verifier",
+      "agent_role": "objective_verifier",
+      "context_label": "Objective Verifier \u00b7 objective_verifier",
+      "elapsed_seconds": 0,
+      "ended_at": "2026-06-16T09:34:02Z",
+      "event_id": "evt_000000000062",
+      "event_sequence": 62,
+      "event_type": "objective_verifier_run_classified",
+      "input_refs": [],
+      "node_id": "node_event_000000000062",
+      "output_refs": [],
+      "run_id": "run_20260616_093401_5bdc3dd4",
+      "runner_id": "objective_verifier",
+      "started_at": "2026-06-16T09:34:02Z",
+      "status": "objective_verifier_run_classified",
+      "summary": {
+        "highlights": [],
+        "one_line": "Event 62: Objective Verifier Run Classified for Objective Verifier, runner objective_verifier, run run_20260616_093401_5bdc3dd4.",
+        "risks": []
+      },
+      "task_id": null,
+      "title": "Event 62: Objective Verifier Run Classified",
+      "type": "event"
+    },
+    {
+      "actor_label": "Scheduler",
+      "agent_role": null,
+      "context_label": "Scheduler",
+      "elapsed_seconds": 0,
+      "ended_at": "2026-06-16T09:34:02Z",
+      "event_id": "evt_000000000063",
+      "event_sequence": 63,
+      "event_type": "scheduler_exited",
+      "input_refs": [],
+      "node_id": "node_event_000000000063",
+      "output_refs": [],
+      "run_id": null,
+      "runner_id": null,
+      "started_at": "2026-06-16T09:34:02Z",
+      "status": "scheduler_exited",
+      "summary": {
+        "highlights": [],
+        "one_line": "Event 63: Scheduler Exited for Scheduler.",
+        "risks": []
+      },
+      "task_id": null,
+      "title": "Event 63: Scheduler Exited",
+      "type": "event"
+    },
+    {
+      "actor_label": "Workflow",
+      "agent_role": null,
+      "context_label": "Workflow",
+      "elapsed_seconds": 0,
+      "ended_at": "2026-06-16T09:34:02Z",
+      "event_id": "evt_000000000064",
+      "event_sequence": 64,
+      "event_type": "manual_plan_change_detected",
+      "input_refs": [],
+      "node_id": "node_event_000000000064",
+      "output_refs": [],
+      "run_id": null,
+      "runner_id": null,
+      "started_at": "2026-06-16T09:34:02Z",
+      "status": "manual_plan_change_detected",
+      "summary": {
+        "highlights": [],
+        "one_line": "Event 64: Manual Plan Change Detected for Workflow.",
+        "risks": []
+      },
+      "task_id": null,
+      "title": "Event 64: Manual Plan Change Detected",
+      "type": "event"
+    },
+    {
+      "actor_label": "Scheduler",
+      "agent_role": null,
+      "context_label": "Scheduler",
+      "elapsed_seconds": 0,
+      "ended_at": "2026-06-16T09:34:02Z",
+      "event_id": "evt_000000000065",
+      "event_sequence": 65,
+      "event_type": "scheduler_started",
+      "input_refs": [],
+      "node_id": "node_event_000000000065",
+      "output_refs": [],
+      "run_id": null,
+      "runner_id": null,
+      "started_at": "2026-06-16T09:34:02Z",
+      "status": "scheduler_started",
+      "summary": {
+        "highlights": [],
+        "one_line": "Event 65: Scheduler Started for Scheduler.",
+        "risks": []
+      },
+      "task_id": null,
+      "title": "Event 65: Scheduler Started",
+      "type": "event"
+    },
+    {
+      "actor_label": "Scheduler",
+      "agent_role": null,
+      "context_label": "Scheduler",
+      "elapsed_seconds": 0,
+      "ended_at": "2026-06-16T09:34:02Z",
+      "event_id": "evt_000000000066",
+      "event_sequence": 66,
+      "event_type": "scheduler_tick",
+      "input_refs": [],
+      "node_id": "node_event_000000000066",
+      "output_refs": [],
+      "run_id": null,
+      "runner_id": null,
+      "started_at": "2026-06-16T09:34:02Z",
+      "status": "scheduler_tick",
+      "summary": {
+        "highlights": [],
+        "one_line": "Event 66: Scheduler Tick for Scheduler.",
+        "risks": []
+      },
+      "task_id": null,
+      "title": "Event 66: Scheduler Tick",
+      "type": "event"
+    },
+    {
+      "actor_label": "Scheduler",
+      "agent_role": null,
+      "context_label": "Scheduler",
+      "elapsed_seconds": 0,
+      "ended_at": "2026-06-16T09:34:02Z",
+      "event_id": "evt_000000000067",
+      "event_sequence": 67,
+      "event_type": "scheduler_action_selected",
+      "input_refs": [],
+      "node_id": "node_event_000000000067",
+      "output_refs": [],
+      "run_id": null,
+      "runner_id": null,
+      "started_at": "2026-06-16T09:34:02Z",
+      "status": "scheduler_action_selected",
+      "summary": {
+        "highlights": [],
+        "one_line": "Event 67: Scheduler Action Selected for Scheduler.",
+        "risks": []
+      },
+      "task_id": null,
+      "title": "Event 67: Scheduler Action Selected",
+      "type": "event"
+    },
+    {
+      "actor_label": "Scheduler",
+      "agent_role": null,
+      "context_label": "Scheduler",
+      "elapsed_seconds": 0,
+      "ended_at": "2026-06-16T09:34:02Z",
+      "event_id": "evt_000000000068",
+      "event_sequence": 68,
+      "event_type": "scheduler_waiting",
+      "input_refs": [],
+      "node_id": "node_event_000000000068",
+      "output_refs": [],
+      "run_id": null,
+      "runner_id": null,
+      "started_at": "2026-06-16T09:34:02Z",
+      "status": "scheduler_waiting",
+      "summary": {
+        "highlights": [],
+        "one_line": "Event 68: Scheduler Waiting for Scheduler.",
+        "risks": []
+      },
+      "task_id": null,
+      "title": "Event 68: Scheduler Waiting",
+      "type": "event"
+    },
+    {
+      "actor_label": "Scheduler",
+      "agent_role": null,
+      "context_label": "Scheduler",
+      "elapsed_seconds": 0,
+      "ended_at": "2026-06-16T09:34:02Z",
+      "event_id": "evt_000000000069",
+      "event_sequence": 69,
+      "event_type": "scheduler_exited",
+      "input_refs": [],
+      "node_id": "node_event_000000000069",
+      "output_refs": [],
+      "run_id": null,
+      "runner_id": null,
+      "started_at": "2026-06-16T09:34:02Z",
+      "status": "scheduler_exited",
+      "summary": {
+        "highlights": [],
+        "one_line": "Event 69: Scheduler Exited for Scheduler.",
+        "risks": []
+      },
+      "task_id": null,
+      "title": "Event 69: Scheduler Exited",
+      "type": "event"
+    },
+    {
+      "elapsed_seconds": 0,
+      "ended_at": "2026-06-16T09:34:02Z",
+      "input_refs": [
+        ".loopplane/workflows/wf_20260616_085d0238/runtime/objectives/run_20260616_093401_5bdc3dd4/agent_status.json"
+      ],
+      "node_id": "node_objective_verifier_run_20260616_093401_5bdc3dd4",
+      "output_refs": [
+        ".loopplane/workflows/wf_20260616_085d0238/runtime/objectives/run_20260616_093401_5bdc3dd4/run_execution.json"
+      ],
+      "run_id": "run_20260616_093401_5bdc3dd4",
+      "started_at": "2026-06-16T09:34:02Z",
+      "status": "applied",
+      "summary": {
+        "highlights": [],
+        "one_line": "Objective verifier adapter completed and agent_status.json is available.",
+        "risks": []
+      },
+      "task_id": null,
+      "title": "Objective verifier adapter completed and agent_status.json is available.",
+      "type": "objective_verifier"
+    },
+    {
+      "actor_label": "Scheduler",
+      "agent_role": null,
+      "context_label": "Scheduler",
+      "elapsed_seconds": 0,
+      "ended_at": "2026-06-16T09:34:01Z",
+      "event_id": "evt_000000000043",
+      "event_sequence": 43,
+      "event_type": "scheduler_started",
+      "input_refs": [],
+      "node_id": "node_event_000000000043",
+      "output_refs": [],
+      "run_id": null,
+      "runner_id": null,
+      "started_at": "2026-06-16T09:34:01Z",
+      "status": "scheduler_started",
+      "summary": {
+        "highlights": [],
+        "one_line": "Event 43: Scheduler Started for Scheduler.",
+        "risks": []
+      },
+      "task_id": null,
+      "title": "Event 43: Scheduler Started",
+      "type": "event"
+    },
+    {
+      "actor_label": "Scheduler",
+      "agent_role": null,
+      "context_label": "Scheduler",
+      "elapsed_seconds": 0,
+      "ended_at": "2026-06-16T09:34:01Z",
+      "event_id": "evt_000000000044",
+      "event_sequence": 44,
+      "event_type": "scheduler_tick",
+      "input_refs": [],
+      "node_id": "node_event_000000000044",
+      "output_refs": [],
+      "run_id": null,
+      "runner_id": null,
+      "started_at": "2026-06-16T09:34:01Z",
+      "status": "scheduler_tick",
+      "summary": {
+        "highlights": [],
+        "one_line": "Event 44: Scheduler Tick for Scheduler.",
+        "risks": []
+      },
+      "task_id": null,
+      "title": "Event 44: Scheduler Tick",
+      "type": "event"
+    },
+    {
+      "actor_label": "Scheduler",
+      "agent_role": null,
+      "context_label": "Scheduler",
+      "elapsed_seconds": 0,
+      "ended_at": "2026-06-16T09:34:01Z",
+      "event_id": "evt_000000000045",
+      "event_sequence": 45,
+      "event_type": "scheduler_action_selected",
+      "input_refs": [],
+      "node_id": "node_event_000000000045",
+      "output_refs": [],
+      "run_id": null,
+      "runner_id": null,
+      "started_at": "2026-06-16T09:34:01Z",
+      "status": "scheduler_action_selected",
+      "summary": {
+        "highlights": [],
+        "one_line": "Event 45: Scheduler Action Selected for Scheduler.",
+        "risks": []
+      },
+      "task_id": null,
+      "title": "Event 45: Scheduler Action Selected",
+      "type": "event"
+    },
+    {
+      "actor_label": "Scheduler",
+      "agent_role": null,
+      "context_label": "Scheduler",
+      "elapsed_seconds": 0,
+      "ended_at": "2026-06-16T09:34:01Z",
+      "event_id": "evt_000000000046",
+      "event_sequence": 46,
+      "event_type": "control_request_handled",
+      "input_refs": [],
+      "node_id": "node_event_000000000046",
+      "output_refs": [],
+      "run_id": null,
+      "runner_id": null,
+      "started_at": "2026-06-16T09:34:01Z",
+      "status": "control_request_handled",
+      "summary": {
+        "highlights": [],
+        "one_line": "Event 46: Control Request Handled for Scheduler.",
+        "risks": []
+      },
+      "task_id": null,
+      "title": "Event 46: Control Request Handled",
+      "type": "event"
+    },
+    {
+      "actor_label": "Scheduler",
+      "agent_role": null,
+      "context_label": "Scheduler",
+      "elapsed_seconds": 0,
+      "ended_at": "2026-06-16T09:34:01Z",
+      "event_id": "evt_000000000047",
+      "event_sequence": 47,
+      "event_type": "scheduler_tick",
+      "input_refs": [],
+      "node_id": "node_event_000000000047",
+      "output_refs": [],
+      "run_id": null,
+      "runner_id": null,
+      "started_at": "2026-06-16T09:34:01Z",
+      "status": "scheduler_tick",
+      "summary": {
+        "highlights": [],
+        "one_line": "Event 47: Scheduler Tick for Scheduler.",
+        "risks": []
+      },
+      "task_id": null,
+      "title": "Event 47: Scheduler Tick",
+      "type": "event"
+    },
+    {
+      "actor_label": "Scheduler",
+      "agent_role": null,
+      "context_label": "Scheduler",
+      "elapsed_seconds": 0,
+      "ended_at": "2026-06-16T09:34:01Z",
+      "event_id": "evt_000000000048",
+      "event_sequence": 48,
+      "event_type": "scheduler_action_selected",
+      "input_refs": [],
+      "node_id": "node_event_000000000048",
+      "output_refs": [],
+      "run_id": null,
+      "runner_id": null,
+      "started_at": "2026-06-16T09:34:01Z",
+      "status": "scheduler_action_selected",
+      "summary": {
+        "highlights": [],
+        "one_line": "Event 48: Scheduler Action Selected for Scheduler.",
+        "risks": []
+      },
+      "task_id": null,
+      "title": "Event 48: Scheduler Action Selected",
+      "type": "event"
+    },
+    {
+      "actor_label": "Objective Verifier",
+      "agent_role": "objective_verifier",
+      "context_label": "Objective Verifier \u00b7 objective_verifier",
+      "elapsed_seconds": 0,
+      "ended_at": "2026-06-16T09:34:01Z",
+      "event_id": "evt_000000000049",
+      "event_sequence": 49,
+      "event_type": "run_prepared",
+      "input_refs": [],
+      "node_id": "node_event_000000000049",
+      "output_refs": [],
+      "run_id": "run_20260616_093401_65ad24b8",
+      "runner_id": "objective_verifier",
+      "started_at": "2026-06-16T09:34:01Z",
+      "status": "run_prepared",
+      "summary": {
+        "highlights": [],
+        "one_line": "Event 49: Run Prepared for Objective Verifier, runner objective_verifier, run run_20260616_093401_65ad24b8.",
+        "risks": []
+      },
+      "task_id": null,
+      "title": "Event 49: Run Prepared",
+      "type": "event"
+    },
+    {
+      "actor_label": "Workflow",
+      "agent_role": null,
+      "context_label": "Workflow \u00b7 objective_verifier",
+      "elapsed_seconds": 0,
+      "ended_at": "2026-06-16T09:34:01Z",
+      "event_id": "evt_000000000050",
+      "event_sequence": 50,
+      "event_type": "objective_verifier_adapter_started",
+      "input_refs": [],
+      "node_id": "node_event_000000000050",
+      "output_refs": [],
+      "run_id": "run_20260616_093401_65ad24b8",
+      "runner_id": "objective_verifier",
+      "started_at": "2026-06-16T09:34:01Z",
+      "status": "objective_verifier_adapter_started",
+      "summary": {
+        "highlights": [],
+        "one_line": "Event 50: Objective Verifier Adapter Started for Workflow, runner objective_verifier, run run_20260616_093401_65ad24b8.",
+        "risks": []
+      },
+      "task_id": null,
+      "title": "Event 50: Objective Verifier Adapter Started",
+      "type": "event"
+    },
+    {
+      "actor_label": "Workflow",
+      "agent_role": null,
+      "context_label": "Workflow \u00b7 objective_verifier",
+      "elapsed_seconds": 0,
+      "ended_at": "2026-06-16T09:34:01Z",
+      "event_id": "evt_000000000051",
+      "event_sequence": 51,
+      "event_type": "objective_verifier_adapter_completed",
+      "input_refs": [],
+      "node_id": "node_event_000000000051",
+      "output_refs": [],
+      "run_id": "run_20260616_093401_65ad24b8",
+      "runner_id": "objective_verifier",
+      "started_at": "2026-06-16T09:34:01Z",
+      "status": "objective_verifier_adapter_completed",
+      "summary": {
+        "highlights": [],
+        "one_line": "Event 51: Objective Verifier Adapter Completed for Workflow, runner objective_verifier, run run_20260616_093401_65ad24b8.",
+        "risks": []
+      },
+      "task_id": null,
+      "title": "Event 51: Objective Verifier Adapter Completed",
+      "type": "event"
+    },
+    {
+      "actor_label": "Workflow",
+      "agent_role": null,
+      "context_label": "Workflow",
+      "elapsed_seconds": 0,
+      "ended_at": "2026-06-16T09:34:01Z",
+      "event_id": "evt_000000000052",
+      "event_sequence": 52,
+      "event_type": "objective_verification_applied",
+      "input_refs": [],
+      "node_id": "node_event_000000000052",
+      "output_refs": [],
+      "run_id": null,
+      "runner_id": null,
+      "started_at": "2026-06-16T09:34:01Z",
+      "status": "objective_verification_applied",
+      "summary": {
+        "highlights": [],
+        "one_line": "Event 52: Objective Verification Applied for Workflow.",
+        "risks": []
+      },
+      "task_id": null,
+      "title": "Event 52: Objective Verification Applied",
+      "type": "event"
+    },
+    {
+      "actor_label": "Objective Verifier",
+      "agent_role": "objective_verifier",
+      "context_label": "Objective Verifier \u00b7 objective_verifier",
+      "elapsed_seconds": 0,
+      "ended_at": "2026-06-16T09:34:01Z",
+      "event_id": "evt_000000000053",
+      "event_sequence": 53,
+      "event_type": "objective_verifier_run_classified",
+      "input_refs": [],
+      "node_id": "node_event_000000000053",
+      "output_refs": [],
+      "run_id": "run_20260616_093401_65ad24b8",
+      "runner_id": "objective_verifier",
+      "started_at": "2026-06-16T09:34:01Z",
+      "status": "objective_verifier_run_classified",
+      "summary": {
+        "highlights": [],
+        "one_line": "Event 53: Objective Verifier Run Classified for Objective Verifier, runner objective_verifier, run run_20260616_093401_65ad24b8.",
+        "risks": []
+      },
+      "task_id": null,
+      "title": "Event 53: Objective Verifier Run Classified",
+      "type": "event"
+    },
+    {
+      "actor_label": "Scheduler",
+      "agent_role": null,
+      "context_label": "Scheduler",
+      "elapsed_seconds": 0,
+      "ended_at": "2026-06-16T09:34:01Z",
+      "event_id": "evt_000000000054",
+      "event_sequence": 54,
+      "event_type": "scheduler_exited",
+      "input_refs": [],
+      "node_id": "node_event_000000000054",
+      "output_refs": [],
+      "run_id": null,
+      "runner_id": null,
+      "started_at": "2026-06-16T09:34:01Z",
+      "status": "scheduler_exited",
+      "summary": {
+        "highlights": [],
+        "one_line": "Event 54: Scheduler Exited for Scheduler.",
+        "risks": []
+      },
+      "task_id": null,
+      "title": "Event 54: Scheduler Exited",
+      "type": "event"
+    },
+    {
+      "actor_label": "Scheduler",
+      "agent_role": null,
+      "context_label": "Scheduler",
+      "elapsed_seconds": 0,
+      "ended_at": "2026-06-16T09:34:01Z",
+      "event_id": "evt_000000000055",
+      "event_sequence": 55,
+      "event_type": "scheduler_started",
+      "input_refs": [],
+      "node_id": "node_event_000000000055",
+      "output_refs": [],
+      "run_id": null,
+      "runner_id": null,
+      "started_at": "2026-06-16T09:34:01Z",
+      "status": "scheduler_started",
+      "summary": {
+        "highlights": [],
+        "one_line": "Event 55: Scheduler Started for Scheduler.",
+        "risks": []
+      },
+      "task_id": null,
+      "title": "Event 55: Scheduler Started",
+      "type": "event"
+    },
+    {
+      "actor_label": "Scheduler",
+      "agent_role": null,
+      "context_label": "Scheduler",
+      "elapsed_seconds": 0,
+      "ended_at": "2026-06-16T09:34:01Z",
+      "event_id": "evt_000000000056",
+      "event_sequence": 56,
+      "event_type": "scheduler_tick",
+      "input_refs": [],
+      "node_id": "node_event_000000000056",
+      "output_refs": [],
+      "run_id": null,
+      "runner_id": null,
+      "started_at": "2026-06-16T09:34:01Z",
+      "status": "scheduler_tick",
+      "summary": {
+        "highlights": [],
+        "one_line": "Event 56: Scheduler Tick for Scheduler.",
+        "risks": []
+      },
+      "task_id": null,
+      "title": "Event 56: Scheduler Tick",
+      "type": "event"
+    },
+    {
+      "actor_label": "Scheduler",
+      "agent_role": null,
+      "context_label": "Scheduler",
+      "elapsed_seconds": 0,
+      "ended_at": "2026-06-16T09:34:01Z",
+      "event_id": "evt_000000000057",
+      "event_sequence": 57,
+      "event_type": "scheduler_action_selected",
+      "input_refs": [],
+      "node_id": "node_event_000000000057",
+      "output_refs": [],
+      "run_id": null,
+      "runner_id": null,
+      "started_at": "2026-06-16T09:34:01Z",
+      "status": "scheduler_action_selected",
+      "summary": {
+        "highlights": [],
+        "one_line": "Event 57: Scheduler Action Selected for Scheduler.",
+        "risks": []
+      },
+      "task_id": null,
+      "title": "Event 57: Scheduler Action Selected",
+      "type": "event"
+    },
+    {
+      "actor_label": "Objective Verifier",
+      "agent_role": "objective_verifier",
+      "context_label": "Objective Verifier \u00b7 objective_verifier",
+      "elapsed_seconds": 0,
+      "ended_at": "2026-06-16T09:34:01Z",
+      "event_id": "evt_000000000058",
+      "event_sequence": 58,
+      "event_type": "run_prepared",
+      "input_refs": [],
+      "node_id": "node_event_000000000058",
+      "output_refs": [],
+      "run_id": "run_20260616_093401_5bdc3dd4",
+      "runner_id": "objective_verifier",
+      "started_at": "2026-06-16T09:34:01Z",
+      "status": "run_prepared",
+      "summary": {
+        "highlights": [],
+        "one_line": "Event 58: Run Prepared for Objective Verifier, runner objective_verifier, run run_20260616_093401_5bdc3dd4.",
+        "risks": []
+      },
+      "task_id": null,
+      "title": "Event 58: Run Prepared",
+      "type": "event"
+    },
+    {
+      "actor_label": "Workflow",
+      "agent_role": null,
+      "context_label": "Workflow \u00b7 objective_verifier",
+      "elapsed_seconds": 0,
+      "ended_at": "2026-06-16T09:34:01Z",
+      "event_id": "evt_000000000059",
+      "event_sequence": 59,
+      "event_type": "objective_verifier_adapter_started",
+      "input_refs": [],
+      "node_id": "node_event_000000000059",
+      "output_refs": [],
+      "run_id": "run_20260616_093401_5bdc3dd4",
+      "runner_id": "objective_verifier",
+      "started_at": "2026-06-16T09:34:01Z",
+      "status": "objective_verifier_adapter_started",
+      "summary": {
+        "highlights": [],
+        "one_line": "Event 59: Objective Verifier Adapter Started for Workflow, runner objective_verifier, run run_20260616_093401_5bdc3dd4.",
+        "risks": []
+      },
+      "task_id": null,
+      "title": "Event 59: Objective Verifier Adapter Started",
+      "type": "event"
+    },
+    {
+      "elapsed_seconds": 0,
+      "ended_at": "2026-06-16T09:34:01Z",
+      "input_refs": [
+        ".loopplane/workflows/wf_20260616_085d0238/runtime/objectives/run_20260616_093401_65ad24b8/agent_status.json"
+      ],
+      "node_id": "node_objective_verifier_run_20260616_093401_65ad24b8",
+      "output_refs": [
+        ".loopplane/workflows/wf_20260616_085d0238/runtime/objectives/run_20260616_093401_65ad24b8/run_execution.json"
+      ],
+      "run_id": "run_20260616_093401_65ad24b8",
+      "started_at": "2026-06-16T09:34:01Z",
+      "status": "applied",
+      "summary": {
+        "highlights": [],
+        "one_line": "Objective verifier adapter completed and agent_status.json is available.",
+        "risks": []
+      },
+      "task_id": null,
+      "title": "Objective verifier adapter completed and agent_status.json is available.",
+      "type": "objective_verifier"
+    },
+    {
+      "actor_label": "Workflow",
+      "agent_role": null,
+      "context_label": "Workflow",
+      "elapsed_seconds": 0,
+      "ended_at": "2026-06-16T09:34:00Z",
+      "event_id": "evt_000000000037",
+      "event_sequence": 37,
+      "event_type": "manual_plan_change_detected",
+      "input_refs": [],
+      "node_id": "node_event_000000000037",
+      "output_refs": [],
+      "run_id": null,
+      "runner_id": null,
+      "started_at": "2026-06-16T09:34:00Z",
+      "status": "manual_plan_change_detected",
+      "summary": {
+        "highlights": [],
+        "one_line": "Event 37: Manual Plan Change Detected for Workflow.",
+        "risks": []
+      },
+      "task_id": null,
+      "title": "Event 37: Manual Plan Change Detected",
+      "type": "event"
+    },
+    {
+      "actor_label": "Scheduler",
+      "agent_role": null,
+      "context_label": "Scheduler",
+      "elapsed_seconds": 0,
+      "ended_at": "2026-06-16T09:34:00Z",
+      "event_id": "evt_000000000038",
+      "event_sequence": 38,
+      "event_type": "scheduler_started",
+      "input_refs": [],
+      "node_id": "node_event_000000000038",
+      "output_refs": [],
+      "run_id": null,
+      "runner_id": null,
+      "started_at": "2026-06-16T09:34:00Z",
+      "status": "scheduler_started",
+      "summary": {
+        "highlights": [],
+        "one_line": "Event 38: Scheduler Started for Scheduler.",
+        "risks": []
+      },
+      "task_id": null,
+      "title": "Event 38: Scheduler Started",
+      "type": "event"
+    },
+    {
+      "actor_label": "Scheduler",
+      "agent_role": null,
+      "context_label": "Scheduler",
+      "elapsed_seconds": 0,
+      "ended_at": "2026-06-16T09:34:00Z",
+      "event_id": "evt_000000000039",
+      "event_sequence": 39,
+      "event_type": "scheduler_tick",
+      "input_refs": [],
+      "node_id": "node_event_000000000039",
+      "output_refs": [],
+      "run_id": null,
+      "runner_id": null,
+      "started_at": "2026-06-16T09:34:00Z",
+      "status": "scheduler_tick",
+      "summary": {
+        "highlights": [],
+        "one_line": "Event 39: Scheduler Tick for Scheduler.",
+        "risks": []
+      },
+      "task_id": null,
+      "title": "Event 39: Scheduler Tick",
+      "type": "event"
+    },
+    {
+      "actor_label": "Scheduler",
+      "agent_role": null,
+      "context_label": "Scheduler",
+      "elapsed_seconds": 0,
+      "ended_at": "2026-06-16T09:34:00Z",
+      "event_id": "evt_000000000040",
+      "event_sequence": 40,
+      "event_type": "scheduler_action_selected",
+      "input_refs": [],
+      "node_id": "node_event_000000000040",
+      "output_refs": [],
+      "run_id": null,
+      "runner_id": null,
+      "started_at": "2026-06-16T09:34:00Z",
+      "status": "scheduler_action_selected",
+      "summary": {
+        "highlights": [],
+        "one_line": "Event 40: Scheduler Action Selected for Scheduler.",
+        "risks": []
+      },
+      "task_id": null,
+      "title": "Event 40: Scheduler Action Selected",
+      "type": "event"
+    },
+    {
+      "actor_label": "Scheduler",
+      "agent_role": null,
+      "context_label": "Scheduler",
+      "elapsed_seconds": 0,
+      "ended_at": "2026-06-16T09:34:00Z",
+      "event_id": "evt_000000000041",
+      "event_sequence": 41,
+      "event_type": "scheduler_waiting",
+      "input_refs": [],
+      "node_id": "node_event_000000000041",
+      "output_refs": [],
+      "run_id": null,
+      "runner_id": null,
+      "started_at": "2026-06-16T09:34:00Z",
+      "status": "scheduler_waiting",
+      "summary": {
+        "highlights": [],
+        "one_line": "Event 41: Scheduler Waiting for Scheduler.",
+        "risks": []
+      },
+      "task_id": null,
+      "title": "Event 41: Scheduler Waiting",
+      "type": "event"
+    },
+    {
+      "actor_label": "Scheduler",
+      "agent_role": null,
+      "context_label": "Scheduler",
+      "elapsed_seconds": 0,
+      "ended_at": "2026-06-16T09:34:00Z",
+      "event_id": "evt_000000000042",
+      "event_sequence": 42,
+      "event_type": "scheduler_exited",
+      "input_refs": [],
+      "node_id": "node_event_000000000042",
+      "output_refs": [],
+      "run_id": null,
+      "runner_id": null,
+      "started_at": "2026-06-16T09:34:00Z",
+      "status": "scheduler_exited",
+      "summary": {
+        "highlights": [],
+        "one_line": "Event 42: Scheduler Exited for Scheduler.",
+        "risks": []
+      },
+      "task_id": null,
+      "title": "Event 42: Scheduler Exited",
+      "type": "event"
+    },
+    {
+      "actor_label": "Summary",
+      "agent_role": "summary",
+      "context_label": "Summary \u00b7 summary",
+      "elapsed_seconds": 0,
+      "ended_at": "2026-06-16T09:33:59Z",
+      "event_id": "evt_000000000026",
+      "event_sequence": 26,
+      "event_type": "run_prepared",
+      "input_refs": [],
+      "node_id": "node_event_000000000026",
+      "output_refs": [],
+      "run_id": "run_20260616_093359_8eb2df8c",
+      "runner_id": "summary",
+      "started_at": "2026-06-16T09:33:59Z",
+      "status": "run_prepared",
+      "summary": {
+        "highlights": [],
+        "one_line": "Event 26: Run Prepared for Summary, runner summary, run run_20260616_093359_8eb2df8c.",
+        "risks": []
+      },
+      "task_id": null,
+      "title": "Event 26: Run Prepared",
+      "type": "event"
+    },
+    {
+      "acceptance": "Markdown report includes a ranked data table.",
+      "actor_label": "Workflow",
+      "agent_role": null,
+      "context_label": "Phase PF: Portfolio Evidence \u00b7 PF02 \u00b7 Workflow",
+      "deliverables": "subprojects/portfolio_summary/report.md and figures/PF02_figure.svg",
+      "elapsed_seconds": 0,
+      "ended_at": "2026-06-16T09:33:59Z",
+      "event_id": "evt_000000000027",
+      "event_sequence": 27,
+      "event_type": "human_summary_written",
+      "evidence_root": ".loopplane/workflows/wf_20260616_085d0238/results/PF02/",
+      "input_refs": [],
+      "latest_path": ".loopplane/workflows/wf_20260616_085d0238/results/PF02/latest.json",
+      "node_id": "node_event_000000000027",
+      "output_refs": [],
+      "phase": "Phase PF: Portfolio Evidence",
+      "run_id": null,
+      "runner_id": null,
+      "started_at": "2026-06-16T09:33:59Z",
+      "status": "human_summary_written",
+      "summary": {
+        "highlights": [],
+        "one_line": "Event 27: Human Summary Written for task PF02, Workflow.",
+        "risks": []
+      },
+      "task_id": "PF02",
+      "task_title": "Analyze civic analytics portfolio outcomes",
+      "title": "Event 27: Human Summary Written",
+      "type": "event"
+    },
+    {
+      "actor_label": "Workflow",
+      "agent_role": null,
+      "context_label": "Workflow",
+      "elapsed_seconds": 0,
+      "ended_at": "2026-06-16T09:33:59Z",
+      "event_id": "evt_000000000028",
+      "event_sequence": 28,
+      "event_type": "human_summary_written",
+      "input_refs": [],
+      "node_id": "node_event_000000000028",
+      "output_refs": [],
+      "run_id": null,
+      "runner_id": null,
+      "started_at": "2026-06-16T09:33:59Z",
+      "status": "human_summary_written",
+      "summary": {
+        "highlights": [],
+        "one_line": "Event 28: Human Summary Written for Workflow.",
+        "risks": []
+      },
+      "task_id": null,
+      "title": "Event 28: Human Summary Written",
+      "type": "event"
+    },
+    {
+      "actor_label": "Scheduler",
+      "agent_role": null,
+      "context_label": "Scheduler",
+      "elapsed_seconds": 0,
+      "ended_at": "2026-06-16T09:33:59Z",
+      "event_id": "evt_000000000029",
+      "event_sequence": 29,
+      "event_type": "scheduler_tick",
+      "input_refs": [],
+      "node_id": "node_event_000000000029",
+      "output_refs": [],
+      "run_id": null,
+      "runner_id": null,
+      "started_at": "2026-06-16T09:33:59Z",
+      "status": "scheduler_tick",
+      "summary": {
+        "highlights": [],
+        "one_line": "Event 29: Scheduler Tick for Scheduler.",
+        "risks": []
+      },
+      "task_id": null,
+      "title": "Event 29: Scheduler Tick",
+      "type": "event"
+    },
+    {
+      "actor_label": "Scheduler",
+      "agent_role": null,
+      "context_label": "Scheduler",
+      "elapsed_seconds": 0,
+      "ended_at": "2026-06-16T09:33:59Z",
+      "event_id": "evt_000000000030",
+      "event_sequence": 30,
+      "event_type": "scheduler_action_selected",
+      "input_refs": [],
+      "node_id": "node_event_000000000030",
+      "output_refs": [],
+      "run_id": null,
+      "runner_id": null,
+      "started_at": "2026-06-16T09:33:59Z",
+      "status": "scheduler_action_selected",
+      "summary": {
+        "highlights": [],
+        "one_line": "Event 30: Scheduler Action Selected for Scheduler.",
+        "risks": []
+      },
+      "task_id": null,
+      "title": "Event 30: Scheduler Action Selected",
+      "type": "event"
+    },
+    {
+      "actor_label": "Objective Verifier",
+      "agent_role": "objective_verifier",
+      "context_label": "Objective Verifier \u00b7 objective_verifier",
+      "elapsed_seconds": 0,
+      "ended_at": "2026-06-16T09:33:59Z",
+      "event_id": "evt_000000000031",
+      "event_sequence": 31,
+      "event_type": "run_prepared",
+      "input_refs": [],
+      "node_id": "node_event_000000000031",
+      "output_refs": [],
+      "run_id": "run_20260616_093359_04140838",
+      "runner_id": "objective_verifier",
+      "started_at": "2026-06-16T09:33:59Z",
+      "status": "run_prepared",
+      "summary": {
+        "highlights": [],
+        "one_line": "Event 31: Run Prepared for Objective Verifier, runner objective_verifier, run run_20260616_093359_04140838.",
+        "risks": []
+      },
+      "task_id": null,
+      "title": "Event 31: Run Prepared",
+      "type": "event"
+    },
+    {
+      "actor_label": "Workflow",
+      "agent_role": null,
+      "context_label": "Workflow \u00b7 objective_verifier",
+      "elapsed_seconds": 0,
+      "ended_at": "2026-06-16T09:33:59Z",
+      "event_id": "evt_000000000032",
+      "event_sequence": 32,
+      "event_type": "objective_verifier_adapter_started",
+      "input_refs": [],
+      "node_id": "node_event_000000000032",
+      "output_refs": [],
+      "run_id": "run_20260616_093359_04140838",
+      "runner_id": "objective_verifier",
+      "started_at": "2026-06-16T09:33:59Z",
+      "status": "objective_verifier_adapter_started",
+      "summary": {
+        "highlights": [],
+        "one_line": "Event 32: Objective Verifier Adapter Started for Workflow, runner objective_verifier, run run_20260616_093359_04140838.",
+        "risks": []
+      },
+      "task_id": null,
+      "title": "Event 32: Objective Verifier Adapter Started",
+      "type": "event"
+    },
+    {
+      "actor_label": "Workflow",
+      "agent_role": null,
+      "context_label": "Workflow \u00b7 objective_verifier",
+      "elapsed_seconds": 0,
+      "ended_at": "2026-06-16T09:33:59Z",
+      "event_id": "evt_000000000033",
+      "event_sequence": 33,
+      "event_type": "objective_verifier_adapter_completed",
+      "input_refs": [],
+      "node_id": "node_event_000000000033",
+      "output_refs": [],
+      "run_id": "run_20260616_093359_04140838",
+      "runner_id": "objective_verifier",
+      "started_at": "2026-06-16T09:33:59Z",
+      "status": "objective_verifier_adapter_completed",
+      "summary": {
+        "highlights": [],
+        "one_line": "Event 33: Objective Verifier Adapter Completed for Workflow, runner objective_verifier, run run_20260616_093359_04140838.",
+        "risks": []
+      },
+      "task_id": null,
+      "title": "Event 33: Objective Verifier Adapter Completed",
+      "type": "event"
+    },
+    {
+      "actor_label": "Workflow",
+      "agent_role": null,
+      "context_label": "Workflow",
+      "elapsed_seconds": 0,
+      "ended_at": "2026-06-16T09:33:59Z",
+      "event_id": "evt_000000000034",
+      "event_sequence": 34,
+      "event_type": "objective_verification_applied",
+      "input_refs": [],
+      "node_id": "node_event_000000000034",
+      "output_refs": [],
+      "run_id": null,
+      "runner_id": null,
+      "started_at": "2026-06-16T09:33:59Z",
+      "status": "objective_verification_applied",
+      "summary": {
+        "highlights": [],
+        "one_line": "Event 34: Objective Verification Applied for Workflow.",
+        "risks": []
+      },
+      "task_id": null,
+      "title": "Event 34: Objective Verification Applied",
+      "type": "event"
+    },
+    {
+      "actor_label": "Objective Verifier",
+      "agent_role": "objective_verifier",
+      "context_label": "Objective Verifier \u00b7 objective_verifier",
+      "elapsed_seconds": 0,
+      "ended_at": "2026-06-16T09:33:59Z",
+      "event_id": "evt_000000000035",
+      "event_sequence": 35,
+      "event_type": "objective_verifier_run_classified",
+      "input_refs": [],
+      "node_id": "node_event_000000000035",
+      "output_refs": [],
+      "run_id": "run_20260616_093359_04140838",
+      "runner_id": "objective_verifier",
+      "started_at": "2026-06-16T09:33:59Z",
+      "status": "objective_verifier_run_classified",
+      "summary": {
+        "highlights": [],
+        "one_line": "Event 35: Objective Verifier Run Classified for Objective Verifier, runner objective_verifier, run run_20260616_093359_04140838.",
+        "risks": []
+      },
+      "task_id": null,
+      "title": "Event 35: Objective Verifier Run Classified",
+      "type": "event"
+    },
+    {
+      "actor_label": "Scheduler",
+      "agent_role": null,
+      "context_label": "Scheduler",
+      "elapsed_seconds": 0,
+      "ended_at": "2026-06-16T09:33:59Z",
+      "event_id": "evt_000000000036",
+      "event_sequence": 36,
+      "event_type": "scheduler_exited",
+      "input_refs": [],
+      "node_id": "node_event_000000000036",
+      "output_refs": [],
+      "run_id": null,
+      "runner_id": null,
+      "started_at": "2026-06-16T09:33:59Z",
+      "status": "scheduler_exited",
+      "summary": {
+        "highlights": [],
+        "one_line": "Event 36: Scheduler Exited for Scheduler.",
+        "risks": []
+      },
+      "task_id": null,
+      "title": "Event 36: Scheduler Exited",
+      "type": "event"
+    },
+    {
+      "elapsed_seconds": 0,
+      "ended_at": "2026-06-16T09:33:59Z",
+      "input_refs": [
+        ".loopplane/workflows/wf_20260616_085d0238/runtime/objectives/run_20260616_093359_04140838/agent_status.json"
+      ],
+      "node_id": "node_objective_verifier_run_20260616_093359_04140838",
+      "output_refs": [
+        ".loopplane/workflows/wf_20260616_085d0238/runtime/objectives/run_20260616_093359_04140838/run_execution.json"
+      ],
+      "run_id": "run_20260616_093359_04140838",
+      "started_at": "2026-06-16T09:33:59Z",
+      "status": "applied",
+      "summary": {
+        "highlights": [],
+        "one_line": "Objective verifier adapter completed and agent_status.json is available.",
+        "risks": []
+      },
+      "task_id": null,
+      "title": "Objective verifier adapter completed and agent_status.json is available.",
+      "type": "objective_verifier"
+    },
+    {
+      "acceptance": "Markdown report includes a ranked data table.",
+      "actor_label": "Worker Agent",
+      "agent_role": null,
+      "context_label": "Phase PF: Portfolio Evidence \u00b7 PF02 \u00b7 Worker Agent \u00b7 codex_worker",
+      "deliverables": "subprojects/portfolio_summary/report.md and figures/PF02_figure.svg",
+      "elapsed_seconds": 0,
+      "ended_at": "2026-06-16T09:33:58Z",
+      "event_id": "evt_000000000019",
+      "event_sequence": 19,
+      "event_type": "worker_adapter_started",
+      "evidence_root": ".loopplane/workflows/wf_20260616_085d0238/results/PF02/",
+      "input_refs": [],
+      "latest_path": ".loopplane/workflows/wf_20260616_085d0238/results/PF02/latest.json",
+      "node_id": "node_event_000000000019",
+      "output_refs": [],
+      "phase": "Phase PF: Portfolio Evidence",
+      "run_id": "run_20260616_093357_87635d94",
+      "runner_id": "codex_worker",
+      "started_at": "2026-06-16T09:33:58Z",
+      "status": "worker_adapter_started",
+      "summary": {
+        "highlights": [],
+        "one_line": "Event 19: Worker Adapter Started for task PF02, Worker Agent, runner codex_worker, run run_20260616_093357_87635d94.",
+        "risks": []
+      },
+      "task_id": "PF02",
+      "task_title": "Analyze civic analytics portfolio outcomes",
+      "title": "Event 19: Worker Adapter Started",
+      "type": "event"
+    },
+    {
+      "acceptance": "Markdown report includes a ranked data table.",
+      "actor_label": "Worker Agent",
+      "agent_role": null,
+      "context_label": "Phase PF: Portfolio Evidence \u00b7 PF02 \u00b7 Worker Agent \u00b7 codex_worker",
+      "deliverables": "subprojects/portfolio_summary/report.md and figures/PF02_figure.svg",
+      "elapsed_seconds": 0,
+      "ended_at": "2026-06-16T09:33:58Z",
+      "event_id": "evt_000000000020",
+      "event_sequence": 20,
+      "event_type": "worker_adapter_completed",
+      "evidence_root": ".loopplane/workflows/wf_20260616_085d0238/results/PF02/",
+      "input_refs": [],
+      "latest_path": ".loopplane/workflows/wf_20260616_085d0238/results/PF02/latest.json",
+      "node_id": "node_event_000000000020",
+      "output_refs": [],
+      "phase": "Phase PF: Portfolio Evidence",
+      "run_id": "run_20260616_093357_87635d94",
+      "runner_id": "codex_worker",
+      "started_at": "2026-06-16T09:33:58Z",
+      "status": "worker_adapter_completed",
+      "summary": {
+        "highlights": [],
+        "one_line": "Event 20: Worker Adapter Completed for task PF02, Worker Agent, runner codex_worker, run run_20260616_093357_87635d94.",
+        "risks": []
+      },
+      "task_id": "PF02",
+      "task_title": "Analyze civic analytics portfolio outcomes",
+      "title": "Event 20: Worker Adapter Completed",
+      "type": "event"
+    },
+    {
+      "acceptance": "Markdown report includes a ranked data table.",
+      "actor_label": "Worker",
+      "agent_role": "worker",
+      "context_label": "Phase PF: Portfolio Evidence \u00b7 PF02 \u00b7 Worker \u00b7 codex_worker",
+      "deliverables": "subprojects/portfolio_summary/report.md and figures/PF02_figure.svg",
+      "elapsed_seconds": 0,
+      "ended_at": "2026-06-16T09:33:58Z",
+      "event_id": "evt_000000000021",
+      "event_sequence": 21,
+      "event_type": "worker_run_classified",
+      "evidence_root": ".loopplane/workflows/wf_20260616_085d0238/results/PF02/",
+      "input_refs": [],
+      "latest_path": ".loopplane/workflows/wf_20260616_085d0238/results/PF02/latest.json",
+      "node_id": "node_event_000000000021",
+      "output_refs": [],
+      "phase": "Phase PF: Portfolio Evidence",
+      "run_id": "run_20260616_093357_87635d94",
+      "runner_id": "codex_worker",
+      "started_at": "2026-06-16T09:33:58Z",
+      "status": "worker_run_classified",
+      "summary": {
+        "highlights": [],
+        "one_line": "Event 21: Worker Run Classified for task PF02, Worker, runner codex_worker, run run_20260616_093357_87635d94.",
+        "risks": []
+      },
+      "task_id": "PF02",
+      "task_title": "Analyze civic analytics portfolio outcomes",
+      "title": "Event 21: Worker Run Classified",
+      "type": "event"
+    },
+    {
+      "actor_label": "Validation Agent",
+      "agent_role": null,
+      "context_label": "Validation Agent",
+      "elapsed_seconds": 0,
+      "ended_at": "2026-06-16T09:33:58Z",
+      "event_id": "evt_000000000022",
+      "event_sequence": 22,
+      "event_type": "validation_passed",
+      "input_refs": [],
+      "node_id": "node_event_000000000022",
+      "output_refs": [],
+      "run_id": "run_20260616_093357_87635d94",
+      "runner_id": null,
+      "started_at": "2026-06-16T09:33:58Z",
+      "status": "validation_passed",
+      "summary": {
+        "highlights": [],
+        "one_line": "Event 22: Validation Passed for Validation Agent, run run_20260616_093357_87635d94.",
+        "risks": []
+      },
+      "task_id": null,
+      "title": "Event 22: Validation Passed",
+      "type": "event"
+    },
+    {
+      "acceptance": "Markdown report includes a ranked data table.",
+      "actor_label": "Workflow",
+      "agent_role": null,
+      "context_label": "Phase PF: Portfolio Evidence \u00b7 PF02 \u00b7 Workflow",
+      "deliverables": "subprojects/portfolio_summary/report.md and figures/PF02_figure.svg",
+      "elapsed_seconds": 0,
+      "ended_at": "2026-06-16T09:33:58Z",
+      "event_id": "evt_000000000023",
+      "event_sequence": 23,
+      "event_type": "plan_updated",
+      "evidence_root": ".loopplane/workflows/wf_20260616_085d0238/results/PF02/",
+      "input_refs": [],
+      "latest_path": ".loopplane/workflows/wf_20260616_085d0238/results/PF02/latest.json",
+      "node_id": "node_event_000000000023",
+      "output_refs": [],
+      "phase": "Phase PF: Portfolio Evidence",
+      "run_id": "run_20260616_093357_87635d94",
+      "runner_id": null,
+      "started_at": "2026-06-16T09:33:58Z",
+      "status": "plan_updated",
+      "summary": {
+        "highlights": [],
+        "one_line": "Event 23: Plan Updated for task PF02, Workflow, run run_20260616_093357_87635d94.",
+        "risks": []
+      },
+      "task_id": "PF02",
+      "task_title": "Analyze civic analytics portfolio outcomes",
+      "title": "Event 23: Plan Updated",
+      "type": "event"
+    },
+    {
+      "actor_label": "Workflow",
+      "agent_role": null,
+      "context_label": "Workflow",
+      "elapsed_seconds": 0,
+      "ended_at": "2026-06-16T09:33:58Z",
+      "event_id": "evt_000000000024",
+      "event_sequence": 24,
+      "event_type": "read_model_rebuild_requested",
+      "input_refs": [],
+      "node_id": "node_event_000000000024",
+      "output_refs": [],
+      "run_id": "run_20260616_093357_87635d94",
+      "runner_id": null,
+      "started_at": "2026-06-16T09:33:58Z",
+      "status": "read_model_rebuild_requested",
+      "summary": {
+        "highlights": [],
+        "one_line": "Event 24: Read Model Rebuild Requested for Workflow, run run_20260616_093357_87635d94.",
+        "risks": []
+      },
+      "task_id": null,
+      "title": "Event 24: Read Model Rebuild Requested",
+      "type": "event"
+    },
+    {
+      "actor_label": "Summary",
+      "agent_role": "summary",
+      "context_label": "Summary \u00b7 summary",
+      "elapsed_seconds": 0,
+      "ended_at": "2026-06-16T09:33:58Z",
+      "event_id": "evt_000000000025",
+      "event_sequence": 25,
+      "event_type": "run_prepared",
+      "input_refs": [],
+      "node_id": "node_event_000000000025",
+      "output_refs": [],
+      "run_id": "run_20260616_093358_4c4b18f7",
+      "runner_id": "summary",
+      "started_at": "2026-06-16T09:33:58Z",
+      "status": "run_prepared",
+      "summary": {
+        "highlights": [],
+        "one_line": "Event 25: Run Prepared for Summary, runner summary, run run_20260616_093358_4c4b18f7.",
+        "risks": []
+      },
+      "task_id": null,
+      "title": "Event 25: Run Prepared",
+      "type": "event"
+    },
+    {
+      "acceptance": "Markdown report includes a ranked data table.",
+      "deliverables": "subprojects/portfolio_summary/report.md and figures/PF02_figure.svg",
+      "elapsed_seconds": 0,
+      "ended_at": "2026-06-16T09:33:58Z",
+      "evidence_root": ".loopplane/workflows/wf_20260616_085d0238/results/PF02/",
+      "input_refs": [],
+      "latest_path": ".loopplane/workflows/wf_20260616_085d0238/results/PF02/latest.json",
+      "node_id": "node_validation_run_20260616_093357_87635d94",
+      "output_refs": [
+        ".loopplane/workflows/wf_20260616_085d0238/results/PF02/runs/run_20260616_093357_87635d94/validation.json"
+      ],
+      "phase": "Phase PF: Portfolio Evidence",
+      "run_id": "run_20260616_093357_87635d94",
+      "started_at": "2026-06-16T09:33:58Z",
+      "status": "pass",
+      "summary": {
+        "highlights": [],
+        "one_line": "Task PF02 validation passed.",
+        "risks": []
+      },
+      "task_id": "PF02",
+      "task_title": "Analyze civic analytics portfolio outcomes",
+      "title": "Validation for PF02",
+      "type": "validation"
+    },
+    {
+      "acceptance": "Markdown report includes a ranked data table.",
+      "deliverables": "subprojects/portfolio_summary/report.md and figures/PF02_figure.svg",
+      "elapsed_seconds": 0,
+      "ended_at": "2026-06-16T09:33:58Z",
+      "evidence_root": ".loopplane/workflows/wf_20260616_085d0238/results/PF02/",
+      "input_refs": [
+        ".loopplane/workflows/wf_20260616_085d0238/results/PF02/runs/run_20260616_093357_87635d94/agent_status.json"
+      ],
+      "latest_path": ".loopplane/workflows/wf_20260616_085d0238/results/PF02/latest.json",
+      "node_id": "node_worker_PF02_run_20260616_093357_87635d94",
+      "output_refs": [
+        ".loopplane/workflows/wf_20260616_085d0238/results/PF02/runs/run_20260616_093357_87635d94/run_execution.json"
+      ],
+      "phase": "Phase PF: Portfolio Evidence",
+      "run_id": "run_20260616_093357_87635d94",
+      "started_at": "2026-06-16T09:33:58Z",
+      "status": "completed",
+      "summary": {
+        "highlights": [],
+        "one_line": "Worker adapter completed and agent_status.json is available.",
+        "risks": []
+      },
+      "task_id": "PF02",
+      "task_title": "Analyze civic analytics portfolio outcomes",
+      "title": "Worker adapter completed and agent_status.json is available.",
+      "type": "worker"
+    },
+    {
+      "acceptance": "CSV dataset exists with scenario-specific fields.",
+      "actor_label": "Worker Agent",
+      "agent_role": null,
+      "context_label": "Phase PF: Portfolio Evidence \u00b7 PF01 \u00b7 Worker Agent \u00b7 codex_worker",
+      "deliverables": "subprojects/portfolio_summary/data/source.csv and data_dictionary.md",
+      "elapsed_seconds": 0,
+      "ended_at": "2026-06-16T09:33:57Z",
+      "event_id": "evt_000000000008",
+      "event_sequence": 8,
+      "event_type": "worker_adapter_started",
+      "evidence_root": ".loopplane/workflows/wf_20260616_085d0238/results/PF01/",
+      "input_refs": [],
+      "latest_path": ".loopplane/workflows/wf_20260616_085d0238/results/PF01/latest.json",
+      "node_id": "node_event_000000000008",
+      "output_refs": [],
+      "phase": "Phase PF: Portfolio Evidence",
+      "run_id": "run_20260616_093356_97073f38",
+      "runner_id": "codex_worker",
+      "started_at": "2026-06-16T09:33:57Z",
+      "status": "worker_adapter_started",
+      "summary": {
+        "highlights": [],
+        "one_line": "Event 8: Worker Adapter Started for task PF01, Worker Agent, runner codex_worker, run run_20260616_093356_97073f38.",
+        "risks": []
+      },
+      "task_id": "PF01",
+      "task_title": "Build civic analytics portfolio dataset",
+      "title": "Event 8: Worker Adapter Started",
+      "type": "event"
+    },
+    {
+      "acceptance": "CSV dataset exists with scenario-specific fields.",
+      "actor_label": "Worker Agent",
+      "agent_role": null,
+      "context_label": "Phase PF: Portfolio Evidence \u00b7 PF01 \u00b7 Worker Agent \u00b7 codex_worker",
+      "deliverables": "subprojects/portfolio_summary/data/source.csv and data_dictionary.md",
+      "elapsed_seconds": 0,
+      "ended_at": "2026-06-16T09:33:57Z",
+      "event_id": "evt_000000000009",
+      "event_sequence": 9,
+      "event_type": "worker_adapter_completed",
+      "evidence_root": ".loopplane/workflows/wf_20260616_085d0238/results/PF01/",
+      "input_refs": [],
+      "latest_path": ".loopplane/workflows/wf_20260616_085d0238/results/PF01/latest.json",
+      "node_id": "node_event_000000000009",
+      "output_refs": [],
+      "phase": "Phase PF: Portfolio Evidence",
+      "run_id": "run_20260616_093356_97073f38",
+      "runner_id": "codex_worker",
+      "started_at": "2026-06-16T09:33:57Z",
+      "status": "worker_adapter_completed",
+      "summary": {
+        "highlights": [],
+        "one_line": "Event 9: Worker Adapter Completed for task PF01, Worker Agent, runner codex_worker, run run_20260616_093356_97073f38.",
+        "risks": []
+      },
+      "task_id": "PF01",
+      "task_title": "Build civic analytics portfolio dataset",
+      "title": "Event 9: Worker Adapter Completed",
+      "type": "event"
+    },
+    {
+      "acceptance": "CSV dataset exists with scenario-specific fields.",
+      "actor_label": "Worker",
+      "agent_role": "worker",
+      "context_label": "Phase PF: Portfolio Evidence \u00b7 PF01 \u00b7 Worker \u00b7 codex_worker",
+      "deliverables": "subprojects/portfolio_summary/data/source.csv and data_dictionary.md",
+      "elapsed_seconds": 0,
+      "ended_at": "2026-06-16T09:33:57Z",
+      "event_id": "evt_000000000010",
+      "event_sequence": 10,
+      "event_type": "worker_run_classified",
+      "evidence_root": ".loopplane/workflows/wf_20260616_085d0238/results/PF01/",
+      "input_refs": [],
+      "latest_path": ".loopplane/workflows/wf_20260616_085d0238/results/PF01/latest.json",
+      "node_id": "node_event_000000000010",
+      "output_refs": [],
+      "phase": "Phase PF: Portfolio Evidence",
+      "run_id": "run_20260616_093356_97073f38",
+      "runner_id": "codex_worker",
+      "started_at": "2026-06-16T09:33:57Z",
+      "status": "worker_run_classified",
+      "summary": {
+        "highlights": [],
+        "one_line": "Event 10: Worker Run Classified for task PF01, Worker, runner codex_worker, run run_20260616_093356_97073f38.",
+        "risks": []
+      },
+      "task_id": "PF01",
+      "task_title": "Build civic analytics portfolio dataset",
+      "title": "Event 10: Worker Run Classified",
+      "type": "event"
+    },
+    {
+      "actor_label": "Validation Agent",
+      "agent_role": null,
+      "context_label": "Validation Agent",
+      "elapsed_seconds": 0,
+      "ended_at": "2026-06-16T09:33:57Z",
+      "event_id": "evt_000000000011",
+      "event_sequence": 11,
+      "event_type": "validation_passed",
+      "input_refs": [],
+      "node_id": "node_event_000000000011",
+      "output_refs": [],
+      "run_id": "run_20260616_093356_97073f38",
+      "runner_id": null,
+      "started_at": "2026-06-16T09:33:57Z",
+      "status": "validation_passed",
+      "summary": {
+        "highlights": [],
+        "one_line": "Event 11: Validation Passed for Validation Agent, run run_20260616_093356_97073f38.",
+        "risks": []
+      },
+      "task_id": null,
+      "title": "Event 11: Validation Passed",
+      "type": "event"
+    },
+    {
+      "acceptance": "CSV dataset exists with scenario-specific fields.",
+      "actor_label": "Workflow",
+      "agent_role": null,
+      "context_label": "Phase PF: Portfolio Evidence \u00b7 PF01 \u00b7 Workflow",
+      "deliverables": "subprojects/portfolio_summary/data/source.csv and data_dictionary.md",
+      "elapsed_seconds": 0,
+      "ended_at": "2026-06-16T09:33:57Z",
+      "event_id": "evt_000000000012",
+      "event_sequence": 12,
+      "event_type": "plan_updated",
+      "evidence_root": ".loopplane/workflows/wf_20260616_085d0238/results/PF01/",
+      "input_refs": [],
+      "latest_path": ".loopplane/workflows/wf_20260616_085d0238/results/PF01/latest.json",
+      "node_id": "node_event_000000000012",
+      "output_refs": [],
+      "phase": "Phase PF: Portfolio Evidence",
+      "run_id": "run_20260616_093356_97073f38",
+      "runner_id": null,
+      "started_at": "2026-06-16T09:33:57Z",
+      "status": "plan_updated",
+      "summary": {
+        "highlights": [],
+        "one_line": "Event 12: Plan Updated for task PF01, Workflow, run run_20260616_093356_97073f38.",
+        "risks": []
+      },
+      "task_id": "PF01",
+      "task_title": "Build civic analytics portfolio dataset",
+      "title": "Event 12: Plan Updated",
+      "type": "event"
+    },
+    {
+      "actor_label": "Workflow",
+      "agent_role": null,
+      "context_label": "Workflow",
+      "elapsed_seconds": 0,
+      "ended_at": "2026-06-16T09:33:57Z",
+      "event_id": "evt_000000000013",
+      "event_sequence": 13,
+      "event_type": "read_model_rebuild_requested",
+      "input_refs": [],
+      "node_id": "node_event_000000000013",
+      "output_refs": [],
+      "run_id": "run_20260616_093356_97073f38",
+      "runner_id": null,
+      "started_at": "2026-06-16T09:33:57Z",
+      "status": "read_model_rebuild_requested",
+      "summary": {
+        "highlights": [],
+        "one_line": "Event 13: Read Model Rebuild Requested for Workflow, run run_20260616_093356_97073f38.",
+        "risks": []
+      },
+      "task_id": null,
+      "title": "Event 13: Read Model Rebuild Requested",
+      "type": "event"
+    },
+    {
+      "actor_label": "Summary",
+      "agent_role": "summary",
+      "context_label": "Summary \u00b7 summary",
+      "elapsed_seconds": 0,
+      "ended_at": "2026-06-16T09:33:57Z",
+      "event_id": "evt_000000000014",
+      "event_sequence": 14,
+      "event_type": "run_prepared",
+      "input_refs": [],
+      "node_id": "node_event_000000000014",
+      "output_refs": [],
+      "run_id": "run_20260616_093357_b11828da",
+      "runner_id": "summary",
+      "started_at": "2026-06-16T09:33:57Z",
+      "status": "run_prepared",
+      "summary": {
+        "highlights": [],
+        "one_line": "Event 14: Run Prepared for Summary, runner summary, run run_20260616_093357_b11828da.",
+        "risks": []
+      },
+      "task_id": null,
+      "title": "Event 14: Run Prepared",
+      "type": "event"
+    },
+    {
+      "acceptance": "CSV dataset exists with scenario-specific fields.",
+      "actor_label": "Workflow",
+      "agent_role": null,
+      "context_label": "Phase PF: Portfolio Evidence \u00b7 PF01 \u00b7 Workflow",
+      "deliverables": "subprojects/portfolio_summary/data/source.csv and data_dictionary.md",
+      "elapsed_seconds": 0,
+      "ended_at": "2026-06-16T09:33:57Z",
+      "event_id": "evt_000000000015",
+      "event_sequence": 15,
+      "event_type": "human_summary_written",
+      "evidence_root": ".loopplane/workflows/wf_20260616_085d0238/results/PF01/",
+      "input_refs": [],
+      "latest_path": ".loopplane/workflows/wf_20260616_085d0238/results/PF01/latest.json",
+      "node_id": "node_event_000000000015",
+      "output_refs": [],
+      "phase": "Phase PF: Portfolio Evidence",
+      "run_id": null,
+      "runner_id": null,
+      "started_at": "2026-06-16T09:33:57Z",
+      "status": "human_summary_written",
+      "summary": {
+        "highlights": [],
+        "one_line": "Event 15: Human Summary Written for task PF01, Workflow.",
+        "risks": []
+      },
+      "task_id": "PF01",
+      "task_title": "Build civic analytics portfolio dataset",
+      "title": "Event 15: Human Summary Written",
+      "type": "event"
+    },
+    {
+      "actor_label": "Scheduler",
+      "agent_role": null,
+      "context_label": "Scheduler",
+      "elapsed_seconds": 0,
+      "ended_at": "2026-06-16T09:33:57Z",
+      "event_id": "evt_000000000016",
+      "event_sequence": 16,
+      "event_type": "scheduler_tick",
+      "input_refs": [],
+      "node_id": "node_event_000000000016",
+      "output_refs": [],
+      "run_id": null,
+      "runner_id": null,
+      "started_at": "2026-06-16T09:33:57Z",
+      "status": "scheduler_tick",
+      "summary": {
+        "highlights": [],
+        "one_line": "Event 16: Scheduler Tick for Scheduler.",
+        "risks": []
+      },
+      "task_id": null,
+      "title": "Event 16: Scheduler Tick",
+      "type": "event"
+    },
+    {
+      "actor_label": "Scheduler",
+      "agent_role": null,
+      "context_label": "Scheduler",
+      "elapsed_seconds": 0,
+      "ended_at": "2026-06-16T09:33:57Z",
+      "event_id": "evt_000000000017",
+      "event_sequence": 17,
+      "event_type": "scheduler_action_selected",
+      "input_refs": [],
+      "node_id": "node_event_000000000017",
+      "output_refs": [],
+      "run_id": null,
+      "runner_id": null,
+      "started_at": "2026-06-16T09:33:57Z",
+      "status": "scheduler_action_selected",
+      "summary": {
+        "highlights": [],
+        "one_line": "Event 17: Scheduler Action Selected for Scheduler.",
+        "risks": []
+      },
+      "task_id": null,
+      "title": "Event 17: Scheduler Action Selected",
+      "type": "event"
+    },
+    {
+      "acceptance": "Markdown report includes a ranked data table.",
+      "actor_label": "Worker",
+      "agent_role": "worker",
+      "context_label": "Phase PF: Portfolio Evidence \u00b7 PF02 \u00b7 Worker \u00b7 codex_worker",
+      "deliverables": "subprojects/portfolio_summary/report.md and figures/PF02_figure.svg",
+      "elapsed_seconds": 0,
+      "ended_at": "2026-06-16T09:33:57Z",
+      "event_id": "evt_000000000018",
+      "event_sequence": 18,
+      "event_type": "run_prepared",
+      "evidence_root": ".loopplane/workflows/wf_20260616_085d0238/results/PF02/",
+      "input_refs": [],
+      "latest_path": ".loopplane/workflows/wf_20260616_085d0238/results/PF02/latest.json",
+      "node_id": "node_event_000000000018",
+      "output_refs": [],
+      "phase": "Phase PF: Portfolio Evidence",
+      "run_id": "run_20260616_093357_87635d94",
+      "runner_id": "codex_worker",
+      "started_at": "2026-06-16T09:33:57Z",
+      "status": "run_prepared",
+      "summary": {
+        "highlights": [],
+        "one_line": "Event 18: Run Prepared for task PF02, Worker, runner codex_worker, run run_20260616_093357_87635d94.",
+        "risks": []
+      },
+      "task_id": "PF02",
+      "task_title": "Analyze civic analytics portfolio outcomes",
+      "title": "Event 18: Run Prepared",
+      "type": "event"
+    },
+    {
+      "acceptance": "CSV dataset exists with scenario-specific fields.",
+      "deliverables": "subprojects/portfolio_summary/data/source.csv and data_dictionary.md",
+      "elapsed_seconds": 0,
+      "ended_at": "2026-06-16T09:33:57Z",
+      "evidence_root": ".loopplane/workflows/wf_20260616_085d0238/results/PF01/",
+      "input_refs": [],
+      "latest_path": ".loopplane/workflows/wf_20260616_085d0238/results/PF01/latest.json",
+      "node_id": "node_validation_run_20260616_093356_97073f38",
+      "output_refs": [
+        ".loopplane/workflows/wf_20260616_085d0238/results/PF01/runs/run_20260616_093356_97073f38/validation.json"
+      ],
+      "phase": "Phase PF: Portfolio Evidence",
+      "run_id": "run_20260616_093356_97073f38",
+      "started_at": "2026-06-16T09:33:57Z",
+      "status": "pass",
+      "summary": {
+        "highlights": [],
+        "one_line": "Task PF01 validation passed.",
+        "risks": []
+      },
+      "task_id": "PF01",
+      "task_title": "Build civic analytics portfolio dataset",
+      "title": "Validation for PF01",
+      "type": "validation"
+    },
+    {
+      "acceptance": "CSV dataset exists with scenario-specific fields.",
+      "deliverables": "subprojects/portfolio_summary/data/source.csv and data_dictionary.md",
+      "elapsed_seconds": 0,
+      "ended_at": "2026-06-16T09:33:57Z",
+      "evidence_root": ".loopplane/workflows/wf_20260616_085d0238/results/PF01/",
+      "input_refs": [
+        ".loopplane/workflows/wf_20260616_085d0238/results/PF01/runs/run_20260616_093356_97073f38/agent_status.json"
+      ],
+      "latest_path": ".loopplane/workflows/wf_20260616_085d0238/results/PF01/latest.json",
+      "node_id": "node_worker_PF01_run_20260616_093356_97073f38",
+      "output_refs": [
+        ".loopplane/workflows/wf_20260616_085d0238/results/PF01/runs/run_20260616_093356_97073f38/run_execution.json"
+      ],
+      "phase": "Phase PF: Portfolio Evidence",
+      "run_id": "run_20260616_093356_97073f38",
+      "started_at": "2026-06-16T09:33:57Z",
+      "status": "completed",
+      "summary": {
+        "highlights": [],
+        "one_line": "Worker adapter completed and agent_status.json is available.",
+        "risks": []
+      },
+      "task_id": "PF01",
+      "task_title": "Build civic analytics portfolio dataset",
+      "title": "Worker adapter completed and agent_status.json is available.",
+      "type": "worker"
+    },
+    {
+      "actor_label": "Scheduler",
+      "agent_role": null,
+      "context_label": "Scheduler",
+      "elapsed_seconds": 0,
+      "ended_at": "2026-06-16T09:33:56Z",
+      "event_id": "evt_000000000001",
+      "event_sequence": 1,
+      "event_type": "scheduler_started",
+      "input_refs": [],
+      "node_id": "node_event_000000000001",
+      "output_refs": [],
+      "run_id": null,
+      "runner_id": null,
+      "started_at": "2026-06-16T09:33:56Z",
+      "status": "scheduler_started",
+      "summary": {
+        "highlights": [],
+        "one_line": "Event 1: Scheduler Started for Scheduler.",
+        "risks": []
+      },
+      "task_id": null,
+      "title": "Event 1: Scheduler Started",
+      "type": "event"
+    },
+    {
+      "actor_label": "Scheduler",
+      "agent_role": null,
+      "context_label": "Scheduler",
+      "elapsed_seconds": 0,
+      "ended_at": "2026-06-16T09:33:56Z",
+      "event_id": "evt_000000000002",
+      "event_sequence": 2,
+      "event_type": "scheduler_tick",
+      "input_refs": [],
+      "node_id": "node_event_000000000002",
+      "output_refs": [],
+      "run_id": null,
+      "runner_id": null,
+      "started_at": "2026-06-16T09:33:56Z",
+      "status": "scheduler_tick",
+      "summary": {
+        "highlights": [],
+        "one_line": "Event 2: Scheduler Tick for Scheduler.",
+        "risks": []
+      },
+      "task_id": null,
+      "title": "Event 2: Scheduler Tick",
+      "type": "event"
+    },
+    {
+      "actor_label": "Scheduler",
+      "agent_role": null,
+      "context_label": "Scheduler",
+      "elapsed_seconds": 0,
+      "ended_at": "2026-06-16T09:33:56Z",
+      "event_id": "evt_000000000003",
+      "event_sequence": 3,
+      "event_type": "scheduler_action_selected",
+      "input_refs": [],
+      "node_id": "node_event_000000000003",
+      "output_refs": [],
+      "run_id": null,
+      "runner_id": null,
+      "started_at": "2026-06-16T09:33:56Z",
+      "status": "scheduler_action_selected",
+      "summary": {
+        "highlights": [],
+        "one_line": "Event 3: Scheduler Action Selected for Scheduler.",
+        "risks": []
+      },
+      "task_id": null,
+      "title": "Event 3: Scheduler Action Selected",
+      "type": "event"
+    },
+    {
+      "actor_label": "Scheduler",
+      "agent_role": null,
+      "context_label": "Scheduler",
+      "elapsed_seconds": 0,
+      "ended_at": "2026-06-16T09:33:56Z",
+      "event_id": "evt_000000000004",
+      "event_sequence": 4,
+      "event_type": "control_request_handled",
+      "input_refs": [],
+      "node_id": "node_event_000000000004",
+      "output_refs": [],
+      "run_id": null,
+      "runner_id": null,
+      "started_at": "2026-06-16T09:33:56Z",
+      "status": "control_request_handled",
+      "summary": {
+        "highlights": [],
+        "one_line": "Event 4: Control Request Handled for Scheduler.",
+        "risks": []
+      },
+      "task_id": null,
+      "title": "Event 4: Control Request Handled",
+      "type": "event"
+    },
+    {
+      "actor_label": "Scheduler",
+      "agent_role": null,
+      "context_label": "Scheduler",
+      "elapsed_seconds": 0,
+      "ended_at": "2026-06-16T09:33:56Z",
+      "event_id": "evt_000000000005",
+      "event_sequence": 5,
+      "event_type": "scheduler_tick",
+      "input_refs": [],
+      "node_id": "node_event_000000000005",
+      "output_refs": [],
+      "run_id": null,
+      "runner_id": null,
+      "started_at": "2026-06-16T09:33:56Z",
+      "status": "scheduler_tick",
+      "summary": {
+        "highlights": [],
+        "one_line": "Event 5: Scheduler Tick for Scheduler.",
+        "risks": []
+      },
+      "task_id": null,
+      "title": "Event 5: Scheduler Tick",
+      "type": "event"
+    },
+    {
+      "actor_label": "Scheduler",
+      "agent_role": null,
+      "context_label": "Scheduler",
+      "elapsed_seconds": 0,
+      "ended_at": "2026-06-16T09:33:56Z",
+      "event_id": "evt_000000000006",
+      "event_sequence": 6,
+      "event_type": "scheduler_action_selected",
+      "input_refs": [],
+      "node_id": "node_event_000000000006",
+      "output_refs": [],
+      "run_id": null,
+      "runner_id": null,
+      "started_at": "2026-06-16T09:33:56Z",
+      "status": "scheduler_action_selected",
+      "summary": {
+        "highlights": [],
+        "one_line": "Event 6: Scheduler Action Selected for Scheduler.",
+        "risks": []
+      },
+      "task_id": null,
+      "title": "Event 6: Scheduler Action Selected",
+      "type": "event"
+    },
+    {
+      "acceptance": "CSV dataset exists with scenario-specific fields.",
+      "actor_label": "Worker",
+      "agent_role": "worker",
+      "context_label": "Phase PF: Portfolio Evidence \u00b7 PF01 \u00b7 Worker \u00b7 codex_worker",
+      "deliverables": "subprojects/portfolio_summary/data/source.csv and data_dictionary.md",
+      "elapsed_seconds": 0,
+      "ended_at": "2026-06-16T09:33:56Z",
+      "event_id": "evt_000000000007",
+      "event_sequence": 7,
+      "event_type": "run_prepared",
+      "evidence_root": ".loopplane/workflows/wf_20260616_085d0238/results/PF01/",
+      "input_refs": [],
+      "latest_path": ".loopplane/workflows/wf_20260616_085d0238/results/PF01/latest.json",
+      "node_id": "node_event_000000000007",
+      "output_refs": [],
+      "phase": "Phase PF: Portfolio Evidence",
+      "run_id": "run_20260616_093356_97073f38",
+      "runner_id": "codex_worker",
+      "started_at": "2026-06-16T09:33:56Z",
+      "status": "run_prepared",
+      "summary": {
+        "highlights": [],
+        "one_line": "Event 7: Run Prepared for task PF01, Worker, runner codex_worker, run run_20260616_093356_97073f38.",
+        "risks": []
+      },
+      "task_id": "PF01",
+      "task_title": "Build civic analytics portfolio dataset",
+      "title": "Event 7: Run Prepared",
+      "type": "event"
+    },
+    {
+      "elapsed_seconds": 0,
+      "ended_at": "2026-06-16T09:33:55Z",
+      "input_refs": [],
+      "node_id": "plan_activation:activate_20260616_093355_f45c72b3",
+      "output_refs": [],
+      "run_id": "activate_20260616_093355_f45c72b3",
+      "started_at": "2026-06-16T09:33:55Z",
+      "status": "activated",
+      "summary": {
+        "highlights": [],
+        "one_line": "PLAN_DRAFT.md was promoted to active PLAN.md.",
+        "risks": []
+      },
+      "task_id": null,
+      "title": "PLAN_DRAFT.md was promoted to active PLAN.md.",
+      "type": "plan_activation"
+    },
+    {
+      "elapsed_seconds": 0,
+      "ended_at": "2026-06-16T09:33:54Z",
+      "input_refs": [],
+      "node_id": "planner:plan_20260616_093354_092fc8d6",
+      "output_refs": [
+        "/data/nvidia/LoopPlane_test2/.loopplane/workflows/wf_20260616_085d0238/planning/runs/plan_20260616_093354_092fc8d6/adapter_result.json"
+      ],
+      "run_id": "plan_20260616_093354_092fc8d6",
+      "started_at": "2026-06-16T09:33:54Z",
+      "status": "ready_for_activation",
+      "summary": {
+        "highlights": [],
+        "one_line": "Planner wrote a readiness-checked plan draft.",
+        "risks": []
+      },
+      "task_id": null,
+      "title": "Planner wrote a readiness-checked plan draft.",
+      "type": "planner"
+    }
+  ],
+  "plan_source": {
+    "active_plan_file": ".loopplane/workflows/wf_20260616_085d0238/PLAN.md",
+    "kind": "active",
+    "path": ".loopplane/workflows/wf_20260616_085d0238/PLAN.md"
+  },
+  "schema_version": "1.5",
+  "source_event_id": "evt_000000000101",
+  "source_hashes": {
+    "active_leases": "sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+    "active_plan": "sha256:5f7d101abebbe8d8e8934ab6d4688e9a910c3aa96b317aa1d50047ac9e40c060",
+    "events_count": 101,
+    "events_head": "evt_000000000101",
+    "events_sha256": "sha256:90b077b1e57d7bf1ba0bc569dd289e855aed1fd864f65b713aca06a0ffa94d3c",
+    "expansion_registry": "sha256:066fda366c3fac1799a518dd024972fc5c12c44c54a4d113fec50687bc0da00b",
+    "plan": "sha256:5f7d101abebbe8d8e8934ab6d4688e9a910c3aa96b317aa1d50047ac9e40c060",
+    "plan_file": ".loopplane/workflows/wf_20260616_085d0238/PLAN.md",
+    "plan_source": "active",
+    "state": "sha256:9d6fe17ca14dbf3e4d65ae1f18733e225cc53e2bebd2dd653731b4d0dbf772e1",
+    "validations_manifest": "sha256:43bc14d4b1153aba188ff188431706ab9e982914af0171847fb1a1bde5e3f029"
+  },
+  "workflow_id": "wf_20260616_085d0238",
+  "workflow_title": "Civic Analytics Portfolio"
+}

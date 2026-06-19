@@ -1,0 +1,34 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+.DS_Store
+
+# Local workflow/runtime state and generated scratch output.
+.loopplane/
+tmp/
+test-results/
+playwright-report/
+
+# Test and coverage output.
+.coverage
+coverage/
+htmlcov/
+
+# Local build/package output.
+build/
+dist/
+*.egg-info/
+
+# Local credentials and transient logs.
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.sqlite
+*.db
+*.log
+*.tmp

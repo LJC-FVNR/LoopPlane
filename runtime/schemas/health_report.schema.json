@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "LoopPlane health report",
+  "type": "object",
+  "required": ["schema_version", "checked_at", "status", "checks", "requires_attention"],
+  "properties": {
+    "schema_version": {"const": "1.5"},
+    "workflow_id": {"type": ["string", "null"]},
+    "checked_at": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"},
+    "status": {"type": "string"},
+    "checks": {"type": "array"},
+    "requires_attention": {"type": "array"}
+  }
+}

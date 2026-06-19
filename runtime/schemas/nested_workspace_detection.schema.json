@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "LoopPlane nested workspace detection result",
+  "type": "object",
+  "required": ["schema_version", "status", "project_root", "requires_explicit_namespace_or_approval", "parent_count", "child_count", "overlap_count", "nested_workspace_count", "parents", "children", "overlapping", "relationships", "warnings", "recovery_actions"],
+  "properties": {
+    "schema_version": {"const": "1.6"},
+    "status": {"type": "string", "enum": ["isolated", "nested_detected"]},
+    "project_root": {"type": "string", "minLength": 1},
+    "requires_explicit_namespace_or_approval": {"type": "boolean"},
+    "parent_count": {"type": "integer", "minimum": 0},
+    "child_count": {"type": "integer", "minimum": 0},
+    "overlap_count": {"type": "integer", "minimum": 0},
+    "nested_workspace_count": {"type": "integer", "minimum": 0},
+    "parents": {"type": "array", "items": {"type": "object"}},
+    "children": {"type": "array", "items": {"type": "object"}},
+    "overlapping": {"type": "array", "items": {"type": "object"}},
+    "relationships": {"type": "array", "items": {"type": "object"}},
+    "warnings": {"type": "array", "items": {"type": "string"}},
+    "recovery_actions": {"type": "array", "items": {"type": "string"}}
+  },
+  "additionalProperties": true
+}

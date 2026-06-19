@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "LoopPlane runner resource lock",
+  "type": "object",
+  "required": ["schema_version", "lock_type", "lock_scope", "lock_key", "lock_path", "global_concurrency_limit", "queue_when_busy", "run_id", "workflow_id", "runner_id", "role", "pid", "acquired_at", "heartbeat_at"],
+  "properties": {
+    "schema_version": {"const": "1.6"},
+    "lock_type": {"const": "runner_resource"},
+    "lock_scope": {"const": "machine"},
+    "lock_key": {"type": "string", "pattern": "^[A-Za-z0-9._-]+$"},
+    "lock_path": {"type": "string", "minLength": 1},
+    "global_concurrency_limit": {"type": "integer", "minimum": 1},
+    "queue_when_busy": {"type": "boolean"},
+    "run_id": {"type": "string"},
+    "workflow_id": {"type": "string"},
+    "runner_id": {"type": "string", "minLength": 1},
+    "role": {"type": "string", "minLength": 1},
+    "task_id": {"type": ["string", "null"]},
+    "pid": {"type": "integer", "minimum": 1},
+    "acquired_at": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"},
+    "heartbeat_at": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"}
+  },
+  "additionalProperties": true
+}

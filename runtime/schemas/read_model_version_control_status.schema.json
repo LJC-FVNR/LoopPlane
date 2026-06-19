@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "LoopPlane version_control_status read model",
+  "type": "object",
+  "required": ["schema_version", "workflow_id", "generated_at", "source_hashes", "status", "provider", "repository"],
+  "properties": {
+    "schema_version": {"const": "1.5"},
+    "workflow_id": {"type": "string"},
+    "generated_at": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"},
+    "source_hashes": {"type": "object"},
+    "status": {"type": "string", "minLength": 1},
+    "provider": {"type": "string", "enum": ["git"]},
+    "repository": {"type": "object"}
+  }
+}

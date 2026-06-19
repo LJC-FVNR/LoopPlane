@@ -1,0 +1,6 @@
+interface:
+  display_name: "LoopPlane"
+  short_description: "Durable LoopPlane workflows for coding agents"
+  default_prompt: "Use $loopplane to install and run a durable plan-driven workflow for this project."
+policy:
+  allow_implicit_invocation: true

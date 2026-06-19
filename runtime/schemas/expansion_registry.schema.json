@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "LoopPlane self expansion registry",
+  "type": "object",
+  "required": ["schema_version", "workflow_id", "cycle", "events", "proposals"],
+  "properties": {
+    "schema_version": {"const": "1.5"},
+    "workflow_id": {"type": "string"},
+    "cycle": {"type": "integer", "minimum": 0},
+    "updated_at": {"type": "string"},
+    "events": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "schema_version": {"const": "1.5"},
+          "event_id": {"type": "string"},
+          "event_type": {"type": "string"},
+          "workflow_id": {"type": "string"},
+          "proposal_id": {"type": ["string", "null"]},
+          "run_id": {"type": ["string", "null"]},
+          "created_at": {"type": "string"},
+          "data": {"type": "object"}
+        },
+        "additionalProperties": true
+      }
+    },
+    "proposals": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "proposal_id",
+          "status",
+          "expansion_type",
+          "resolution_strategy",
+          "loop_signature",
+          "created_at"
+        ],
+        "properties": {
+          "proposal_id": {"type": "string", "minLength": 1},
+          "status": {"type": "string", "minLength": 1},
+          "expansion_type": {"type": "string"},
+          "resolution_strategy": {"type": "string"},
+          "loop_signature": {"type": "string", "minLength": 1},
+          "risk": {"type": "string", "enum": ["low", "medium", "high"]},
+          "target_task_ids": {"type": "array", "items": {"type": "string"}},
+          "target_failure_ids": {"type": "array", "items": {"type": "string"}},
+          "added_task_ids": {"type": "array", "items": {"type": "string"}},
+          "approval_required": {"type": "boolean"},
+          "approval_id": {"type": ["string", "null"]},
+          "run_id": {"type": ["string", "null"]},
+          "runner_id": {"type": ["string", "null"]},
+          "created_at": {"type": "string"},
+          "applied_at": {"type": ["string", "null"]},
+          "failure_resolution_status": {"type": "string"},
+          "objective_resolution_status": {"type": "string"}
+        },
+        "additionalProperties": true
+      }
+    }
+  },
+  "additionalProperties": true
+}

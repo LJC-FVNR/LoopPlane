@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" id="loopplane-mark" width="96" height="96" viewBox="0 0 96 96" role="img" aria-labelledby="lp-title lp-desc">
+  <title id="lp-title">LoopPlane logo</title>
+  <desc id="lp-desc">A continuous loop crossing a centered plane inside a precise square frame.</desc>
+  <defs>
+    <linearGradient id="lp-bg" x1="12" y1="10" x2="84" y2="88" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#0b1828"/>
+      <stop offset="0.58" stop-color="#07111f"/>
+      <stop offset="1" stop-color="#030711"/>
+    </linearGradient>
+    <linearGradient id="lp-frame" x1="14" y1="14" x2="82" y2="82" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#2dd4bf"/>
+      <stop offset="0.52" stop-color="#38bdf8"/>
+      <stop offset="1" stop-color="#64748b"/>
+    </linearGradient>
+    <linearGradient id="lp-loop" x1="26" y1="26" x2="70" y2="70" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#f8fafc"/>
+      <stop offset="0.44" stop-color="#b6f4ff"/>
+      <stop offset="1" stop-color="#38bdf8"/>
+    </linearGradient>
+    <linearGradient id="lp-plane-edge" x1="20" y1="50" x2="76" y2="50" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#7dd3fc"/>
+      <stop offset="0.5" stop-color="#2dd4bf"/>
+      <stop offset="1" stop-color="#a5b4fc"/>
+    </linearGradient>
+    <linearGradient id="lp-plane-fill" x1="24" y1="42" x2="72" y2="58" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#0e2234"/>
+      <stop offset="1" stop-color="#07111f"/>
+    </linearGradient>
+  </defs>
+  <rect x="8" y="8" width="80" height="80" rx="17" fill="url(#lp-bg)"/>
+  <rect x="9.5" y="9.5" width="77" height="77" rx="15.5" fill="none" stroke="url(#lp-frame)" stroke-width="3"/>
+  <circle cx="48" cy="48" r="23" fill="none" stroke="#020712" stroke-width="10" opacity="0.82"/>
+  <circle cx="48" cy="48" r="23" fill="none" stroke="url(#lp-loop)" stroke-width="6.5" stroke-linecap="round"/>
+  <path d="M20 50 48 38 76 50 48 62Z" fill="#020712" opacity="0.86"/>
+  <path d="M20 50 48 38 76 50 48 62Z" fill="url(#lp-plane-fill)" stroke="url(#lp-plane-edge)" stroke-width="4" stroke-linejoin="round"/>
+  <path d="M25 50 48 41 71 50" fill="none" stroke="#effdff" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M48 41 48 59" fill="none" stroke="#54e0d5" stroke-width="2.6" stroke-linecap="round"/>
+  <path d="M30 50 48 57 66 50" fill="none" stroke="#38bdf8" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" opacity="0.75"/>
+</svg>

@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "LOOPPLANE_HOME workspace registry",
+  "type": "object",
+  "required": ["schema_version", "workspaces"],
+  "properties": {
+    "schema_version": {"const": "1.6"},
+    "authority": {"const": "discovery_only"},
+    "generated_at": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"},
+    "workspaces": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "workspace_id": {"type": "string", "pattern": "^ws_[0-9A-Za-z][0-9A-Za-z_-]{7,63}$"},
+          "name": {"type": "string"},
+          "project_root": {"type": "string", "minLength": 1},
+          "loopplane_dir": {"type": "string", "minLength": 1},
+          "repo_root": {"type": "string", "minLength": 1},
+          "status": {"type": "string"},
+          "last_seen_at": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"},
+          "current_workflow_id": {"type": "string", "pattern": "^wf_[0-9]{8}_[0-9a-f]{8}$"},
+          "dashboard": {"type": "object"}
+        },
+        "additionalProperties": true
+      }
+    }
+  },
+  "additionalProperties": true
+}

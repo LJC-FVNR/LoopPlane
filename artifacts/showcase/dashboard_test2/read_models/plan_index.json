@@ -1,0 +1,755 @@
+{
+  "active_plan_file": ".loopplane/workflows/wf_20260616_085d0238/PLAN.md",
+  "generated_at": "2026-06-16T21:26:30Z",
+  "last_event_seq": 101,
+  "objective_reports": [
+    {
+      "exists": true,
+      "path": ".loopplane/workflows/wf_20260616_085d0238/runtime/objectives/phases/PF/objective_verification.json",
+      "phase_id": "PF",
+      "scope": "phase",
+      "status": "satisfied",
+      "verified_at": "2026-06-16T09:34:03Z"
+    },
+    {
+      "exists": true,
+      "path": ".loopplane/workflows/wf_20260616_085d0238/runtime/objectives/final_objective_verification.json",
+      "phase_id": null,
+      "scope": "workflow",
+      "status": "satisfied",
+      "verified_at": "2026-06-16T09:34:04Z"
+    }
+  ],
+  "objectives": [
+    {
+      "checkbox": "[x]",
+      "closed": true,
+      "evidence_scope": ".loopplane/workflows/wf_20260616_085d0238/results/PF01/ and .loopplane/workflows/wf_20260616_085d0238/results/PF02/",
+      "expandable": false,
+      "fields": {
+        "evidence_scope": [
+          ".loopplane/workflows/wf_20260616_085d0238/results/PF01/ and .loopplane/workflows/wf_20260616_085d0238/results/PF02/"
+        ],
+        "judgment_guidance": [
+          "Confirm the CSV, report table, and SVG figure together support a human review of the analytics outcome."
+        ],
+        "linked_tasks": [
+          "PF01, PF02"
+        ],
+        "max_expansions": [
+          "2"
+        ],
+        "unmet_action": [
+          "self_expand"
+        ],
+        "verifier": [
+          "objective_verifier"
+        ]
+      },
+      "judgment_guidance": "Confirm the CSV, report table, and SVG figure together support a human review of the analytics outcome.",
+      "line_index": 42,
+      "linked_tasks": "PF01, PF02",
+      "max_expansions": "2",
+      "objective_id": "PF.O1",
+      "phase_id": "PF",
+      "phase_title": "Phase PF: Portfolio Evidence",
+      "plan_status": "satisfied",
+      "report_path": ".loopplane/workflows/wf_20260616_085d0238/runtime/objectives/phases/PF/objective_verification.json",
+      "report_status": "satisfied",
+      "result": {
+        "agent_rationale": "Validated task evidence is present and decision-useful for this clean regression fixture.",
+        "confidence": "high",
+        "evidence_reviewed": [
+          "PF01, PF02",
+          ".loopplane/workflows/wf_20260616_085d0238/results/PF01/ and .loopplane/workflows/wf_20260616_085d0238/results/PF02/"
+        ],
+        "expandable": false,
+        "gap_summary": "",
+        "objective_id": "PF.O1",
+        "status": "satisfied",
+        "unmet_action": "self_expand",
+        "verdict": "satisfied"
+      },
+      "scope": "phase",
+      "status": "closed",
+      "text": "Civic Analytics Portfolio evidence is decision-useful.",
+      "unmet_action": "self_expand",
+      "verified_at": "2026-06-16T09:34:03Z",
+      "verifier": "objective_verifier"
+    },
+    {
+      "checkbox": "[x]",
+      "closed": true,
+      "evidence_scope": ".loopplane/workflows/wf_20260616_085d0238/results/ plus read_models/",
+      "expandable": false,
+      "fields": {
+        "evidence_scope": [
+          ".loopplane/workflows/wf_20260616_085d0238/results/ plus read_models/"
+        ],
+        "judgment_guidance": [
+          "Confirm validated task evidence and human-readable summaries are sufficient for dashboard handoff."
+        ],
+        "linked_tasks": [
+          "PF01, PF02"
+        ],
+        "max_expansions": [
+          "2"
+        ],
+        "unmet_action": [
+          "self_expand"
+        ],
+        "verifier": [
+          "objective_verifier"
+        ]
+      },
+      "judgment_guidance": "Confirm validated task evidence and human-readable summaries are sufficient for dashboard handoff.",
+      "line_index": 52,
+      "linked_tasks": "PF01, PF02",
+      "max_expansions": "2",
+      "objective_id": "FO1",
+      "plan_status": "satisfied",
+      "report_path": ".loopplane/workflows/wf_20260616_085d0238/runtime/objectives/final_objective_verification.json",
+      "report_status": "satisfied",
+      "result": {
+        "agent_rationale": "Validated task evidence is present and decision-useful for this clean regression fixture.",
+        "confidence": "high",
+        "evidence_reviewed": [
+          "PF01, PF02",
+          ".loopplane/workflows/wf_20260616_085d0238/results/ plus read_models/"
+        ],
+        "expandable": false,
+        "gap_summary": "",
+        "objective_id": "FO1",
+        "status": "satisfied",
+        "unmet_action": "self_expand",
+        "verdict": "satisfied"
+      },
+      "scope": "workflow",
+      "status": "closed",
+      "text": "Civic Analytics Portfolio workflow is complete and dashboard-ready.",
+      "unmet_action": "self_expand",
+      "verified_at": "2026-06-16T09:34:04Z",
+      "verifier": "objective_verifier"
+    }
+  ],
+  "phases": [
+    {
+      "human_summary": {
+        "content": "# Phase PF: Portfolio Evidence Summary\n\n## Executive Summary\n\nPhase PF: Portfolio Evidence is complete across 2/2 task(s). PF01: Validation marker: PORTFOLIO INVENTORY READY LoopPlane marks PF01 accepted for Build civic analytics portfolio dataset after pass validation.\n\n## Progress Delivered\n\n- PF01: Validation marker: PORTFOLIO INVENTORY READY LoopPlane marks PF01 accepted for Build civic analytics portfolio dataset after pass validation.\n- PF01: CSV artifact written\n- PF02: Validation marker: PORTFOLIO SCORECARD READY LoopPlane marks PF02 accepted for Analyze civic analytics portfolio outcomes after pass validation.\n- PF02: CSV artifact written\n\n## Control Points\n\n- Completion posture: 2/2 task(s) done, 0 blocked, 0 skipped.\n- All tasks in this phase have terminal outcomes and can be reviewed as a closed unit.\n\n## Objective Closure\n\n| Objective | Plan | Verification | Closed | Follow-up |\n| --- | --- | --- | --- | --- |\n| PF.O1 | [x] | satisfied | yes |  |\n\n## Workflow Objective Closure\n\n| Objective | Plan | Verification | Closed | Follow-up |\n| --- | --- | --- | --- | --- |\n| FO1 | [x] | satisfied | yes |  |\n\n## Risks And Decisions\n\n- PF01: No recorded blockers or decision requests.\n- PF02: No recorded blockers or decision requests.\n\n## Task Detail\n\n| Task | Status | Summary |\n| --- | --- | --- |\n| PF01 | done | Validation marker: PORTFOLIO INVENTORY READY LoopPlane marks PF01 accepted for `Build civic analytics portfolio dataset` after pass validation. |\n| PF02 | done | Validation marker: PORTFOLIO SCORECARD READY LoopPlane marks PF02 accepted for `Analyze civic analytics portfolio outcomes` after pass validation. |\n",
+        "control_points": [
+          "Completion posture: 2/2 task(s) done, 0 blocked, 0 skipped.",
+          "All tasks in this phase have terminal outcomes and can be reviewed as a closed unit."
+        ],
+        "delivered_progress": [
+          "PF01: Validation marker: PORTFOLIO INVENTORY READY LoopPlane marks PF01 accepted for Build civic analytics portfolio dataset after pass validation.",
+          "PF01: CSV artifact written",
+          "PF02: Validation marker: PORTFOLIO SCORECARD READY LoopPlane marks PF02 accepted for Analyze civic analytics portfolio outcomes after pass validation.",
+          "PF02: CSV artifact written"
+        ],
+        "evidence_and_confidence": [],
+        "excerpt": "Phase PF: Portfolio Evidence is complete across 2/2 task(s). PF01: Validation marker: PORTFOLIO INVENTORY READY LoopPlane marks PF01 accepted for Build civic analytics portfolio dataset after pass validation.",
+        "executive_summary": "Phase PF: Portfolio Evidence is complete across 2/2 task(s). PF01: Validation marker: PORTFOLIO INVENTORY READY LoopPlane marks PF01 accepted for Build civic analytics portfolio dataset after pass validation.",
+        "generated_at": "2026-06-16T09:34:07Z",
+        "json_path": ".loopplane/workflows/wf_20260616_085d0238/results/phases/PF/human_summary.json",
+        "key_data": [
+          {
+            "label": "Tasks",
+            "value": "2"
+          },
+          {
+            "label": "Completed",
+            "value": "2"
+          },
+          {
+            "label": "Blocked",
+            "value": "0"
+          },
+          {
+            "label": "Skipped",
+            "value": "0"
+          }
+        ],
+        "kind": "phase",
+        "leadership_attention": [
+          "PF01: No recorded blockers or decision requests.",
+          "PF02: No recorded blockers or decision requests."
+        ],
+        "markdown_path": ".loopplane/workflows/wf_20260616_085d0238/results/phases/PF/human_summary.md",
+        "phase_id": "PF",
+        "phase_title": "Phase PF: Portfolio Evidence",
+        "project_meaning": null,
+        "status": "ready",
+        "tables": {
+          "phase_objective_closure": [
+            {
+              "Closed": "yes",
+              "Follow-up": "",
+              "Objective": "PF.O1",
+              "Plan": "[x]",
+              "Verification": "satisfied"
+            }
+          ],
+          "task_outcomes": [
+            {
+              "Status": "done",
+              "Summary": "Validation marker: PORTFOLIO INVENTORY READY LoopPlane marks PF01 accepted for `Build civic analytics portfolio dataset` after pass validation.",
+              "Task": "PF01"
+            },
+            {
+              "Status": "done",
+              "Summary": "Validation marker: PORTFOLIO SCORECARD READY LoopPlane marks PF02 accepted for `Analyze civic analytics portfolio outcomes` after pass validation.",
+              "Task": "PF02"
+            }
+          ],
+          "workflow_objective_closure": [
+            {
+              "Closed": "yes",
+              "Follow-up": "",
+              "Objective": "FO1",
+              "Plan": "[x]",
+              "Verification": "satisfied"
+            }
+          ]
+        },
+        "task_id": null,
+        "title": "Phase PF: Portfolio Evidence"
+      },
+      "objectives": [
+        {
+          "checkbox": "[x]",
+          "closed": true,
+          "evidence_scope": ".loopplane/workflows/wf_20260616_085d0238/results/PF01/ and .loopplane/workflows/wf_20260616_085d0238/results/PF02/",
+          "expandable": false,
+          "fields": {
+            "evidence_scope": [
+              ".loopplane/workflows/wf_20260616_085d0238/results/PF01/ and .loopplane/workflows/wf_20260616_085d0238/results/PF02/"
+            ],
+            "judgment_guidance": [
+              "Confirm the CSV, report table, and SVG figure together support a human review of the analytics outcome."
+            ],
+            "linked_tasks": [
+              "PF01, PF02"
+            ],
+            "max_expansions": [
+              "2"
+            ],
+            "unmet_action": [
+              "self_expand"
+            ],
+            "verifier": [
+              "objective_verifier"
+            ]
+          },
+          "judgment_guidance": "Confirm the CSV, report table, and SVG figure together support a human review of the analytics outcome.",
+          "line_index": 42,
+          "linked_tasks": "PF01, PF02",
+          "max_expansions": "2",
+          "objective_id": "PF.O1",
+          "phase_id": "PF",
+          "phase_title": "Phase PF: Portfolio Evidence",
+          "plan_status": "satisfied",
+          "report_path": ".loopplane/workflows/wf_20260616_085d0238/runtime/objectives/phases/PF/objective_verification.json",
+          "report_status": "satisfied",
+          "result": {
+            "agent_rationale": "Validated task evidence is present and decision-useful for this clean regression fixture.",
+            "confidence": "high",
+            "evidence_reviewed": [
+              "PF01, PF02",
+              ".loopplane/workflows/wf_20260616_085d0238/results/PF01/ and .loopplane/workflows/wf_20260616_085d0238/results/PF02/"
+            ],
+            "expandable": false,
+            "gap_summary": "",
+            "objective_id": "PF.O1",
+            "status": "satisfied",
+            "unmet_action": "self_expand",
+            "verdict": "satisfied"
+          },
+          "scope": "phase",
+          "status": "closed",
+          "text": "Civic Analytics Portfolio evidence is decision-useful.",
+          "unmet_action": "self_expand",
+          "verified_at": "2026-06-16T09:34:03Z",
+          "verifier": "objective_verifier"
+        }
+      ],
+      "phase_id": "PF",
+      "status": "done",
+      "tasks": [
+        {
+          "acceptance": "CSV dataset exists with scenario-specific fields.",
+          "acceptance_criteria": [
+            "CSV dataset exists with scenario-specific fields.",
+            "Data dictionary records the generated field meanings."
+          ],
+          "approval": "not_required",
+          "checkbox": "[x]",
+          "deliverables": "subprojects/portfolio_summary/data/source.csv and data_dictionary.md",
+          "dependencies": [],
+          "display": {
+            "badge": "pass",
+            "highlight": "",
+            "subtitle": "Validation passed."
+          },
+          "evidence_root": ".loopplane/workflows/wf_20260616_085d0238/results/PF01/",
+          "human_summary": {
+            "content": "# Task PF01: Build civic analytics portfolio dataset\n\n## Executive Brief\n\nValidation marker: PORTFOLIO INVENTORY READY LoopPlane marks PF01 accepted for `Build civic analytics portfolio dataset` after pass validation.\n\n## Progress Narrative\n\n- Validation marker: PORTFOLIO INVENTORY READY\n- CSV artifact written\n- Markdown report written\n- SVG figure written when analysis task\n- Acceptance coverage was claimed for: Deterministic civic analytics evidence produced.\n- Planned deliverables now have supporting evidence: subprojects/portfolio summary/data/source.csv and data dictionary.md.\n\n## Project Meaning\n\nThis closes the high-level acceptance intent for PF01: CSV dataset exists with scenario-specific fields; Data dictionary records the generated field meanings. Downstream work can now use the recorded validation, changed files, and artifacts as the review surface.\n\n## Key Data\n\n| Field | Value |\n| --- | --- |\n| Task | PF01 - Build civic analytics portfolio dataset |\n| Phase | Phase PF: Portfolio Evidence |\n| Status | done |\n| Validation | pass |\n| Latest run | run_20260616_093356_97073f38 |\n| Changed files | 2 |\n| Artifacts | 1 |\n\n## Evidence And Confidence\n\n- Validation status is pass.\n- No named validation checks were recorded; confidence depends on the overall validation status and evidence pointers.\n- Worker evidence maps back to acceptance criteria: Deterministic civic analytics evidence produced.\n- Review evidence includes artifact(s): PF01 data.csv.\n\n\n\n\n\n## Leadership Attention\n\n- No recorded blockers or decision requests.\n\n## Traceability\n\n- Latest pointer: .loopplane/workflows/wf_20260616_085d0238/results/PF01/latest.json\n- Validation record: .loopplane/workflows/wf_20260616_085d0238/results/PF01/runs/run_20260616_093356_97073f38/validation.json\n- Run folder: .loopplane/workflows/wf_20260616_085d0238/results/PF01/runs/run_20260616_093356_97073f38\n- Worker report: .loopplane/workflows/wf_20260616_085d0238/results/PF01/runs/run_20260616_093356_97073f38/report.md\n- Artifact inventory: PF01 data.csv\n\n| Path | Change | Delta |\n| --- | --- | --- |\n| subprojects/portfolio_summary/data/source.csv | created_or_updated | +5/-0 |\n| subprojects/portfolio_summary/data_dictionary.md | created_or_updated | +10/-0 |\n",
+            "control_points": [],
+            "delivered_progress": [
+              "Validation marker: PORTFOLIO INVENTORY READY",
+              "CSV artifact written",
+              "Markdown report written",
+              "SVG figure written when analysis task",
+              "Acceptance coverage was claimed for: Deterministic civic analytics evidence produced.",
+              "Planned deliverables now have supporting evidence: subprojects/portfolio summary/data/source.csv and data dictionary.md."
+            ],
+            "evidence_and_confidence": [
+              "Validation status is pass.",
+              "No named validation checks were recorded; confidence depends on the overall validation status and evidence pointers.",
+              "Worker evidence maps back to acceptance criteria: Deterministic civic analytics evidence produced.",
+              "Review evidence includes artifact(s): PF01 data.csv."
+            ],
+            "excerpt": "Validation marker: PORTFOLIO INVENTORY READY LoopPlane marks PF01 accepted for `Build civic analytics portfolio dataset` after pass validation.",
+            "executive_summary": "Validation marker: PORTFOLIO INVENTORY READY LoopPlane marks PF01 accepted for `Build civic analytics portfolio dataset` after pass validation.",
+            "generated_at": "2026-06-16T09:34:07Z",
+            "json_path": ".loopplane/workflows/wf_20260616_085d0238/results/PF01/human_summary.json",
+            "key_data": [
+              {
+                "label": "Task",
+                "value": "PF01 - Build civic analytics portfolio dataset"
+              },
+              {
+                "label": "Phase",
+                "value": "Phase PF: Portfolio Evidence"
+              },
+              {
+                "label": "Status",
+                "value": "done"
+              },
+              {
+                "label": "Validation",
+                "value": "pass"
+              },
+              {
+                "label": "Latest run",
+                "value": "run_20260616_093356_97073f38"
+              },
+              {
+                "label": "Changed files",
+                "value": "2"
+              },
+              {
+                "label": "Artifacts",
+                "value": "1"
+              }
+            ],
+            "kind": "task",
+            "leadership_attention": [
+              "No recorded blockers or decision requests."
+            ],
+            "markdown_path": ".loopplane/workflows/wf_20260616_085d0238/results/PF01/human_summary.md",
+            "phase_id": null,
+            "phase_title": "Phase PF: Portfolio Evidence",
+            "project_meaning": "This closes the high-level acceptance intent for PF01: CSV dataset exists with scenario-specific fields; Data dictionary records the generated field meanings. Downstream work can now use the recorded validation, changed files, and artifacts as the review surface.",
+            "status": "ready",
+            "tables": {
+              "changed_files": [
+                {
+                  "Change": "created_or_updated",
+                  "Delta": "+5/-0",
+                  "Path": "subprojects/portfolio_summary/data/source.csv"
+                },
+                {
+                  "Change": "created_or_updated",
+                  "Delta": "+10/-0",
+                  "Path": "subprojects/portfolio_summary/data_dictionary.md"
+                }
+              ],
+              "validation_checks": []
+            },
+            "task_id": "PF01",
+            "title": "Task PF01: Build civic analytics portfolio dataset"
+          },
+          "last_updated_at": "2026-06-16T09:33:57Z",
+          "latest_path": ".loopplane/workflows/wf_20260616_085d0238/results/PF01/latest.json",
+          "latest_run_dir": ".loopplane/workflows/wf_20260616_085d0238/results/PF01/runs/run_20260616_093356_97073f38",
+          "latest_run_id": "run_20260616_093356_97073f38",
+          "risk_level": "low",
+          "status": "done",
+          "task_id": "PF01",
+          "title": "Build civic analytics portfolio dataset",
+          "validation_status": "pass"
+        },
+        {
+          "acceptance": "Markdown report includes a ranked data table.",
+          "acceptance_criteria": [
+            "Markdown report includes a ranked data table.",
+            "SVG figure visualizes the main metric for dashboard summaries."
+          ],
+          "approval": "not_required",
+          "checkbox": "[x]",
+          "deliverables": "subprojects/portfolio_summary/report.md and figures/PF02_figure.svg",
+          "dependencies": [
+            "PF01"
+          ],
+          "display": {
+            "badge": "pass",
+            "highlight": "",
+            "subtitle": "Validation passed."
+          },
+          "evidence_root": ".loopplane/workflows/wf_20260616_085d0238/results/PF02/",
+          "human_summary": {
+            "content": "# Task PF02: Analyze civic analytics portfolio outcomes\n\n## Executive Brief\n\nValidation marker: PORTFOLIO SCORECARD READY LoopPlane marks PF02 accepted for `Analyze civic analytics portfolio outcomes` after pass validation.\n\n## Progress Narrative\n\n- Validation marker: PORTFOLIO SCORECARD READY\n- CSV artifact written\n- Markdown report written\n- SVG figure written when analysis task\n- Acceptance coverage was claimed for: Deterministic civic analytics evidence produced.\n- Planned deliverables now have supporting evidence: subprojects/portfolio summary/report.md and figures/PF02 figure.svg.\n\n## Project Meaning\n\nThis closes the high-level acceptance intent for PF02: Markdown report includes a ranked data table; SVG figure visualizes the main metric for dashboard summaries. Downstream work can now use the recorded validation, changed files, and artifacts as the review surface.\n\n## Key Data\n\n| Field | Value |\n| --- | --- |\n| Task | PF02 - Analyze civic analytics portfolio outcomes |\n| Phase | Phase PF: Portfolio Evidence |\n| Status | done |\n| Validation | pass |\n| Latest run | run_20260616_093357_87635d94 |\n| Changed files | 3 |\n| Artifacts | 2 |\n\n## Evidence And Confidence\n\n- Validation status is pass.\n- No named validation checks were recorded; confidence depends on the overall validation status and evidence pointers.\n- Worker evidence maps back to acceptance criteria: Deterministic civic analytics evidence produced.\n- Review evidence includes artifact(s): PF02 figure.svg; PF02 summary.csv.\n\n\n## Visual Evidence\n\n| Figure | Open |\n| --- | --- |\n| PF02_figure.svg | [Open PF02_figure.svg](.loopplane/workflows/wf_20260616_085d0238/results/PF02/runs/run_20260616_093357_87635d94/artifacts/PF02_figure.svg) |\n\n![PF02_figure.svg](.loopplane/workflows/wf_20260616_085d0238/results/PF02/runs/run_20260616_093357_87635d94/artifacts/PF02_figure.svg \"PF02_figure.svg\")\n[Open full-size PF02_figure.svg](.loopplane/workflows/wf_20260616_085d0238/results/PF02/runs/run_20260616_093357_87635d94/artifacts/PF02_figure.svg)\n\n## Leadership Attention\n\n- No recorded blockers or decision requests.\n\n## Traceability\n\n- Latest pointer: .loopplane/workflows/wf_20260616_085d0238/results/PF02/latest.json\n- Validation record: .loopplane/workflows/wf_20260616_085d0238/results/PF02/runs/run_20260616_093357_87635d94/validation.json\n- Run folder: .loopplane/workflows/wf_20260616_085d0238/results/PF02/runs/run_20260616_093357_87635d94\n- Worker report: .loopplane/workflows/wf_20260616_085d0238/results/PF02/runs/run_20260616_093357_87635d94/report.md\n- Artifact inventory: PF02 figure.svg; PF02 summary.csv\n\n| Path | Change | Delta |\n| --- | --- | --- |\n| subprojects/portfolio_summary/analysis/summary.csv | created_or_updated | +5/-0 |\n| subprojects/portfolio_summary/report.md | created_or_updated | +12/-0 |\n| subprojects/portfolio_summary/figures/PF02_figure.svg | created_or_updated | +16/-0 |\n",
+            "control_points": [],
+            "delivered_progress": [
+              "Validation marker: PORTFOLIO SCORECARD READY",
+              "CSV artifact written",
+              "Markdown report written",
+              "SVG figure written when analysis task",
+              "Acceptance coverage was claimed for: Deterministic civic analytics evidence produced.",
+              "Planned deliverables now have supporting evidence: subprojects/portfolio summary/report.md and figures/PF02 figure.svg."
+            ],
+            "evidence_and_confidence": [
+              "Validation status is pass.",
+              "No named validation checks were recorded; confidence depends on the overall validation status and evidence pointers.",
+              "Worker evidence maps back to acceptance criteria: Deterministic civic analytics evidence produced.",
+              "Review evidence includes artifact(s): PF02 figure.svg; PF02 summary.csv."
+            ],
+            "excerpt": "Validation marker: PORTFOLIO SCORECARD READY LoopPlane marks PF02 accepted for `Analyze civic analytics portfolio outcomes` after pass validation.",
+            "executive_summary": "Validation marker: PORTFOLIO SCORECARD READY LoopPlane marks PF02 accepted for `Analyze civic analytics portfolio outcomes` after pass validation.",
+            "generated_at": "2026-06-16T09:34:07Z",
+            "json_path": ".loopplane/workflows/wf_20260616_085d0238/results/PF02/human_summary.json",
+            "key_data": [
+              {
+                "label": "Task",
+                "value": "PF02 - Analyze civic analytics portfolio outcomes"
+              },
+              {
+                "label": "Phase",
+                "value": "Phase PF: Portfolio Evidence"
+              },
+              {
+                "label": "Status",
+                "value": "done"
+              },
+              {
+                "label": "Validation",
+                "value": "pass"
+              },
+              {
+                "label": "Latest run",
+                "value": "run_20260616_093357_87635d94"
+              },
+              {
+                "label": "Changed files",
+                "value": "3"
+              },
+              {
+                "label": "Artifacts",
+                "value": "2"
+              }
+            ],
+            "kind": "task",
+            "leadership_attention": [
+              "No recorded blockers or decision requests."
+            ],
+            "markdown_path": ".loopplane/workflows/wf_20260616_085d0238/results/PF02/human_summary.md",
+            "phase_id": null,
+            "phase_title": "Phase PF: Portfolio Evidence",
+            "project_meaning": "This closes the high-level acceptance intent for PF02: Markdown report includes a ranked data table; SVG figure visualizes the main metric for dashboard summaries. Downstream work can now use the recorded validation, changed files, and artifacts as the review surface.",
+            "status": "ready",
+            "tables": {
+              "changed_files": [
+                {
+                  "Change": "created_or_updated",
+                  "Delta": "+5/-0",
+                  "Path": "subprojects/portfolio_summary/analysis/summary.csv"
+                },
+                {
+                  "Change": "created_or_updated",
+                  "Delta": "+12/-0",
+                  "Path": "subprojects/portfolio_summary/report.md"
+                },
+                {
+                  "Change": "created_or_updated",
+                  "Delta": "+16/-0",
+                  "Path": "subprojects/portfolio_summary/figures/PF02_figure.svg"
+                }
+              ],
+              "validation_checks": []
+            },
+            "task_id": "PF02",
+            "title": "Task PF02: Analyze civic analytics portfolio outcomes"
+          },
+          "last_updated_at": "2026-06-16T09:33:58Z",
+          "latest_path": ".loopplane/workflows/wf_20260616_085d0238/results/PF02/latest.json",
+          "latest_run_dir": ".loopplane/workflows/wf_20260616_085d0238/results/PF02/runs/run_20260616_093357_87635d94",
+          "latest_run_id": "run_20260616_093357_87635d94",
+          "risk_level": "low",
+          "status": "done",
+          "task_id": "PF02",
+          "title": "Analyze civic analytics portfolio outcomes",
+          "validation_status": "pass"
+        }
+      ],
+      "title": "Phase PF: Portfolio Evidence"
+    }
+  ],
+  "plan_file": ".loopplane/workflows/wf_20260616_085d0238/PLAN.md",
+  "plan_source": {
+    "active_plan_file": ".loopplane/workflows/wf_20260616_085d0238/PLAN.md",
+    "kind": "active",
+    "path": ".loopplane/workflows/wf_20260616_085d0238/PLAN.md"
+  },
+  "schema_version": "1.5",
+  "source_event_id": "evt_000000000101",
+  "source_hashes": {
+    "active_leases": "sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+    "active_plan": "sha256:5f7d101abebbe8d8e8934ab6d4688e9a910c3aa96b317aa1d50047ac9e40c060",
+    "events_count": 101,
+    "events_head": "evt_000000000101",
+    "events_sha256": "sha256:90b077b1e57d7bf1ba0bc569dd289e855aed1fd864f65b713aca06a0ffa94d3c",
+    "expansion_registry": "sha256:066fda366c3fac1799a518dd024972fc5c12c44c54a4d113fec50687bc0da00b",
+    "plan": "sha256:5f7d101abebbe8d8e8934ab6d4688e9a910c3aa96b317aa1d50047ac9e40c060",
+    "plan_file": ".loopplane/workflows/wf_20260616_085d0238/PLAN.md",
+    "plan_source": "active",
+    "state": "sha256:9d6fe17ca14dbf3e4d65ae1f18733e225cc53e2bebd2dd653731b4d0dbf772e1",
+    "validations_manifest": "sha256:43bc14d4b1153aba188ff188431706ab9e982914af0171847fb1a1bde5e3f029"
+  },
+  "summary": {
+    "blocked": 0,
+    "done": 2,
+    "objectives": {
+      "closed": 2,
+      "needs_expansion": 0,
+      "needs_verification": 0,
+      "objective_unresolved": 0,
+      "open": 0,
+      "parse_error_count": 0,
+      "total": 2
+    },
+    "partial": 0,
+    "pending": 0,
+    "progress_percent": 100.0,
+    "skipped": 0,
+    "total": 2
+  },
+  "tasks": [
+    {
+      "acceptance": "CSV dataset exists with scenario-specific fields.",
+      "acceptance_criteria": [
+        "CSV dataset exists with scenario-specific fields.",
+        "Data dictionary records the generated field meanings."
+      ],
+      "approval": "not_required",
+      "checkbox": "[x]",
+      "deliverables": "subprojects/portfolio_summary/data/source.csv and data_dictionary.md",
+      "dependencies": [],
+      "display": {
+        "badge": "pass",
+        "highlight": "",
+        "subtitle": "Validation passed."
+      },
+      "evidence_root": ".loopplane/workflows/wf_20260616_085d0238/results/PF01/",
+      "human_summary": {
+        "content": "# Task PF01: Build civic analytics portfolio dataset\n\n## Executive Brief\n\nValidation marker: PORTFOLIO INVENTORY READY LoopPlane marks PF01 accepted for `Build civic analytics portfolio dataset` after pass validation.\n\n## Progress Narrative\n\n- Validation marker: PORTFOLIO INVENTORY READY\n- CSV artifact written\n- Markdown report written\n- SVG figure written when analysis task\n- Acceptance coverage was claimed for: Deterministic civic analytics evidence produced.\n- Planned deliverables now have supporting evidence: subprojects/portfolio summary/data/source.csv and data dictionary.md.\n\n## Project Meaning\n\nThis closes the high-level acceptance intent for PF01: CSV dataset exists with scenario-specific fields; Data dictionary records the generated field meanings. Downstream work can now use the recorded validation, changed files, and artifacts as the review surface.\n\n## Key Data\n\n| Field | Value |\n| --- | --- |\n| Task | PF01 - Build civic analytics portfolio dataset |\n| Phase | Phase PF: Portfolio Evidence |\n| Status | done |\n| Validation | pass |\n| Latest run | run_20260616_093356_97073f38 |\n| Changed files | 2 |\n| Artifacts | 1 |\n\n## Evidence And Confidence\n\n- Validation status is pass.\n- No named validation checks were recorded; confidence depends on the overall validation status and evidence pointers.\n- Worker evidence maps back to acceptance criteria: Deterministic civic analytics evidence produced.\n- Review evidence includes artifact(s): PF01 data.csv.\n\n\n\n\n\n## Leadership Attention\n\n- No recorded blockers or decision requests.\n\n## Traceability\n\n- Latest pointer: .loopplane/workflows/wf_20260616_085d0238/results/PF01/latest.json\n- Validation record: .loopplane/workflows/wf_20260616_085d0238/results/PF01/runs/run_20260616_093356_97073f38/validation.json\n- Run folder: .loopplane/workflows/wf_20260616_085d0238/results/PF01/runs/run_20260616_093356_97073f38\n- Worker report: .loopplane/workflows/wf_20260616_085d0238/results/PF01/runs/run_20260616_093356_97073f38/report.md\n- Artifact inventory: PF01 data.csv\n\n| Path | Change | Delta |\n| --- | --- | --- |\n| subprojects/portfolio_summary/data/source.csv | created_or_updated | +5/-0 |\n| subprojects/portfolio_summary/data_dictionary.md | created_or_updated | +10/-0 |\n",
+        "control_points": [],
+        "delivered_progress": [
+          "Validation marker: PORTFOLIO INVENTORY READY",
+          "CSV artifact written",
+          "Markdown report written",
+          "SVG figure written when analysis task",
+          "Acceptance coverage was claimed for: Deterministic civic analytics evidence produced.",
+          "Planned deliverables now have supporting evidence: subprojects/portfolio summary/data/source.csv and data dictionary.md."
+        ],
+        "evidence_and_confidence": [
+          "Validation status is pass.",
+          "No named validation checks were recorded; confidence depends on the overall validation status and evidence pointers.",
+          "Worker evidence maps back to acceptance criteria: Deterministic civic analytics evidence produced.",
+          "Review evidence includes artifact(s): PF01 data.csv."
+        ],
+        "excerpt": "Validation marker: PORTFOLIO INVENTORY READY LoopPlane marks PF01 accepted for `Build civic analytics portfolio dataset` after pass validation.",
+        "executive_summary": "Validation marker: PORTFOLIO INVENTORY READY LoopPlane marks PF01 accepted for `Build civic analytics portfolio dataset` after pass validation.",
+        "generated_at": "2026-06-16T09:34:07Z",
+        "json_path": ".loopplane/workflows/wf_20260616_085d0238/results/PF01/human_summary.json",
+        "key_data": [
+          {
+            "label": "Task",
+            "value": "PF01 - Build civic analytics portfolio dataset"
+          },
+          {
+            "label": "Phase",
+            "value": "Phase PF: Portfolio Evidence"
+          },
+          {
+            "label": "Status",
+            "value": "done"
+          },
+          {
+            "label": "Validation",
+            "value": "pass"
+          },
+          {
+            "label": "Latest run",
+            "value": "run_20260616_093356_97073f38"
+          },
+          {
+            "label": "Changed files",
+            "value": "2"
+          },
+          {
+            "label": "Artifacts",
+            "value": "1"
+          }
+        ],
+        "kind": "task",
+        "leadership_attention": [
+          "No recorded blockers or decision requests."
+        ],
+        "markdown_path": ".loopplane/workflows/wf_20260616_085d0238/results/PF01/human_summary.md",
+        "phase_id": null,
+        "phase_title": "Phase PF: Portfolio Evidence",
+        "project_meaning": "This closes the high-level acceptance intent for PF01: CSV dataset exists with scenario-specific fields; Data dictionary records the generated field meanings. Downstream work can now use the recorded validation, changed files, and artifacts as the review surface.",
+        "status": "ready",
+        "tables": {
+          "changed_files": [
+            {
+              "Change": "created_or_updated",
+              "Delta": "+5/-0",
+              "Path": "subprojects/portfolio_summary/data/source.csv"
+            },
+            {
+              "Change": "created_or_updated",
+              "Delta": "+10/-0",
+              "Path": "subprojects/portfolio_summary/data_dictionary.md"
+            }
+          ],
+          "validation_checks": []
+        },
+        "task_id": "PF01",
+        "title": "Task PF01: Build civic analytics portfolio dataset"
+      },
+      "last_updated_at": "2026-06-16T09:33:57Z",
+      "latest_path": ".loopplane/workflows/wf_20260616_085d0238/results/PF01/latest.json",
+      "latest_run_dir": ".loopplane/workflows/wf_20260616_085d0238/results/PF01/runs/run_20260616_093356_97073f38",
+      "latest_run_id": "run_20260616_093356_97073f38",
+      "risk_level": "low",
+      "status": "done",
+      "task_id": "PF01",
+      "title": "Build civic analytics portfolio dataset",
+      "validation_status": "pass"
+    },
+    {
+      "acceptance": "Markdown report includes a ranked data table.",
+      "acceptance_criteria": [
+        "Markdown report includes a ranked data table.",
+        "SVG figure visualizes the main metric for dashboard summaries."
+      ],
+      "approval": "not_required",
+      "checkbox": "[x]",
+      "deliverables": "subprojects/portfolio_summary/report.md and figures/PF02_figure.svg",
+      "dependencies": [
+        "PF01"
+      ],
+      "display": {
+        "badge": "pass",
+        "highlight": "",
+        "subtitle": "Validation passed."
+      },
+      "evidence_root": ".loopplane/workflows/wf_20260616_085d0238/results/PF02/",
+      "human_summary": {
+        "content": "# Task PF02: Analyze civic analytics portfolio outcomes\n\n## Executive Brief\n\nValidation marker: PORTFOLIO SCORECARD READY LoopPlane marks PF02 accepted for `Analyze civic analytics portfolio outcomes` after pass validation.\n\n## Progress Narrative\n\n- Validation marker: PORTFOLIO SCORECARD READY\n- CSV artifact written\n- Markdown report written\n- SVG figure written when analysis task\n- Acceptance coverage was claimed for: Deterministic civic analytics evidence produced.\n- Planned deliverables now have supporting evidence: subprojects/portfolio summary/report.md and figures/PF02 figure.svg.\n\n## Project Meaning\n\nThis closes the high-level acceptance intent for PF02: Markdown report includes a ranked data table; SVG figure visualizes the main metric for dashboard summaries. Downstream work can now use the recorded validation, changed files, and artifacts as the review surface.\n\n## Key Data\n\n| Field | Value |\n| --- | --- |\n| Task | PF02 - Analyze civic analytics portfolio outcomes |\n| Phase | Phase PF: Portfolio Evidence |\n| Status | done |\n| Validation | pass |\n| Latest run | run_20260616_093357_87635d94 |\n| Changed files | 3 |\n| Artifacts | 2 |\n\n## Evidence And Confidence\n\n- Validation status is pass.\n- No named validation checks were recorded; confidence depends on the overall validation status and evidence pointers.\n- Worker evidence maps back to acceptance criteria: Deterministic civic analytics evidence produced.\n- Review evidence includes artifact(s): PF02 figure.svg; PF02 summary.csv.\n\n\n## Visual Evidence\n\n| Figure | Open |\n| --- | --- |\n| PF02_figure.svg | [Open PF02_figure.svg](.loopplane/workflows/wf_20260616_085d0238/results/PF02/runs/run_20260616_093357_87635d94/artifacts/PF02_figure.svg) |\n\n![PF02_figure.svg](.loopplane/workflows/wf_20260616_085d0238/results/PF02/runs/run_20260616_093357_87635d94/artifacts/PF02_figure.svg \"PF02_figure.svg\")\n[Open full-size PF02_figure.svg](.loopplane/workflows/wf_20260616_085d0238/results/PF02/runs/run_20260616_093357_87635d94/artifacts/PF02_figure.svg)\n\n## Leadership Attention\n\n- No recorded blockers or decision requests.\n\n## Traceability\n\n- Latest pointer: .loopplane/workflows/wf_20260616_085d0238/results/PF02/latest.json\n- Validation record: .loopplane/workflows/wf_20260616_085d0238/results/PF02/runs/run_20260616_093357_87635d94/validation.json\n- Run folder: .loopplane/workflows/wf_20260616_085d0238/results/PF02/runs/run_20260616_093357_87635d94\n- Worker report: .loopplane/workflows/wf_20260616_085d0238/results/PF02/runs/run_20260616_093357_87635d94/report.md\n- Artifact inventory: PF02 figure.svg; PF02 summary.csv\n\n| Path | Change | Delta |\n| --- | --- | --- |\n| subprojects/portfolio_summary/analysis/summary.csv | created_or_updated | +5/-0 |\n| subprojects/portfolio_summary/report.md | created_or_updated | +12/-0 |\n| subprojects/portfolio_summary/figures/PF02_figure.svg | created_or_updated | +16/-0 |\n",
+        "control_points": [],
+        "delivered_progress": [
+          "Validation marker: PORTFOLIO SCORECARD READY",
+          "CSV artifact written",
+          "Markdown report written",
+          "SVG figure written when analysis task",
+          "Acceptance coverage was claimed for: Deterministic civic analytics evidence produced.",
+          "Planned deliverables now have supporting evidence: subprojects/portfolio summary/report.md and figures/PF02 figure.svg."
+        ],
+        "evidence_and_confidence": [
+          "Validation status is pass.",
+          "No named validation checks were recorded; confidence depends on the overall validation status and evidence pointers.",
+          "Worker evidence maps back to acceptance criteria: Deterministic civic analytics evidence produced.",
+          "Review evidence includes artifact(s): PF02 figure.svg; PF02 summary.csv."
+        ],
+        "excerpt": "Validation marker: PORTFOLIO SCORECARD READY LoopPlane marks PF02 accepted for `Analyze civic analytics portfolio outcomes` after pass validation.",
+        "executive_summary": "Validation marker: PORTFOLIO SCORECARD READY LoopPlane marks PF02 accepted for `Analyze civic analytics portfolio outcomes` after pass validation.",
+        "generated_at": "2026-06-16T09:34:07Z",
+        "json_path": ".loopplane/workflows/wf_20260616_085d0238/results/PF02/human_summary.json",
+        "key_data": [
+          {
+            "label": "Task",
+            "value": "PF02 - Analyze civic analytics portfolio outcomes"
+          },
+          {
+            "label": "Phase",
+            "value": "Phase PF: Portfolio Evidence"
+          },
+          {
+            "label": "Status",
+            "value": "done"
+          },
+          {
+            "label": "Validation",
+            "value": "pass"
+          },
+          {
+            "label": "Latest run",
+            "value": "run_20260616_093357_87635d94"
+          },
+          {
+            "label": "Changed files",
+            "value": "3"
+          },
+          {
+            "label": "Artifacts",
+            "value": "2"
+          }
+        ],
+        "kind": "task",
+        "leadership_attention": [
+          "No recorded blockers or decision requests."
+        ],
+        "markdown_path": ".loopplane/workflows/wf_20260616_085d0238/results/PF02/human_summary.md",
+        "phase_id": null,
+        "phase_title": "Phase PF: Portfolio Evidence",
+        "project_meaning": "This closes the high-level acceptance intent for PF02: Markdown report includes a ranked data table; SVG figure visualizes the main metric for dashboard summaries. Downstream work can now use the recorded validation, changed files, and artifacts as the review surface.",
+        "status": "ready",
+        "tables": {
+          "changed_files": [
+            {
+              "Change": "created_or_updated",
+              "Delta": "+5/-0",
+              "Path": "subprojects/portfolio_summary/analysis/summary.csv"
+            },
+            {
+              "Change": "created_or_updated",
+              "Delta": "+12/-0",
+              "Path": "subprojects/portfolio_summary/report.md"
+            },
+            {
+              "Change": "created_or_updated",
+              "Delta": "+16/-0",
+              "Path": "subprojects/portfolio_summary/figures/PF02_figure.svg"
+            }
+          ],
+          "validation_checks": []
+        },
+        "task_id": "PF02",
+        "title": "Task PF02: Analyze civic analytics portfolio outcomes"
+      },
+      "last_updated_at": "2026-06-16T09:33:58Z",
+      "latest_path": ".loopplane/workflows/wf_20260616_085d0238/results/PF02/latest.json",
+      "latest_run_dir": ".loopplane/workflows/wf_20260616_085d0238/results/PF02/runs/run_20260616_093357_87635d94",
+      "latest_run_id": "run_20260616_093357_87635d94",
+      "risk_level": "low",
+      "status": "done",
+      "task_id": "PF02",
+      "title": "Analyze civic analytics portfolio outcomes",
+      "validation_status": "pass"
+    }
+  ],
+  "workflow_id": "wf_20260616_085d0238",
+  "workflow_title": "Civic Analytics Portfolio"
+}

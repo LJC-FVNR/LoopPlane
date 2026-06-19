@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "LoopPlane worker write boundary policy result",
+  "type": "object",
+  "required": ["schema_version", "status", "ok", "task_id", "run_dir", "workspace_boundary", "resolved_workspace_boundary", "allow_out_of_boundary_writes", "security_allows_out_of_boundary_writes", "active_plan_allows_out_of_boundary_writes", "active_plan", "checked_paths", "allowed_out_of_boundary_paths", "violations"],
+  "properties": {
+    "schema_version": {"const": "1.5"},
+    "status": {"type": "string", "enum": ["pass", "violation"]},
+    "ok": {"type": "boolean"},
+    "task_id": {"type": ["string", "null"]},
+    "run_dir": {"type": "string", "minLength": 1},
+    "workspace_boundary": {"type": "string"},
+    "resolved_workspace_boundary": {"type": "string", "minLength": 1},
+    "allow_out_of_boundary_writes": {"type": "boolean"},
+    "security_allows_out_of_boundary_writes": {"type": "boolean"},
+    "active_plan_allows_out_of_boundary_writes": {"type": "boolean"},
+    "active_plan": {"type": "boolean"},
+    "checked_paths": {"type": "array", "items": {"type": "object"}},
+    "allowed_out_of_boundary_paths": {"type": "array", "items": {"type": "object"}},
+    "violations": {"type": "array", "items": {"type": "object"}}
+  },
+  "additionalProperties": true
+}

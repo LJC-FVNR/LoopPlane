@@ -1,0 +1,96 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "LoopPlane workflow.json",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "workflow_id",
+    "created_at",
+    "project_root",
+    "brief_file",
+    "plan_file",
+    "shared_context_file",
+    "results_dir",
+    "runtime_dir",
+    "read_models_dir",
+    "requests_dir",
+    "planning_dir",
+    "version_control_config_file",
+    "default_worker_runner",
+    "planning",
+    "execution"
+  ],
+  "properties": {
+    "schema_version": {"const": "1.5"},
+    "workflow_id": {"type": "string", "pattern": "^wf_[0-9]{8}_[0-9a-f]{8}$"},
+    "created_at": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"},
+    "project_root": {"const": "."},
+    "brief_file": {"type": "string", "minLength": 1},
+    "plan_file": {"type": "string", "minLength": 1},
+    "shared_context_file": {"type": "string", "minLength": 1},
+    "results_dir": {"type": "string", "minLength": 1},
+    "runtime_dir": {"type": "string", "minLength": 1},
+    "read_models_dir": {"type": "string", "minLength": 1},
+    "requests_dir": {"type": "string", "minLength": 1},
+    "planning_dir": {"type": "string", "minLength": 1},
+    "version_control_config_file": {"type": "string", "minLength": 1},
+    "default_worker_runner": {"type": "string", "minLength": 1},
+    "planning": {
+      "type": "object",
+      "required": ["enabled", "planner_runner", "auditor_runner", "max_planner_iterations", "auditor_required"],
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "planner_runner": {"type": "string", "minLength": 1},
+        "auditor_runner": {"type": "string", "minLength": 1},
+        "max_planner_iterations": {"type": "integer", "minimum": 1},
+        "auditor_required": {"type": "boolean"},
+        "task_granularity": {
+          "type": "string",
+          "enum": ["coarse_by_default", "balanced", "fine_grained"]
+        },
+        "max_initial_tasks": {"type": "integer", "minimum": 1},
+        "batch_low_risk_tasks": {"type": "boolean"}
+      }
+    },
+    "execution": {
+      "type": "object",
+      "required": ["max_concurrent_workers", "continue_on_fail", "recovery_before_new_work"],
+      "properties": {
+        "max_concurrent_workers": {"type": "integer", "minimum": 1},
+        "continue_on_fail": {"type": "boolean"},
+        "recovery_before_new_work": {"type": "boolean"}
+      }
+    },
+    "validation": {
+      "type": "object",
+      "properties": {
+        "validator_agent_mode": {
+          "type": "string",
+          "enum": ["disabled", "on_deterministic_failure", "always"]
+        },
+        "validator_agent_for_high_risk": {"type": "boolean"}
+      },
+      "additionalProperties": false
+    },
+    "self_expansion": {
+      "type": "object",
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "default_mode": {"type": "string", "enum": ["append_only"]},
+        "max_cycles": {"type": "integer", "minimum": 0},
+        "max_tasks_added_total": {"type": "integer", "minimum": 0},
+        "max_tasks_per_cycle": {"type": "integer", "minimum": 0},
+        "max_repeated_signature_count": {"type": "integer", "minimum": 0},
+        "auto_apply_low_risk": {"type": "boolean"},
+        "require_approval_for_medium_risk": {"type": "boolean"},
+        "require_approval_for_high_risk": {"type": "boolean"},
+        "allow_after_recovery_exhausted": {"type": "boolean"},
+        "allow_after_final_verification_failure": {"type": "boolean"},
+        "allow_when_no_executable_tasks": {"type": "boolean"},
+        "allow_after_objective_gap": {"type": "boolean"},
+        "auto_apply_objective_gap_low_medium_risk": {"type": "boolean"}
+      },
+      "additionalProperties": false
+    }
+  }
+}

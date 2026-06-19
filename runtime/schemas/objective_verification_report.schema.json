@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "LoopPlane objective verification report",
+  "type": "object",
+  "required": ["schema_version", "workflow_id", "scope", "status", "verified_at", "objective_results", "summary"],
+  "properties": {
+    "schema_version": {"const": "1.5"},
+    "workflow_id": {"type": "string", "minLength": 1},
+    "scope": {"type": "string", "enum": ["phase", "workflow"]},
+    "phase_id": {"type": ["string", "null"]},
+    "phase_title": {"type": ["string", "null"]},
+    "status": {"type": "string", "enum": ["satisfied", "unmet", "partial", "blocked", "waived"]},
+    "verified_at": {"type": "string"},
+    "plan_sha256": {"type": "string"},
+    "accepted_plan_sha256": {"type": "string"},
+    "objective_structure_fingerprint": {"type": "string"},
+    "objective_closure_fingerprint": {"type": "string"},
+    "objective_results": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["objective_id", "status", "verdict", "agent_rationale"],
+        "properties": {
+          "objective_id": {"type": "string", "minLength": 1},
+          "status": {"type": "string", "enum": ["satisfied", "unmet", "partial", "blocked", "waived"]},
+          "verdict": {
+            "type": "string",
+            "enum": [
+              "satisfied",
+              "satisfied_with_notes",
+              "unmet_expandable",
+              "unmet_repeated",
+              "blocked_external",
+              "waived_by_policy"
+            ]
+          },
+          "confidence": {"type": "string", "enum": ["low", "medium", "high"]},
+          "evidence_reviewed": {"type": "array", "items": {"type": "string"}},
+          "agent_rationale": {"type": "string", "minLength": 1},
+          "gap_summary": {"type": "string"},
+          "policy_reason": {"type": "string"},
+          "waiver_reason": {"type": "string"},
+          "warnings": {"type": "array", "items": {"type": "string"}},
+          "unmet_action": {"type": "string"},
+          "expandable": {"type": "boolean"},
+          "suggested_followup": {"type": "string"}
+        },
+        "additionalProperties": true
+      }
+    },
+    "summary": {
+      "type": "object",
+      "properties": {
+        "total": {"type": "integer", "minimum": 0},
+        "passed": {"type": "integer", "minimum": 0},
+        "unmet": {"type": "integer", "minimum": 0},
+        "blocked": {"type": "integer", "minimum": 0},
+        "waived": {"type": "integer", "minimum": 0}
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}

@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "LoopPlane current_workflow.json",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "workspace_id",
+    "current_workflow_id",
+    "selection_reason",
+    "updated_at",
+    "updated_by"
+  ],
+  "properties": {
+    "schema_version": {"const": "1.6"},
+    "workspace_id": {"type": "string", "pattern": "^ws_[0-9A-Za-z][0-9A-Za-z_-]{7,63}$"},
+    "current_workflow_id": {"type": "string", "pattern": "^wf_[0-9]{8}_[0-9a-f]{8}$"},
+    "selection_reason": {"type": "string", "minLength": 1},
+    "updated_at": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"},
+    "updated_by": {"type": "string", "minLength": 1}
+  },
+  "additionalProperties": true
+}

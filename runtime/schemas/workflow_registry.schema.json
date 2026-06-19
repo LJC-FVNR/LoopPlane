@@ -1,0 +1,76 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "LoopPlane workflow_registry.json",
+  "type": "object",
+  "required": ["schema_version", "workspace_id", "generated_at", "workflows"],
+  "properties": {
+    "schema_version": {"const": "1.6"},
+    "workspace_id": {"type": "string", "pattern": "^ws_[0-9A-Za-z][0-9A-Za-z_-]{7,63}$"},
+    "generated_at": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"},
+    "workflows": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": [
+          "workflow_id",
+          "name",
+          "status",
+          "workflow_root",
+          "created_at",
+          "last_seen_at",
+          "plan_file",
+          "read_models_dir",
+          "read_only",
+          "archived",
+          "summary"
+        ],
+        "properties": {
+          "workflow_id": {"type": "string", "pattern": "^wf_[0-9]{8}_[0-9a-f]{8}$"},
+          "name": {"type": "string", "minLength": 1},
+          "status": {
+            "type": "string",
+            "enum": [
+              "draft",
+              "ready",
+              "active",
+              "running",
+              "paused",
+              "stopped",
+              "objective_unresolved",
+              "completed",
+              "failed",
+              "archived",
+              "read_only_imported",
+              "forked",
+              "superseded"
+            ]
+          },
+          "workflow_root": {"type": "string", "minLength": 1},
+          "created_at": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"},
+          "last_seen_at": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"},
+          "plan_file": {"type": "string", "minLength": 1},
+          "read_models_dir": {"type": "string", "minLength": 1},
+          "runtime_dir": {"type": "string", "minLength": 1},
+          "requests_dir": {"type": "string", "minLength": 1},
+          "completion_marker": {"type": "string", "minLength": 1},
+          "read_only": {"type": "boolean"},
+          "archived": {"type": "boolean"},
+          "summary": {
+            "type": "object",
+            "required": ["one_line", "tasks_total", "tasks_completed", "tasks_blocked"],
+            "properties": {
+              "one_line": {"type": "string", "minLength": 1},
+              "tasks_total": {"type": "integer", "minimum": 0},
+              "tasks_completed": {"type": "integer", "minimum": 0},
+              "tasks_blocked": {"type": "integer", "minimum": 0}
+            },
+            "additionalProperties": true
+          }
+        },
+        "additionalProperties": true
+      }
+    }
+  },
+  "additionalProperties": true
+}

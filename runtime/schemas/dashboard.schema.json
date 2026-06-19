@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "LoopPlane dashboard.json",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "enabled",
+    "host",
+    "port",
+    "preferred_port",
+    "port_range",
+    "server_state_file",
+    "read_models_dir",
+    "allow_chat",
+    "chat_runner",
+    "allow_change_requests",
+    "allow_start_stop",
+    "refresh_interval_ms"
+  ],
+  "properties": {
+    "schema_version": {"const": "1.5"},
+    "enabled": {"type": "boolean"},
+    "host": {"type": "string", "enum": ["127.0.0.1", "localhost"]},
+    "port": {
+      "oneOf": [
+        {"type": "integer", "minimum": 1, "maximum": 65535},
+        {"const": "auto"}
+      ]
+    },
+    "preferred_port": {"type": "integer", "minimum": 1, "maximum": 65535},
+    "port_range": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 2,
+      "items": {"type": "integer", "minimum": 1, "maximum": 65535}
+    },
+    "server_state_file": {"type": "string", "minLength": 1},
+    "read_models_dir": {"type": "string", "minLength": 1},
+    "allow_chat": {"type": "boolean"},
+    "chat_runner": {"type": "string", "minLength": 1},
+    "allow_change_requests": {"type": "boolean"},
+    "allow_start_stop": {"type": "boolean"},
+    "max_dashboard_events": {"type": "integer", "minimum": 1},
+    "refresh_interval_ms": {"type": "integer", "minimum": 100}
+  }
+}

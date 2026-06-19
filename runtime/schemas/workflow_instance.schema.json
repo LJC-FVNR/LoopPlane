@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "LoopPlane workspace instance metadata",
+  "type": "object",
+  "required": ["schema_version", "layout", "workflow_root", "project_root"],
+  "properties": {
+    "schema_version": {"type": "string", "enum": ["1.5", "1.6"]},
+    "workspace_id": {"type": "string", "pattern": "^ws_[0-9A-Za-z][0-9A-Za-z_-]{7,63}$"},
+    "workflow_id": {"type": "string"},
+    "current_workflow_id": {"type": "string"},
+    "installed_at": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"},
+    "installed_by": {"type": "string"},
+    "layout": {"type": "string", "minLength": 1},
+    "workflow_root": {"type": "string", "minLength": 1},
+    "project_root": {"const": "."}
+  },
+  "additionalProperties": true
+}

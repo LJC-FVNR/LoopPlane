@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "LoopPlane machine-local agent runner overrides",
+  "type": "object",
+  "required": ["schema_version"],
+  "properties": {
+    "schema_version": {"const": "1.6"},
+    "authority": {"type": "string", "enum": ["machine_local", "discovery_only"]},
+    "runners": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "role": {"type": "string"},
+          "adapter": {"type": "string"},
+          "enabled": {"type": "boolean"},
+          "command": {"type": "string"},
+          "cwd": {"type": "string"},
+          "prompt_delivery": {"type": "object"},
+          "args": {"type": "array", "items": {"type": "string"}},
+          "env": {"type": "object"},
+          "timeout_seconds": {"type": "integer", "minimum": 1},
+          "stream_logs": {"type": "boolean"},
+          "permission_policy": {"type": "object"},
+          "adapter_options": {"type": "object"},
+          "doctor": {"type": "object"},
+          "resource_policy": {"type": "object"}
+        },
+        "additionalProperties": false
+      }
+    },
+    "projects": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "project_root": {"type": "string"},
+          "authority": {"type": "string", "enum": ["machine_local"]},
+          "runners": {"type": "object"}
+        },
+        "additionalProperties": true
+      }
+    }
+  },
+  "additionalProperties": true
+}

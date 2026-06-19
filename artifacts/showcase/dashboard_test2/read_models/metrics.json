@@ -1,0 +1,55 @@
+{
+  "counts": {
+    "change_requests_applied": 0,
+    "change_requests_pending": 0,
+    "change_requests_total": 0,
+    "failures_total": 0,
+    "recoveries_total": 0,
+    "runs_total": 9,
+    "self_expansion_applied": 0,
+    "self_expansion_pending_resolution": 0,
+    "self_expansion_proposals_total": 0,
+    "tasks_blocked": 0,
+    "tasks_done": 2,
+    "tasks_partial": 0,
+    "tasks_skipped": 0,
+    "tasks_total": 2,
+    "validations_failed": 0
+  },
+  "durations": {
+    "active_worker_seconds": 0,
+    "workflow_elapsed_seconds": 42756
+  },
+  "event_replay": {
+    "events_replayed": 1,
+    "events_through_sequence": 100,
+    "latest_event_id": "evt_000000000101",
+    "latest_event_seq": 101,
+    "snapshot_id": "snapshot_000100",
+    "snapshot_path": ".loopplane/workflows/wf_20260616_085d0238/runtime/snapshots/snapshot_000100.json"
+  },
+  "generated_at": "2026-06-16T21:26:30Z",
+  "last_event_seq": 101,
+  "plan_source": {
+    "active_plan_file": ".loopplane/workflows/wf_20260616_085d0238/PLAN.md",
+    "kind": "active",
+    "path": ".loopplane/workflows/wf_20260616_085d0238/PLAN.md"
+  },
+  "schema_version": "1.5",
+  "source_event_id": "evt_000000000101",
+  "source_hashes": {
+    "active_leases": "sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+    "active_plan": "sha256:5f7d101abebbe8d8e8934ab6d4688e9a910c3aa96b317aa1d50047ac9e40c060",
+    "events_count": 101,
+    "events_head": "evt_000000000101",
+    "events_sha256": "sha256:90b077b1e57d7bf1ba0bc569dd289e855aed1fd864f65b713aca06a0ffa94d3c",
+    "expansion_registry": "sha256:066fda366c3fac1799a518dd024972fc5c12c44c54a4d113fec50687bc0da00b",
+    "plan": "sha256:5f7d101abebbe8d8e8934ab6d4688e9a910c3aa96b317aa1d50047ac9e40c060",
+    "plan_file": ".loopplane/workflows/wf_20260616_085d0238/PLAN.md",
+    "plan_source": "active",
+    "state": "sha256:9d6fe17ca14dbf3e4d65ae1f18733e225cc53e2bebd2dd653731b4d0dbf772e1",
+    "validations_manifest": "sha256:43bc14d4b1153aba188ff188431706ab9e982914af0171847fb1a1bde5e3f029"
+  },
+  "workflow_id": "wf_20260616_085d0238",
+  "workflow_title": "Civic Analytics Portfolio"
+}

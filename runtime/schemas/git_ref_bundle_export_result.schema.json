@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "LoopPlane Git ref bundle export result",
+  "type": "object",
+  "required": ["schema_version", "generated_at", "status", "ok", "project_root", "output", "git", "repository", "bundle", "checkpoint_log", "safety", "warnings", "errors"],
+  "properties": {
+    "schema_version": {"const": "loopplane-git-ref-bundle-export-1"},
+    "generated_at": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"},
+    "status": {"type": "string"},
+    "ok": {"type": "boolean"},
+    "project_root": {"type": "string", "minLength": 1},
+    "workflow_id": {"type": ["string", "null"]},
+    "output": {"type": "string", "minLength": 1},
+    "git": {"type": "object", "required": ["available"]},
+    "repository": {"type": "object", "required": ["detected", "inside_work_tree"]},
+    "bundle": {"type": "object", "required": ["path", "format", "ref_count", "refs", "managed_refs_only"]},
+    "checkpoint_log": {"type": "object", "required": ["path", "record_count"]},
+    "safety": {"type": "object", "required": ["no_remote_push", "no_remote_fetch", "remote_operations_performed", "branch_switch_performed", "history_rewritten", "user_history_modified", "user_branch_modified"]},
+    "warnings": {"type": "array", "items": {"type": "string"}},
+    "errors": {"type": "array", "items": {"type": "string"}}
+  },
+  "additionalProperties": true
+}

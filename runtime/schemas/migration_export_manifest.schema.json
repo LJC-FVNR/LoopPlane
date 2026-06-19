@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "LoopPlane migration export manifest",
+  "type": "object",
+  "required": ["schema_version", "profile", "created_at", "project_root", "workspace_boundary", "resolved_workspace_boundary", "workspace_id", "current_workflow_id", "archive_format", "files", "excluded_paths"],
+  "properties": {
+    "schema_version": {"const": "loopplane-migration-export-1"},
+    "profile": {"type": "string", "enum": ["source", "stateful", "archive"]},
+    "created_at": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"},
+    "project_root": {"const": "."},
+    "workspace_boundary": {"type": "string"},
+    "resolved_workspace_boundary": {"type": "string", "minLength": 1},
+    "workspace_id": {"type": "string", "pattern": "^ws_[0-9A-Za-z][0-9A-Za-z_-]{7,63}$"},
+    "current_workflow_id": {"type": "string", "pattern": "^wf_[0-9]{8}_[0-9a-f]{8}$"},
+    "archive_format": {"const": "tar"},
+    "files": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["path", "category", "source", "size", "sha256"],
+        "properties": {
+          "path": {"type": "string", "minLength": 1},
+          "category": {"type": "string", "minLength": 1},
+          "source": {"type": "string", "minLength": 1},
+          "size": {"type": "integer", "minimum": 0},
+          "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+        },
+        "additionalProperties": true
+      }
+    },
+    "excluded_paths": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["path", "reason"],
+        "properties": {
+          "path": {"type": "string", "minLength": 1},
+          "reason": {"type": "string", "minLength": 1}
+        },
+        "additionalProperties": true
+      }
+    },
+    "source_profile": {"type": "object"},
+    "stateful_profile": {"type": "object"},
+    "archive_profile": {"type": "object"},
+    "migration_intent": {"type": "object"}
+  },
+  "additionalProperties": true
+}

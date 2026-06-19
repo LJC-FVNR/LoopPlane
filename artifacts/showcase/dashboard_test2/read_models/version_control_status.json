@@ -1,0 +1,63 @@
+{
+  "configuration": {
+    "checkpoint_backend": "managed_refs",
+    "config_found": true,
+    "config_path": ".loopplane/workflows/wf_20260616_085d0238/config/version_control.json",
+    "do_not_modify_user_index": true,
+    "do_not_switch_user_branch": true,
+    "enabled": true,
+    "no_remote_push": true,
+    "provider": "git",
+    "refs_namespace": "refs/loopplane/{{workflow_id}}",
+    "repository_mode": "existing_or_local_init",
+    "resolved_refs_namespace": "refs/loopplane/wf_20260616_085d0238"
+  },
+  "errors": [],
+  "generated_at": "2026-06-16T21:26:30Z",
+  "git_available": true,
+  "last_event_seq": 101,
+  "latest_checkpoint": {
+    "active_branch_unchanged": true,
+    "checkpoint_id": "cp_20260616T093406Z_d4c7bd5a",
+    "commit": "87d22f4b4a6ac1aa234f5a3560ef83e88c0c0b78",
+    "created_at": "2026-06-16T09:34:06Z",
+    "head_unchanged": true,
+    "reason": "after_final_completion",
+    "ref": "refs/loopplane/wf_20260616_085d0238/checkpoints/cp_20260616T093406Z_d4c7bd5a",
+    "user_index_unchanged": true
+  },
+  "ok": true,
+  "plan_source": {
+    "active_plan_file": ".loopplane/workflows/wf_20260616_085d0238/PLAN.md",
+    "kind": "active",
+    "path": ".loopplane/workflows/wf_20260616_085d0238/PLAN.md"
+  },
+  "problem": null,
+  "provider": "git",
+  "repository": {
+    "dirty": true,
+    "dirty_files_count": 7,
+    "head_commit": null,
+    "inside_work_tree": true,
+    "root": "."
+  },
+  "schema_version": "1.5",
+  "source_event_id": "evt_000000000101",
+  "source_hashes": {
+    "active_leases": "sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+    "active_plan": "sha256:5f7d101abebbe8d8e8934ab6d4688e9a910c3aa96b317aa1d50047ac9e40c060",
+    "events_count": 101,
+    "events_head": "evt_000000000101",
+    "events_sha256": "sha256:90b077b1e57d7bf1ba0bc569dd289e855aed1fd864f65b713aca06a0ffa94d3c",
+    "expansion_registry": "sha256:066fda366c3fac1799a518dd024972fc5c12c44c54a4d113fec50687bc0da00b",
+    "plan": "sha256:5f7d101abebbe8d8e8934ab6d4688e9a910c3aa96b317aa1d50047ac9e40c060",
+    "plan_file": ".loopplane/workflows/wf_20260616_085d0238/PLAN.md",
+    "plan_source": "active",
+    "state": "sha256:9d6fe17ca14dbf3e4d65ae1f18733e225cc53e2bebd2dd653731b4d0dbf772e1",
+    "validations_manifest": "sha256:43bc14d4b1153aba188ff188431706ab9e982914af0171847fb1a1bde5e3f029"
+  },
+  "status": "ok",
+  "warnings": [],
+  "workflow_id": "wf_20260616_085d0238",
+  "workflow_title": "Civic Analytics Portfolio"
+}

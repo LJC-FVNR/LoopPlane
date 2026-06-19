@@ -1,0 +1,176 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import json
+import os
+import pathlib
+import sys
+import time
+
+
+def main() -> int:
+    args = sys.argv[1:]
+    if args == ["--version"]:
+        print("fake claude 1.0")
+        return 0
+    if args == ["auth", "status"]:
+        print("fake claude authenticated")
+        return 0
+    if "--sleep" in args:
+        index = args.index("--sleep")
+        seconds = float(args[index + 1]) if index + 1 < len(args) else 5.0
+        time.sleep(seconds)
+    if "--fail" in args:
+        print("CLAUDE FAILURE requested", file=sys.stderr)
+        return 19
+
+    prompt, prompt_source = _read_prompt(args)
+    _write_worker_status_if_requested(prompt_source)
+    evidence_dir = pathlib.Path(os.environ["LOOPPLANE_TASK_EVIDENCE_RUN_DIR"])
+    record_path = evidence_dir / "claude_fixture_record.json"
+    record_path.write_text(
+        json.dumps(
+            {
+                "fixture": "claude",
+                "argv": args,
+                "executable": pathlib.Path(__file__).resolve().as_posix(),
+                "prompt": prompt,
+                "prompt_source": prompt_source,
+                "env": {
+                    "LOOPPLANE_RUN_ID": os.environ.get("LOOPPLANE_RUN_ID"),
+                    "LOOPPLANE_RUNNER_ID": os.environ.get("LOOPPLANE_RUNNER_ID"),
+                    "LOOPPLANE_ROLE": os.environ.get("LOOPPLANE_ROLE"),
+                    "LOOPPLANE_TASK_ID": os.environ.get("LOOPPLANE_TASK_ID"),
+                    "LOOPPLANE_PROMPT_PATH": os.environ.get("LOOPPLANE_PROMPT_PATH"),
+                    "LOOPPLANE_FINAL_OUTPUT": os.environ.get("LOOPPLANE_FINAL_OUTPUT"),
+                    "LOOPPLANE_ADAPTER_RESULT": os.environ.get("LOOPPLANE_ADAPTER_RESULT"),
+                    "LOOPPLANE_AGENT_MODEL": os.environ.get("LOOPPLANE_AGENT_MODEL"),
+                    "LOOPPLANE_AGENT_REASONING_EFFORT": os.environ.get("LOOPPLANE_AGENT_REASONING_EFFORT"),
+                },
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    pathlib.Path(os.environ["LOOPPLANE_FINAL_OUTPUT"]).write_text(
+        f"CLAUDE FINAL\nsource={prompt_source}\n{prompt}",
+        encoding="utf-8",
+    )
+    print(f"CLAUDE STDOUT run={os.environ['LOOPPLANE_RUN_ID']}")
+    print("CLAUDE STDERR fixture=claude", file=sys.stderr)
+    return 0
+
+
+def _write_worker_status_if_requested(prompt_source: str) -> None:
+    if os.environ.get("LOOPPLANE_ROLE") not in {"worker", "recovery_worker"}:
+        return
+    run_dir_value = os.environ.get("LOOPPLANE_TASK_EVIDENCE_RUN_DIR") or os.environ.get("LOOPPLANE_ROLE_OUTPUT_DIR")
+    if not run_dir_value:
+        return
+
+    run_dir = pathlib.Path(run_dir_value)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "artifacts").mkdir(exist_ok=True)
+    (run_dir / "logs").mkdir(exist_ok=True)
+    (run_dir / "raw").mkdir(exist_ok=True)
+    task_id = os.environ.get("LOOPPLANE_TASK_ID", "")
+    result_path = run_dir / "artifacts" / "result.txt"
+    report_path = run_dir / "report.md"
+    commands_path = run_dir / "commands.sh"
+    result_path.write_text(
+        f"fake claude worker result for {task_id}\n",
+        encoding="utf-8",
+    )
+    report_path.write_text(
+        f"# Worker Report\n\nFake Claude worker completed {task_id} using {prompt_source} prompt delivery.\n",
+        encoding="utf-8",
+    )
+    commands_path.write_text("claude fixture worker\n", encoding="utf-8")
+    (run_dir / "raw" / "prompt_source.txt").write_text(prompt_source + "\n", encoding="utf-8")
+    status = {
+        "schema_version": "1.5",
+        "run_id": os.environ["LOOPPLANE_RUN_ID"],
+        "task_id": task_id,
+        "primary_task_id": task_id,
+        "phase": "Phase P0: Scheduler Fixture",
+        "status": "completed",
+        "next_prompt_ready": True,
+        "started_at": "2026-06-10T00:00:00Z",
+        "ended_at": "2026-06-10T00:00:01Z",
+        "project_changes": [],
+        "commands_run": [
+            {
+                "cmd": "claude fixture worker",
+                "exit_code": 0,
+                "log": str(run_dir / "logs" / "stdout.log"),
+            }
+        ],
+        "key_outputs": [str(result_path), str(report_path), str(commands_path)],
+        "evidence_satisfies": [
+            {
+                "task_id": task_id,
+                "relationship": "primary",
+                "acceptance_claimed": ["Fake Claude worker produced scheduler smoke evidence."],
+                "evidence": [str(result_path), str(report_path), str(commands_path)],
+            }
+        ],
+        "validation_claim": {
+            "claim": "completed",
+            "checks_claimed": [{"name": "claude_code_cli_worker_fixture", "status": "pass"}],
+            "limitations": [],
+        },
+        "summary_candidate": {
+            "one_line": "Fake Claude worker fixture completed.",
+            "highlights": ["result artifact written", "report.md written", "agent_status.json written"],
+            "warnings": [],
+            "blockers": [],
+        },
+        "background": {
+            "pids": [],
+            "commands": [],
+            "logs": [],
+            "heartbeat_required": False,
+            "wake_next_agent_when": None,
+        },
+        "repair_attempts": [],
+        "known_risks": [],
+        "remaining_incomplete_items": [],
+    }
+    (run_dir / "agent_status.json").write_text(
+        json.dumps(status, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+
+def _read_prompt(args: list[str]) -> tuple[str, str]:
+    prompt_path = _prompt_path_from_args(args)
+    if prompt_path is not None:
+        return prompt_path.read_text(encoding="utf-8"), "file"
+    return sys.stdin.read(), "stdin"
+
+
+def _prompt_path_from_args(args: list[str]) -> pathlib.Path | None:
+    if "--prompt-file" in args:
+        index = args.index("--prompt-file")
+        if index + 1 < len(args):
+            return pathlib.Path(args[index + 1])
+    skip_next = False
+    for arg in args:
+        if skip_next:
+            skip_next = False
+            continue
+        if arg in {"--permission-mode", "--model"}:
+            skip_next = True
+            continue
+        if arg == "--dangerously-skip-permissions":
+            continue
+        if arg.startswith("--"):
+            continue
+        return pathlib.Path(arg)
+    return None
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

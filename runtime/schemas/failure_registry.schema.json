@@ -1,0 +1,11 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "LoopPlane failure registry",
+  "type": "object",
+  "required": ["schema_version", "workflow_id", "failures"],
+  "properties": {
+    "schema_version": {"const": "1.5"},
+    "workflow_id": {"type": "string"},
+    "failures": {"type": "array", "items": {"type": "object"}}
+  }
+}

@@ -1,0 +1,295 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import json
+import os
+import pathlib
+import sys
+import time
+
+
+def main() -> int:
+    args = sys.argv[1:]
+    if args == ["--version"]:
+        print("fake codex 1.0")
+        return 0
+    if args == ["auth", "status"]:
+        print("fake codex authenticated")
+        return 0
+    if "--sleep" in args:
+        index = args.index("--sleep")
+        seconds = float(args[index + 1]) if index + 1 < len(args) else 5.0
+        time.sleep(seconds)
+    if "--usage-limit" in args:
+        print("CODEX usage limit reached. Try again after your five-hour window resets.", file=sys.stderr)
+        return 18
+    if "--fail" in args:
+        print("CODEX FAILURE requested", file=sys.stderr)
+        return 17
+
+    prompt, prompt_source = _read_prompt(args)
+    _write_plan_draft_if_requested()
+    _write_worker_status_if_requested(prompt_source)
+    record_dir = _record_dir()
+    record_dir.mkdir(parents=True, exist_ok=True)
+    record_path = record_dir / "codex_fixture_record.json"
+    record_path.write_text(
+        json.dumps(
+            {
+                "fixture": "codex",
+                "argv": args,
+                "executable": pathlib.Path(__file__).resolve().as_posix(),
+                "prompt": prompt,
+                "prompt_source": prompt_source,
+                "env": {
+                    "LOOPPLANE_RUN_ID": os.environ.get("LOOPPLANE_RUN_ID"),
+                    "LOOPPLANE_RUNNER_ID": os.environ.get("LOOPPLANE_RUNNER_ID"),
+                    "LOOPPLANE_ROLE": os.environ.get("LOOPPLANE_ROLE"),
+                    "LOOPPLANE_TASK_ID": os.environ.get("LOOPPLANE_TASK_ID"),
+                    "LOOPPLANE_PROMPT_PATH": os.environ.get("LOOPPLANE_PROMPT_PATH"),
+                    "LOOPPLANE_FINAL_OUTPUT": os.environ.get("LOOPPLANE_FINAL_OUTPUT"),
+                    "LOOPPLANE_ADAPTER_RESULT": os.environ.get("LOOPPLANE_ADAPTER_RESULT"),
+                    "LOOPPLANE_PLAN_DRAFT_PATH": os.environ.get("LOOPPLANE_PLAN_DRAFT_PATH"),
+                    "LOOPPLANE_PLANNING_RUN_DIR": os.environ.get("LOOPPLANE_PLANNING_RUN_DIR"),
+                    "LOOPPLANE_ROLE_OUTPUT_DIR": os.environ.get("LOOPPLANE_ROLE_OUTPUT_DIR"),
+                    "LOOPPLANE_TASK_EVIDENCE_RUN_DIR": os.environ.get("LOOPPLANE_TASK_EVIDENCE_RUN_DIR"),
+                    "LOOPPLANE_AGENT_MODEL": os.environ.get("LOOPPLANE_AGENT_MODEL"),
+                    "LOOPPLANE_AGENT_REASONING_EFFORT": os.environ.get("LOOPPLANE_AGENT_REASONING_EFFORT"),
+                },
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    pathlib.Path(os.environ["LOOPPLANE_FINAL_OUTPUT"]).write_text(
+        f"CODEX FINAL\nsource={prompt_source}\n{prompt}",
+        encoding="utf-8",
+    )
+    print(f"CODEX STDOUT run={os.environ['LOOPPLANE_RUN_ID']}")
+    print("CODEX STDERR fixture=codex", file=sys.stderr)
+    return 0
+
+
+def _record_dir() -> pathlib.Path:
+    for key in ("LOOPPLANE_TASK_EVIDENCE_RUN_DIR", "LOOPPLANE_PLANNING_RUN_DIR"):
+        value = os.environ.get(key)
+        if value:
+            return pathlib.Path(value)
+    return pathlib.Path(os.environ["LOOPPLANE_FINAL_OUTPUT"]).parent
+
+
+def _write_plan_draft_if_requested() -> None:
+    draft_path = os.environ.get("LOOPPLANE_PLAN_DRAFT_PATH")
+    if os.environ.get("LOOPPLANE_ROLE") != "planner" or not draft_path:
+        return
+
+    workflow_id = os.environ["LOOPPLANE_WORKFLOW_ID"]
+    run_id = os.environ["LOOPPLANE_RUN_ID"]
+    pathlib.Path(draft_path).write_text(
+        f"""# Project Plan
+
+## Metadata
+
+- workflow_id: {workflow_id}
+- workflow_title: Codex Fixture Planning
+- plan_version: 1
+- generated_from: PROJECT_BRIEF.md
+- generated_by: fake_codex_planner_fixture
+- planner_run_id: {run_id}
+- active: false
+
+## Phase P0: Codex Fixture Planning
+
+- [ ] P0.T001: Codex fixture planner task
+  - acceptance: The concrete codex_cli planner fixture writes a structurally valid plan draft.
+  - evidence: .loopplane/results/P0.T001/
+  - latest: .loopplane/results/P0.T001/latest.json
+  - depends_on: []
+  - risk: low
+  - validation: loopplane plan completes through codex_cli with draft_source adapter.
+  - max_attempts: 3
+  - approval: not_required
+  - deliverables: Adapter-authored PLAN_DRAFT.md
+
+### Phase Objective Checklist
+
+- [ ] `P0.O1` Codex fixture planning evidence is sufficient for activation.
+  - evidence_scope: .loopplane/results/P0.T001/
+  - judgment_guidance: Confirm the adapter-authored plan draft is suitable for durable execution.
+  - verifier: objective_verifier
+  - unmet_action: self_expand
+  - max_expansions: 2
+
+## Final Objective Checklist
+
+- [ ] `FO1` The fixture workflow has dashboard-ready objective gates.
+  - evidence_scope: .loopplane/results/
+  - judgment_guidance: Confirm the plan includes objective gates that can be verified before final completion.
+  - verifier: objective_verifier
+  - unmet_action: self_expand
+  - max_expansions: 2
+""",
+        encoding="utf-8",
+    )
+
+
+def _write_worker_status_if_requested(prompt_source: str) -> None:
+    if os.environ.get("LOOPPLANE_ROLE") not in {"worker", "recovery_worker"}:
+        return
+    run_dir_value = os.environ.get("LOOPPLANE_TASK_EVIDENCE_RUN_DIR") or os.environ.get("LOOPPLANE_ROLE_OUTPUT_DIR")
+    if not run_dir_value:
+        return
+
+    run_dir = pathlib.Path(run_dir_value)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "artifacts").mkdir(exist_ok=True)
+    (run_dir / "logs").mkdir(exist_ok=True)
+    (run_dir / "raw").mkdir(exist_ok=True)
+    task_id = os.environ.get("LOOPPLANE_TASK_ID", "")
+    result_path = run_dir / "artifacts" / "result.txt"
+    report_path = run_dir / "report.md"
+    commands_path = run_dir / "commands.sh"
+    result_path.write_text(
+        f"fake codex worker result for {task_id}\n",
+        encoding="utf-8",
+    )
+    report_path.write_text(
+        f"# Worker Report\n\nFake Codex worker completed {task_id} using {prompt_source} prompt delivery.\n",
+        encoding="utf-8",
+    )
+    commands_path.write_text("codex fixture worker\n", encoding="utf-8")
+    (run_dir / "raw" / "prompt_source.txt").write_text(prompt_source + "\n", encoding="utf-8")
+    status = {
+        "schema_version": "1.5",
+        "run_id": os.environ["LOOPPLANE_RUN_ID"],
+        "task_id": task_id,
+        "primary_task_id": task_id,
+        "phase": "Phase P0: Scheduler Fixture",
+        "status": "completed",
+        "next_prompt_ready": True,
+        "started_at": "2026-06-10T00:00:00Z",
+        "ended_at": "2026-06-10T00:00:01Z",
+        "project_changes": [],
+        "commands_run": [
+            {
+                "cmd": "codex fixture worker",
+                "exit_code": 0,
+                "log": str(run_dir / "logs" / "stdout.log"),
+            }
+        ],
+        "key_outputs": [str(result_path), str(report_path), str(commands_path)],
+        "evidence_satisfies": [
+            {
+                "task_id": task_id,
+                "relationship": "primary",
+                "acceptance_claimed": ["Fake Codex worker produced scheduler smoke evidence."],
+                "evidence": [str(result_path), str(report_path), str(commands_path)],
+            }
+        ],
+        "validation_claim": {
+            "claim": "completed",
+            "checks_claimed": [{"name": "codex_cli_worker_fixture", "status": "pass"}],
+            "limitations": [],
+        },
+        "summary_candidate": {
+            "one_line": "Fake Codex worker fixture completed.",
+            "highlights": ["result artifact written", "report.md written", "agent_status.json written"],
+            "warnings": [],
+            "blockers": [],
+        },
+        "background": {
+            "pids": [],
+            "commands": [],
+            "logs": [],
+            "heartbeat_required": False,
+            "wake_next_agent_when": None,
+        },
+        "repair_attempts": [],
+        "known_risks": [],
+        "remaining_incomplete_items": [],
+    }
+    (run_dir / "agent_status.json").write_text(
+        json.dumps(status, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+
+def _read_prompt(args: list[str]) -> tuple[str, str]:
+    if "-" in _positionals(args):
+        return sys.stdin.read(), "stdin"
+    prompt_path = _prompt_path_from_args(args)
+    if prompt_path is not None:
+        return prompt_path.read_text(encoding="utf-8"), "file"
+    prompt_argument = _prompt_argument_from_args(args)
+    if prompt_argument is not None:
+        return prompt_argument, "argument"
+    return sys.stdin.read(), "stdin"
+
+
+def _prompt_path_from_args(args: list[str]) -> pathlib.Path | None:
+    if "--prompt-file" in args:
+        index = args.index("--prompt-file")
+        if index + 1 < len(args):
+            return pathlib.Path(args[index + 1])
+    for arg in _positionals(args):
+        if arg == "-":
+            continue
+        candidate = pathlib.Path(arg)
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _prompt_argument_from_args(args: list[str]) -> str | None:
+    for arg in _positionals(args):
+        if arg != "-":
+            return arg
+    return None
+
+
+def _positionals(args: list[str]) -> list[str]:
+    value_flags = {
+        "-a",
+        "-c",
+        "-C",
+        "-m",
+        "-o",
+        "-p",
+        "-s",
+        "--ask-for-approval",
+        "--cd",
+        "--config",
+        "--model",
+        "--output-last-message",
+        "--profile",
+        "--sandbox",
+    }
+    positionals: list[str] = []
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        if not positionals and arg in {"exec", "e"}:
+            index += 1
+            continue
+        if arg == "--":
+            positionals.extend(args[index + 1 :])
+            break
+        if arg == "-":
+            positionals.append(arg)
+            index += 1
+            continue
+        if arg in value_flags:
+            index += 2
+            continue
+        if arg.startswith("-"):
+            index += 1
+            continue
+        positionals.append(arg)
+        index += 1
+    return positionals
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

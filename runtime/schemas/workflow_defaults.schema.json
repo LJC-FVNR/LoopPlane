@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "LoopPlane workflow defaults",
+  "type": "object",
+  "required": ["schema_version", "layout", "workflow_root", "brief_file", "plan_file", "shared_context_file", "planning_dir", "runtime_dir", "read_models_dir", "requests_dir", "results_dir", "version_control_config_file"],
+  "properties": {
+    "schema_version": {"const": "1.6"},
+    "layout": {"type": "string", "minLength": 1},
+    "workflow_root": {"type": "string", "minLength": 1},
+    "brief_file": {"type": "string", "minLength": 1},
+    "plan_file": {"type": "string", "minLength": 1},
+    "shared_context_file": {"type": "string", "minLength": 1},
+    "planning_dir": {"type": "string", "minLength": 1},
+    "runtime_dir": {"type": "string", "minLength": 1},
+    "read_models_dir": {"type": "string", "minLength": 1},
+    "requests_dir": {"type": "string", "minLength": 1},
+    "results_dir": {"type": "string", "minLength": 1},
+    "version_control_config_file": {"type": "string", "minLength": 1}
+  },
+  "additionalProperties": true
+}

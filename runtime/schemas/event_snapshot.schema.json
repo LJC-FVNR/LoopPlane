@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "LoopPlane event snapshot",
+  "type": "object",
+  "required": ["schema_version", "snapshot_id", "workflow_id", "created_at", "events_through_sequence", "state"],
+  "properties": {
+    "schema_version": {"const": "1.5"},
+    "snapshot_id": {"type": "string", "minLength": 1},
+    "workflow_id": {"type": "string"},
+    "created_at": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"},
+    "events_through_sequence": {"type": "integer", "minimum": 0},
+    "event_log_head": {},
+    "state": {"type": "object"}
+  }
+}

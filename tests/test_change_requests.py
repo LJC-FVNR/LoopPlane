@@ -1,0 +1,392 @@
+from __future__ import annotations
+
+import json
+import subprocess
+import sys
+import tempfile
+import unittest
+from hashlib import sha256
+from pathlib import Path
+from typing import Any
+
+from runtime.change_requests import load_change_request_status
+from runtime.dashboard import render_static_dashboard
+from runtime.init_workflow import init_project
+from runtime.inspector import answer_inspection
+from runtime.read_models import rebuild_read_models
+from tests.test_inspector import configure_fake_inspector
+from tests.test_validation import write_plan
+
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+LoopPlane = REPO_ROOT / "scripts" / "loopplane"
+
+
+def read_jsonl(path: Path) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+def set_approval_enabled(project: Path, enabled: bool) -> None:
+    security_path = project / ".loopplane" / "config" / "security.json"
+    security = json.loads(security_path.read_text(encoding="utf-8"))
+    security["approval"]["enabled"] = enabled
+    security_path.write_text(json.dumps(security, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def file_hash(path: Path) -> str:
+    return sha256(path.read_bytes()).hexdigest()
+
+
+def configure_fake_change_request_planner(project: Path) -> None:
+    script = project / ".loopplane" / "config" / "fake_change_request_planner.py"
+    script.write_text(
+        r'''
+import json
+import os
+import pathlib
+import re
+import sys
+
+
+def title_from_request(text: str) -> str:
+    value = " ".join(text.strip().split())
+    value = re.sub(r"^(please\s+)?(add|change|update|modify|create)\s+", "", value, flags=re.IGNORECASE)
+    value = value.rstrip(".") or "Apply approved change request"
+    return value[:1].upper() + value[1:160]
+
+
+prompt = sys.stdin.read()
+match = re.search(r"## Change Request\s+```text\s*(.*?)\s*```", prompt, flags=re.DOTALL)
+user_request = match.group(1).strip() if match else "Apply approved change request"
+change_request_id = os.environ.get("LOOPPLANE_CHANGE_REQUEST_ID", "cr_fixture")
+patch_path = pathlib.Path(os.environ["LOOPPLANE_PLAN_PATCH_PATH"])
+response_path = pathlib.Path(os.environ["LOOPPLANE_CHANGE_REQUEST_RESPONSE_PATH"])
+task_id = "CR.T001"
+task_title = title_from_request(user_request)
+patch_path.parent.mkdir(parents=True, exist_ok=True)
+patch_path.write_text(
+    f"""# LoopPlane PLAN_PATCH
+
+- schema_version: 1.6
+- change_request_id: {change_request_id}
+- type: append_tasks
+- target_phase: Phase Change Requests
+
+This patch was proposed by the change request planner agent fixture.
+
+LOOPPLANE_PLAN_APPEND_BEGIN
+## Phase Change Requests: Approved Change Requests
+
+- [ ] {task_id}: {task_title}
+  - acceptance: The approved change request {change_request_id} is satisfied: {user_request}
+  - evidence: .loopplane/results/{task_id}/
+  - latest: .loopplane/results/{task_id}/latest.json
+  - depends_on: []
+  - risk: medium
+  - validation: Focused validation demonstrates the requested plan change has been implemented.
+  - max_attempts: 3
+  - approval: required: change_request_scope
+  - deliverables: Implementation and evidence for change request {change_request_id}
+LOOPPLANE_PLAN_APPEND_END
+""",
+    encoding="utf-8",
+)
+response_path.write_text(
+    json.dumps(
+        {
+            "status": "proposal_created",
+            "impact": {
+                "scope_change": True,
+                "requires_approval": True,
+                "adds_tasks": [task_id],
+                "modifies_tasks": [],
+                "supersedes_tasks": [],
+            },
+            "plan_patch": {"type": "append_tasks", "patch_file": str(patch_path)},
+            "can_continue_before_resolution": False,
+        },
+        indent=2,
+        sort_keys=True,
+    )
+    + "\n",
+    encoding="utf-8",
+)
+print("fake change request planner wrote PLAN_PATCH.md")
+''',
+        encoding="utf-8",
+    )
+    config_path = project / ".loopplane" / "config" / "agent_runners.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config["runners"]["change_request_planner"].update(
+        {
+            "adapter": "shell",
+            "command": sys.executable,
+            "args": [script.as_posix()],
+            "cwd": "{{project_root}}",
+            "prompt_delivery": {"mode": "stdin"},
+            "permission_policy": {
+                "allow_project_file_edit": True,
+                "allow_command_execution": True,
+                "require_approval_for_risky_commands": False,
+                "read_only": False,
+            },
+            "enabled": True,
+        }
+    )
+    config_path.write_text(json.dumps(config, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def run_json(args: list[str]) -> tuple[int, dict[str, Any], str]:
+    completed = subprocess.run(
+        [sys.executable, str(LoopPlane), *args],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    payload = json.loads(completed.stdout) if completed.stdout.strip() else {}
+    return completed.returncode, payload, completed.stderr + completed.stdout
+
+
+class ChangeRequestProtocolTest(unittest.TestCase):
+    def test_change_request_to_approved_patch_flow_updates_plan_through_reconciler(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "Change request protocol smoke.")
+            configure_fake_change_request_planner(project)
+            set_approval_enabled(project, True)
+            write_plan(project)
+            original_plan_hash = file_hash(project / "PLAN.md")
+
+            code, submitted, output = run_json(
+                [
+                    "change-request",
+                    "submit",
+                    "--project",
+                    str(project),
+                    "Add a benchmark comparison task.",
+                    "--json",
+                ]
+            )
+            self.assertEqual(code, 0, output)
+            change_request_id = submitted["change_request_id"]
+            self.assertEqual(submitted["status"], "pending_review")
+            self.assertEqual(file_hash(project / "PLAN.md"), original_plan_hash)
+
+            code, reviewed, output = run_json(
+                [
+                    "change-request",
+                    "review",
+                    change_request_id,
+                    "--project",
+                    str(project),
+                    "--audit",
+                    "--json",
+                ]
+            )
+            self.assertEqual(code, 0, output)
+            self.assertEqual(reviewed["status"], "needs_user_approval")
+            self.assertEqual(reviewed["role"], "change_request_planner")
+            self.assertEqual(reviewed["runner_id"], "change_request_planner")
+            self.assertEqual(reviewed["response"]["planner_source"], "change_request_planner_agent")
+            self.assertTrue(reviewed["response"]["agent_run"]["ok"])
+            role_output_dir = project / reviewed["role_output_dir"]
+            self.assertEqual(role_output_dir.parent, project / ".loopplane" / "requests" / "change_runs")
+            self.assertTrue(role_output_dir.is_dir())
+            prompt_text = (role_output_dir / "change_request_planner_prompt.md").read_text(encoding="utf-8")
+            self.assertIn("change_request_context_manifest.json", prompt_text)
+            self.assertNotIn("# Project Plan", prompt_text)
+            context_manifest = json.loads((role_output_dir / "change_request_context_manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(context_manifest["references"]["active_plan"]["path"], "PLAN.md")
+            self.assertIn("# Project Plan", context_manifest["references"]["active_plan"]["excerpt"])
+            approval_id = reviewed["response"]["approval_request_id"]
+            self.assertEqual(reviewed["response"]["role"], "change_request_planner")
+            self.assertEqual(reviewed["response"]["role_output_dir"], reviewed["role_output_dir"])
+            patch_file = project / reviewed["response"]["plan_patch"]["patch_file"]
+            self.assertTrue(patch_file.is_file())
+            self.assertEqual(patch_file.parent, role_output_dir)
+            self.assertTrue((role_output_dir / "plan_patch_audit.json").is_file())
+            node_summary = json.loads((role_output_dir / "node_summary.json").read_text(encoding="utf-8"))
+            self.assertEqual(node_summary["role"], "change_request_planner")
+            self.assertEqual(node_summary["runner_id"], "change_request_planner")
+            self.assertEqual(file_hash(project / "PLAN.md"), original_plan_hash)
+            approvals = read_jsonl(project / ".loopplane" / "runtime" / "human_approval_requests.jsonl")
+            self.assertEqual(approvals[-1]["approval_id"], approval_id)
+            self.assertEqual(approvals[-1]["type"], "change_request_plan_patch")
+            self.assertEqual(approvals[-1]["change_request_id"], change_request_id)
+
+            code, approved, output = run_json(
+                [
+                    "approve",
+                    approval_id,
+                    "--project",
+                    str(project),
+                    "--approved-by",
+                    "tester",
+                    "--json",
+                ]
+            )
+            self.assertEqual(code, 0, output)
+            self.assertEqual(approved["status"], "approved")
+
+            status_after_approval = load_change_request_status(project, change_request_id=change_request_id, include_all=True)
+            self.assertEqual(status_after_approval["change_requests"][0]["status"], "approved")
+
+            code, applied, output = run_json(
+                [
+                    "change-request",
+                    "apply",
+                    change_request_id,
+                    "--project",
+                    str(project),
+                    "--json",
+                ]
+            )
+            self.assertEqual(code, 0, output)
+            self.assertEqual(applied["status"], "applied")
+            self.assertEqual(applied["apply_result"]["added_tasks"], ["CR.T001"])
+            self.assertIn("- [ ] CR.T001: A benchmark comparison task", (project / "PLAN.md").read_text(encoding="utf-8"))
+            self.assertNotEqual(file_hash(project / "PLAN.md"), original_plan_hash)
+            self.assertEqual(applied["apply_result"]["event_id"], applied["apply_response"]["applied_plan_update_event_id"])
+            self.assertIsNotNone(applied["apply_response"]["before_checkpoint_id"])
+            self.assertIsNotNone(applied["apply_response"]["after_checkpoint_id"])
+
+            responses = read_jsonl(project / ".loopplane" / "requests" / "change_request_responses.jsonl")
+            self.assertEqual(responses[-1]["change_request_status"], "applied")
+            events = read_jsonl(project / ".loopplane" / "runtime" / "events" / "events_000001.jsonl")
+            self.assertIn("change_request_plan_patch_applied", [event["event_type"] for event in events])
+            self.assertIn("change_request_applied", [event["event_type"] for event in events])
+            checkpoints = read_jsonl(project / ".loopplane" / "runtime" / "git_checkpoints.jsonl")
+            reasons = [checkpoint["reason"] for checkpoint in checkpoints]
+            self.assertIn("before_change_request_apply", reasons)
+            self.assertIn("after_change_request_apply", reasons)
+
+    def test_apply_requires_approval_and_preserves_plan_before_approval(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "Change request approval gate.")
+            configure_fake_change_request_planner(project)
+            set_approval_enabled(project, True)
+            write_plan(project)
+            original_plan_hash = file_hash(project / "PLAN.md")
+
+            submit = run_json(
+                [
+                    "change-request",
+                    "submit",
+                    "--project",
+                    str(project),
+                    "Add release note task.",
+                    "--json",
+                ]
+            )[1]
+            change_request_id = submit["change_request_id"]
+            review = run_json(
+                ["change-request", "review", change_request_id, "--project", str(project), "--json"]
+            )[1]
+            self.assertTrue(review["response"]["approval_request_id"])
+
+            code, applied, output = run_json(
+                ["change-request", "apply", change_request_id, "--project", str(project), "--json"]
+            )
+
+            self.assertEqual(code, 1, output)
+            self.assertEqual(applied["status"], "approval_required")
+            self.assertEqual(file_hash(project / "PLAN.md"), original_plan_hash)
+            self.assertNotIn("CR.T001", (project / "PLAN.md").read_text(encoding="utf-8"))
+
+    def test_approval_disabled_review_auto_approves_without_approval_request_or_plan_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "Change request approval disabled.")
+            configure_fake_change_request_planner(project)
+            write_plan(project)
+            original_plan_hash = file_hash(project / "PLAN.md")
+
+            submit = run_json(
+                [
+                    "change-request",
+                    "submit",
+                    "--project",
+                    str(project),
+                    "Add packaging checklist.",
+                    "--json",
+                ]
+            )[1]
+            change_request_id = submit["change_request_id"]
+            code, reviewed, output = run_json(
+                ["change-request", "review", change_request_id, "--project", str(project), "--json"]
+            )
+
+            self.assertEqual(code, 0, output)
+            self.assertEqual(reviewed["status"], "approved")
+            self.assertIsNone(reviewed["response"]["approval_request_id"])
+            self.assertEqual(read_jsonl(project / ".loopplane" / "runtime" / "human_approval_requests.jsonl"), [])
+            self.assertEqual(file_hash(project / "PLAN.md"), original_plan_hash)
+            state = json.loads((project / ".loopplane" / "runtime" / "state.json").read_text(encoding="utf-8"))
+            self.assertEqual(state["status"], "change_request_reviewed")
+
+    def test_change_request_review_rejects_wrong_role_runner_before_plan_patch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "Change request role boundary.")
+            write_plan(project)
+            submit = run_json(
+                [
+                    "change-request",
+                    "submit",
+                    "--project",
+                    str(project),
+                    "Add a docs task.",
+                    "--json",
+                ]
+            )[1]
+            config_path = project / ".loopplane" / "config" / "agent_runners.json"
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+            config["runners"]["change_request_planner"]["role"] = "worker"
+            config_path.write_text(json.dumps(config, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+            code, reviewed, output = run_json(
+                [
+                    "change-request",
+                    "review",
+                    submit["change_request_id"],
+                    "--project",
+                    str(project),
+                    "--json",
+                ]
+            )
+
+            self.assertNotEqual(code, 0, output)
+            self.assertEqual(reviewed["status"], "waiting_config")
+            self.assertIn("expected 'change_request_planner'", "\n".join(reviewed["errors"]))
+            self.assertFalse((project / ".loopplane" / "requests" / "change_runs").exists())
+
+    def test_inspector_and_dashboard_change_paths_do_not_mutate_plan(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "Inspector dashboard boundary.")
+            configure_fake_inspector(project)
+            write_plan(project)
+            rebuild = rebuild_read_models(project)
+            self.assertTrue(rebuild["ok"], json.dumps(rebuild, indent=2, sort_keys=True))
+            original_plan_hash = file_hash(project / "PLAN.md")
+
+            inspection = answer_inspection(project, "Add a final release checklist task.")
+            self.assertTrue(inspection["ok"], json.dumps(inspection, indent=2, sort_keys=True))
+            self.assertEqual(inspection["status"], "answered")
+            self.assertEqual(file_hash(project / "PLAN.md"), original_plan_hash)
+
+            render = render_static_dashboard(project, rebuild_read_models_first=True)
+            self.assertTrue(render["ok"], json.dumps(render, indent=2, sort_keys=True))
+            self.assertEqual(file_hash(project / "PLAN.md"), original_plan_hash)
+            self.assertIn("change_requests", render["covered_sections"])
+            html = (project / render["index_file"]).read_text(encoding="utf-8")
+            self.assertIn("Change Requests", html)
+            self.assertIn("loopplane change-request submit", html)
+
+
+if __name__ == "__main__":
+    unittest.main()

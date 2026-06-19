@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "LoopPlane nested workspace operation policy",
+  "type": "object",
+  "required": ["schema_version", "command", "project_root", "explicit_target", "allow_nested_workspace", "nested_workspaces", "valid_namespaces", "warnings", "errors", "recovery_actions", "ok", "status", "authorization"],
+  "properties": {
+    "schema_version": {"const": "1.6"},
+    "command": {"type": "string", "minLength": 1},
+    "project_root": {"type": "string", "minLength": 1},
+    "workspace_namespace": {"type": ["string", "null"]},
+    "explicit_target": {"type": "boolean"},
+    "allow_nested_workspace": {"type": "boolean"},
+    "nested_workspaces": {"type": "object"},
+    "valid_namespaces": {"type": "array", "items": {"type": "string"}},
+    "warnings": {"type": "array", "items": {"type": "string"}},
+    "errors": {"type": "array", "items": {"type": "string"}},
+    "recovery_actions": {"type": "array", "items": {"type": "string"}},
+    "ok": {"type": "boolean"},
+    "status": {"type": "string"},
+    "authorization": {"type": "string"}
+  },
+  "additionalProperties": true
+}

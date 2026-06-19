@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "LoopPlane runtime state",
+  "type": "object",
+  "required": ["schema_version", "workflow_id", "status", "initialized_at", "configuration_problems", "blocked_reasons", "scheduler"],
+  "properties": {
+    "schema_version": {"const": "1.5"},
+    "workflow_id": {"type": "string", "pattern": "^wf_[0-9]{8}_[0-9a-f]{8}$"},
+    "status": {"type": "string", "minLength": 1},
+    "initialized_at": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"},
+    "configuration_problems": {"type": "array"},
+    "blocked_reasons": {"type": "array"},
+    "scheduler": {"type": "object"}
+  }
+}

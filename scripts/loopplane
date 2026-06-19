@@ -1,0 +1,3955 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import select
+import subprocess
+import sys
+import threading
+import time
+from collections.abc import Mapping, Sequence
+from pathlib import Path
+from typing import Any
+from urllib.parse import quote
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from runtime.exit_codes import (
+    EXIT_GENERIC_FAILURE,
+    EXIT_HEALTH_FAILURE,
+    EXIT_INVALID_CONFIG,
+    EXIT_SECURITY_POLICY_VIOLATION,
+)
+from runtime.init_workflow import LAYOUT_CANONICAL_V16, InitConflictError, init_project
+from runtime.path_resolution import WorkflowPathError
+from runtime.planning import (
+    acknowledge_active_plan_change,
+    activate_plan,
+    auditor_exit_code,
+    format_plan_activation_text,
+    format_auditor_text,
+    format_plan_revision_text,
+    format_planner_text,
+    plan_activation_exit_code,
+    plan_revision_exit_code,
+    planner_exit_code,
+    run_auditor,
+    run_plan_revision_loop,
+    run_planner,
+)
+from runtime.scheduler import (
+    format_scheduler_summary_text,
+    format_preview_text,
+    format_scheduler_text,
+    load_scheduler_context,
+    preview_exit_code,
+    preview_scheduler,
+    run_objective_verifier_once,
+    run_scheduler,
+    scheduler_summary,
+    scheduler_exit_code,
+)
+from runtime.health import (
+    format_health_text,
+    health_exit_code,
+    run_health_probe,
+)
+from runtime.validation import (
+    format_validation_text,
+    run_validator,
+    validation_exit_code,
+)
+from runtime.schema_validation import (
+    format_schema_validation_text,
+    schema_validation_exit_code,
+    validate_project_schemas,
+)
+from runtime.self_expansion import (
+    apply_expansion_proposal,
+    load_expansion_status,
+    validate_expansion_proposal,
+)
+from runtime.migrations import (
+    format_migration_text,
+    migrate_project,
+    migration_exit_code,
+)
+from runtime.migration_export import (
+    export_exit_code,
+    export_project,
+    format_export_text,
+)
+from runtime.migration_import import (
+    format_import_text,
+    import_exit_code,
+    import_project_archive,
+)
+from runtime.reconciliation import (
+    format_reconciliation_text,
+    reconciliation_exit_code,
+    run_reconciler,
+)
+from runtime.human_summaries import (
+    ensure_human_summaries,
+    format_human_summary_text,
+    human_summary_exit_code,
+)
+from runtime.read_models import (
+    format_read_model_rebuild_text,
+    read_model_rebuild_exit_code,
+    rebuild_read_models,
+)
+from runtime.final_verifier import (
+    final_verifier_exit_code,
+    format_final_verifier_text,
+    run_final_verifier,
+)
+from runtime.dashboard import (
+    DashboardServerError,
+    cleanup_dashboard_servers,
+    create_dashboard_server,
+    dashboard_exit_code,
+    dashboard_list_exit_code,
+    format_dashboard_list_text,
+    format_dashboard_cleanup_text,
+    format_dashboard_text,
+    list_dashboard_servers,
+    render_static_dashboard,
+)
+from runtime.control import (
+    control_attach_exit_code,
+    control_exit_code,
+    format_control_attach_text,
+    format_control_logs_text,
+    format_control_request_text,
+    format_control_status_text,
+    load_control_attach,
+    load_control_logs,
+    load_control_status,
+    record_control_request,
+)
+from runtime.detached import (
+    detached_start_exit_code,
+    format_detached_start_text,
+    resume_detached_scheduler,
+    start_detached_scheduler,
+)
+from runtime.inspector import (
+    answer_inspection,
+    format_inspection_text,
+    inspection_exit_code,
+)
+from runtime.change_requests import (
+    apply_change_request,
+    change_request_exit_code,
+    format_change_request_text,
+    load_change_request_status,
+    review_change_request,
+    submit_change_request,
+)
+from runtime.brief import (
+    format_write_brief_text,
+    write_brief_exit_code,
+    write_project_brief,
+)
+from runtime.approval import (
+    ALLOWED_APPROVAL_DECISIONS,
+    load_approval_status,
+    record_approval_response,
+)
+from runtime.background_jobs import (
+    background_exit_code,
+    cancel_background_job,
+    complete_background_job,
+    format_background_text,
+    list_background_jobs,
+    start_background_job,
+)
+from runtime.agent_runner_cli import (
+    agent_command_exit_code,
+    configure_agent_runner,
+    doctor_agent_runners,
+    format_agent_configuration_text,
+    format_agent_doctor_text,
+)
+from runtime.skill_package import (
+    doctor_skill_package,
+    format_skill_doctor_text,
+    format_skill_install_text,
+    format_skill_pack_text,
+    format_skill_update_text,
+    install_skill_project,
+    pack_skill_package,
+    skill_doctor_exit_code,
+    skill_install_exit_code,
+    skill_pack_exit_code,
+    skill_update_exit_code,
+    update_skill_project,
+)
+from runtime.version_control import (
+    bundle_import_exit_code,
+    bundle_export_exit_code,
+    capture_run_git_metadata,
+    checkpoint_log_exit_code,
+    checkpoint_exit_code,
+    create_git_checkpoint,
+    diff_exit_code,
+    doctor_exit_code,
+    export_git_checkpoint_bundle,
+    format_bundle_import_text,
+    format_bundle_export_text,
+    format_checkpoint_text,
+    format_checkpoint_log_text,
+    format_rollback_text,
+    format_task_diff_text,
+    format_doctor_text,
+    format_run_metadata_text,
+    format_status_text,
+    import_git_checkpoint_bundle,
+    load_checkpoint_log,
+    load_task_diff_metadata,
+    load_version_control_status,
+    request_checkpoint_rollback,
+    rollback_exit_code,
+    run_git_doctor,
+    run_metadata_exit_code,
+    status_exit_code,
+)
+from runtime.workflow_lifecycle import WorkflowLifecycleError
+from runtime.workspace_nesting import detect_nested_loopplane_instances, evaluate_nested_workspace_operation
+from runtime.workspaces import (
+    doctor_workspace,
+    format_workspace_current_text,
+    format_workspace_doctor_text,
+    format_workspace_list_text,
+    format_workspace_register_text,
+    format_workspace_scan_text,
+    format_workspace_unregister_text,
+    list_workspaces,
+    load_current_workspace,
+    register_workspace,
+    scan_workspaces,
+    unregister_workspace,
+    workspace_current_exit_code,
+    workspace_doctor_exit_code,
+    workspace_list_exit_code,
+    workspace_register_exit_code,
+    workspace_scan_exit_code,
+    workspace_unregister_exit_code,
+)
+from runtime.workflows import (
+    archive_workflow,
+    create_workflow,
+    current_workflow,
+    format_workflow_archive_text,
+    format_workflow_create_text,
+    format_workflow_current_text,
+    format_workflow_fork_text,
+    format_workflow_list_text,
+    format_workflow_restore_text,
+    format_workflow_show_text,
+    format_workflow_switch_text,
+    fork_workflow,
+    list_workflows,
+    restore_workflow,
+    show_workflow,
+    switch_workflow,
+    workflow_archive_exit_code,
+    workflow_create_exit_code,
+    workflow_current_exit_code,
+    workflow_fork_exit_code,
+    workflow_list_exit_code,
+    workflow_restore_exit_code,
+    workflow_show_exit_code,
+    workflow_switch_exit_code,
+)
+
+
+COMMAND_GROUPS = """Command groups:
+  skill: skill doctor, skill install, skill update, skill pack
+  agent runner: configure-agent, doctor-agent
+  planning: init, write-brief, plan, audit-plan, revise-plan, activate-plan
+  execution: start, run, preview, tick, pause, resume, stop, attach, status, health, validate, reconcile, summarize, logs, rebuild-read-models, final-verify, migrate
+  background: background start, background status, background complete, background cancel
+  migration: export --profile source|stateful|archive --output <archive>, import <archive> --target <project>
+  dashboard: dashboard, dashboard list, dashboard cleanup, dashboard stop
+  workspace: workspace current, workspace register, workspace unregister, workspace scan, workspace list, workspace doctor
+  workflow: workflow list, workflow current, workflow show, workflow switch, workflow create, workflow archive, workflow restore, workflow fork
+  inspection: ask, change-request, approvals, approve, reject
+  version control: vc status, vc checkpoint, vc run-metadata, vc diff, vc log, vc rollback, vc export, vc import, vc doctor
+
+Implemented commands call the standalone runtime. Commands outside the current
+runtime implementation fail deterministically without claiming success.
+"""
+
+WORKFLOW_HISTORY_COMMANDS = (
+    "list",
+    "current",
+    "show",
+    "switch",
+    "create",
+    "archive",
+    "restore",
+    "fork",
+)
+
+AUTO_DASHBOARD_DISABLED_VALUES = {"0", "false", "no", "off", "disabled"}
+
+NESTED_WORKSPACE_GUARDED_COMMANDS = {
+    ("configure-agent",),
+    ("doctor-agent",),
+    ("init",),
+    ("write-brief",),
+    ("plan",),
+    ("audit-plan",),
+    ("revise-plan",),
+    ("activate-plan",),
+    ("start",),
+    ("run",),
+    ("preview",),
+    ("tick",),
+    ("pause",),
+    ("resume",),
+    ("stop",),
+    ("attach",),
+    ("status",),
+    ("health",),
+    ("validate",),
+    ("reconcile",),
+    ("summarize",),
+    ("logs",),
+    ("background", "start"),
+    ("background", "status"),
+    ("background", "complete"),
+    ("background", "cancel"),
+    ("rebuild-read-models",),
+    ("final-verify",),
+    ("migrate",),
+    ("export",),
+    ("import",),
+    ("dashboard",),
+    ("ask",),
+    ("change-request", "submit"),
+    ("change-request", "review"),
+    ("change-request", "apply"),
+    ("change-request", "status"),
+    ("approvals",),
+    ("approve",),
+    ("reject",),
+    ("vc", "status"),
+    ("vc", "checkpoint"),
+    ("vc", "run-metadata"),
+    ("vc", "diff"),
+    ("vc", "log"),
+    ("vc", "rollback"),
+    ("vc", "export"),
+    ("vc", "doctor"),
+    ("workspace", "current"),
+    ("workspace", "register"),
+    ("workspace", "doctor"),
+    ("workflow", "list"),
+    ("workflow", "current"),
+    ("workflow", "show"),
+    ("workflow", "switch"),
+    ("workflow", "create"),
+    ("workflow", "archive"),
+    ("workflow", "restore"),
+    ("workflow", "fork"),
+}
+
+
+def not_implemented(args: argparse.Namespace) -> int:
+    command = " ".join(args.command_path)
+    print(f"loopplane {command}: not implemented in the current standalone runtime.")
+    return EXIT_GENERIC_FAILURE
+
+
+def show_help(args: argparse.Namespace) -> int:
+    args.help_parser.print_help()
+    return 0
+
+
+def workflow_missing_command(args: argparse.Namespace) -> int:
+    args.help_parser.print_usage(sys.stderr)
+    commands = ", ".join(WORKFLOW_HISTORY_COMMANDS)
+    print(f"loopplane workflow: missing workflow command. Choose one of: {commands}.", file=sys.stderr)
+    return EXIT_INVALID_CONFIG
+
+
+def _nested_workspace_preflight(args: argparse.Namespace) -> dict[str, Any] | None:
+    command_path = tuple(getattr(args, "command_path", ()) or ())
+    if command_path not in NESTED_WORKSPACE_GUARDED_COMMANDS:
+        return None
+    if command_path == ("init",) and not str(getattr(args, "brief", "") or "").strip():
+        return None
+    project_value = _nested_guard_project_value(args, command_path)
+    if project_value is None:
+        return None
+    try:
+        result = evaluate_nested_workspace_operation(
+            Path(project_value),
+            command="loopplane " + " ".join(command_path),
+            explicit_target=_has_explicit_project_target(args, command_path),
+            workspace_namespace=getattr(args, "workspace_namespace", None),
+            allow_nested_workspace=bool(getattr(args, "allow_nested_workspace", False)),
+        )
+    except OSError as error:
+        return {
+            "schema_version": "1.6",
+            "ok": False,
+            "status": "nested_workspace_scan_failed",
+            "command": "loopplane " + " ".join(command_path),
+            "project_root": str(Path(project_value).expanduser()),
+            "errors": [f"Unable to scan for nested LoopPlane workspaces before running command: {error}"],
+            "warnings": [],
+            "recovery_actions": [
+                "Check directory permissions, then rerun the command.",
+                "Pass --project <target-project> or --workspace-namespace only after the target can be inspected.",
+            ],
+        }
+    if result.get("ok") is True:
+        return None
+    return result
+
+
+def _nested_guard_project_value(args: argparse.Namespace, command_path: tuple[str, ...]) -> str | None:
+    if command_path == ("workspace", "register"):
+        return str(getattr(args, "project", "") or "") or None
+    if command_path == ("import",):
+        return str(getattr(args, "target", "") or "") or None
+    return str(getattr(args, "project", None) or ".")
+
+
+def _has_explicit_project_target(args: argparse.Namespace, command_path: tuple[str, ...]) -> bool:
+    if command_path == ("workspace", "register"):
+        return bool(getattr(args, "project", None))
+    if command_path == ("import",):
+        return bool(getattr(args, "target", None))
+    return getattr(args, "project", None) is not None
+
+
+def _format_nested_workspace_preflight_text(result: Mapping[str, Any]) -> str:
+    lines = [
+        f"loopplane nested workspace guard: {result.get('status', 'unknown')}",
+        f"command: {result.get('command') or 'unknown'}",
+        f"project: {result.get('project_root') or 'unknown'}",
+    ]
+    nested = result.get("nested_workspaces")
+    if isinstance(nested, Mapping):
+        lines.append(f"nested_workspace_count: {nested.get('nested_workspace_count', 0)}")
+        lines.append(f"parent_count: {nested.get('parent_count', 0)}")
+        lines.append(f"child_count: {nested.get('child_count', 0)}")
+    namespaces = result.get("valid_namespaces")
+    if isinstance(namespaces, Sequence) and namespaces and not isinstance(namespaces, (str, bytes)):
+        lines.append("valid_namespaces:")
+        lines.extend(f"  - {namespace}" for namespace in namespaces)
+    for key in ("errors", "warnings", "recovery_actions"):
+        values = result.get(key)
+        if isinstance(values, Sequence) and values and not isinstance(values, (str, bytes)):
+            lines.append(f"{key}:")
+            lines.extend(f"  - {value}" for value in values)
+    return "\n".join(lines) + "\n"
+
+
+COMPACT_JSON_LIST_FIELDS = frozenset(
+    {
+        "checks",
+        "checked_files",
+        "created",
+        "created_directories",
+        "excluded_paths",
+        "files",
+        "included_paths",
+        "managed_files",
+        "preserved",
+        "protected_paths",
+        "runner_results",
+        "schemas_used",
+        "source_files",
+        "updated",
+    }
+)
+COMPACT_JSON_SAMPLE_SIZE = 20
+
+
+def _print_json_result(result: Mapping[str, Any], args: argparse.Namespace, *, compact_lists: bool = False) -> None:
+    payload: Any = result
+    if compact_lists and not getattr(args, "verbose_json", False):
+        payload = _compact_json_lists(result)
+    print(json.dumps(payload, indent=2, sort_keys=True))
+
+
+def _compact_json_lists(value: Any, *, key: str | None = None) -> Any:
+    if isinstance(value, Mapping):
+        return {
+            str(child_key): _compact_json_lists(child_value, key=str(child_key))
+            for child_key, child_value in value.items()
+        }
+    if isinstance(value, list):
+        if key in COMPACT_JSON_LIST_FIELDS:
+            sample = [_compact_json_sample_item(item) for item in value[:COMPACT_JSON_SAMPLE_SIZE]]
+            return {
+                "count": len(value),
+                "sample": sample,
+                "omitted": max(0, len(value) - COMPACT_JSON_SAMPLE_SIZE),
+            }
+        return [_compact_json_lists(item) for item in value]
+    return value
+
+
+def _compact_json_sample_item(item: Any) -> Any:
+    if isinstance(item, Mapping):
+        for field in ("path", "checkpoint_id", "skill_root", "entrypoint", "name"):
+            if field in item:
+                text = str(item[field])
+                if field == "path" and "reason" in item:
+                    return {"path": text, "reason": str(item["reason"])}
+                return text
+        return {str(key): _compact_json_sample_item(value) for key, value in list(item.items())[:5]}
+    return item
+
+
+def _add_nested_workspace_options(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--workspace-namespace",
+        metavar="<workspace_id-or-project-path>",
+        help=(
+            "Explicitly name the targeted workspace when parent/child LoopPlane instances are nested. "
+            "Accepts the target workspace_id or absolute project path."
+        ),
+    )
+    parser.add_argument(
+        "--allow-nested-workspace",
+        action="store_true",
+        help="Acknowledge the nested workspace boundary after manually verifying the intended target.",
+    )
+
+
+def run_workflow_deferred(args: argparse.Namespace) -> int:
+    command_path = tuple(getattr(args, "command_path", ("workflow",)))
+    command = " ".join(command_path)
+    payload: dict[str, Any] = {
+        "ok": False,
+        "status": "deferred_implementation",
+        "command": f"loopplane {command}",
+        "errors": [
+            (
+                f"loopplane {command} is registered in the standalone CLI surface, "
+                "but the workflow-history operation is not implemented yet."
+            )
+        ],
+        "recovery_actions": [
+            "Use `loopplane workspace current --project <project> --json` to inspect the current workflow pointer.",
+            "Avoid editing .loopplane/workflow_registry.json or .loopplane/current_workflow.json by hand.",
+            "Wait for the corresponding R11 workflow-history implementation slice before mutating workflow history.",
+        ],
+    }
+    if getattr(args, "project", None):
+        payload["project"] = str(Path(args.project).expanduser())
+    if getattr(args, "workflow_id", None):
+        payload["workflow_id"] = str(args.workflow_id)
+    if getattr(args, "brief", None):
+        payload["brief_supplied"] = True
+    if getattr(args, "name", None):
+        payload["name"] = str(args.name)
+
+    if getattr(args, "json", False):
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        print(f"loopplane {command}: deferred_implementation")
+        for error in payload["errors"]:
+            print(f"error: {error}")
+        print("recovery_actions:")
+        for action in payload["recovery_actions"]:
+            print(f"  - {action}")
+    return EXIT_GENERIC_FAILURE
+
+
+def run_init(args: argparse.Namespace) -> int:
+    project = Path(args.project or ".")
+    warnings: list[str] = []
+    existing_markers = _existing_init_markers(project)
+    if existing_markers:
+        resolved_project = project.expanduser().resolve()
+        if args.json:
+            print(
+                json.dumps(
+                    _init_payload(
+                        resolved_project,
+                        status="already_initialized",
+                        ok=False,
+                        errors=["Existing LoopPlane workspace detected; refusing to reinitialize."],
+                        warnings=[],
+                        existing_markers=existing_markers,
+                    ),
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
+            return EXIT_INVALID_CONFIG
+        print("loopplane init: existing LoopPlane workspace detected; refusing to reinitialize.")
+        print(f"project: {resolved_project}")
+        print("existing markers:")
+        for marker in existing_markers:
+            print(f"  - {marker}")
+        print("No workspace files were changed.")
+        print(f"Use `loopplane status --project {resolved_project}` to inspect the current workflow.")
+        print(f"Use `loopplane attach --project {resolved_project}` or `loopplane resume --project {resolved_project}` for an existing workflow.")
+        print("Create a new same-workspace workflow only through an explicit workflow-history command.")
+        return EXIT_INVALID_CONFIG
+
+    if not args.brief or not args.brief.strip():
+        if args.json:
+            print(
+                json.dumps(
+                    _init_payload(
+                        project.expanduser().resolve(),
+                        status="missing_brief",
+                        ok=False,
+                        errors=["--brief is required."],
+                        warnings=[],
+                    ),
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
+            return EXIT_INVALID_CONFIG
+        print("loopplane init: --brief is required.")
+        return EXIT_INVALID_CONFIG
+
+    nesting = _detect_init_nesting(project)
+    if int(nesting.get("nested_workspace_count") or 0) > 0:
+        warnings.extend(str(warning) for warning in nesting.get("warnings", []))
+        if not args.json:
+            print("warning: nested LoopPlane workspace context detected.")
+            for warning in nesting.get("warnings", []):
+                print(f"  - {warning}")
+            print("Nested workspace operations require an explicit namespace or approval before crossing boundaries.")
+
+    try:
+        result = init_project(project, args.brief, layout=LAYOUT_CANONICAL_V16)
+    except InitConflictError as error:
+        if args.json:
+            print(
+                json.dumps(
+                    _init_payload(
+                        project.expanduser().resolve(),
+                        status="conflict",
+                        ok=False,
+                        errors=list(error.conflicts),
+                        warnings=warnings,
+                    ),
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
+            return EXIT_INVALID_CONFIG
+        print("loopplane init: refusing to overwrite existing files.")
+        for conflict in error.conflicts:
+            print(f"  - {conflict}")
+        print("Use an explicit migration or approval path before changing these files.")
+        return EXIT_INVALID_CONFIG
+    except WorkflowPathError as error:
+        if args.json:
+            print(
+                json.dumps(
+                    _init_payload(
+                        project.expanduser().resolve(),
+                        status="invalid_workflow_path",
+                        ok=False,
+                        errors=[str(error)],
+                        warnings=warnings,
+                    ),
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
+            return EXIT_INVALID_CONFIG
+        print(f"loopplane init: invalid workflow path configuration: {error}")
+        return EXIT_INVALID_CONFIG
+
+    schema_validation = validate_project_schemas(result.project)
+    if not schema_validation.get("ok"):
+        if args.json:
+            payload = _init_payload(
+                result.project,
+                status="schema_validation_failed",
+                ok=False,
+                errors=[str(error) for error in schema_validation.get("errors", [])],
+                warnings=[*warnings, *[str(warning) for warning in schema_validation.get("warnings", [])]],
+                result=result,
+            )
+            payload["schema_validation"] = schema_validation
+            print(json.dumps(payload, indent=2, sort_keys=True))
+            return schema_validation_exit_code(schema_validation)
+        print(format_schema_validation_text(schema_validation), end="")
+        return schema_validation_exit_code(schema_validation)
+
+    if args.json:
+        ok = result.version_control_status != "waiting_config"
+        payload = _init_payload(
+            result.project,
+            status="initialized" if ok else "waiting_config",
+            ok=ok,
+            errors=[] if ok else [result.version_control_problem or "version_control_unavailable"],
+            warnings=warnings,
+            result=result,
+        )
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0 if ok else EXIT_INVALID_CONFIG
+
+    print(f"Initialized LoopPlane workflow {result.workflow_id} at {result.project}")
+    if result.created:
+        print(f"Created {len(result.created)} files.")
+    if result.preserved:
+        print(f"Preserved {len(result.preserved)} existing files.")
+    print(
+        "Next step: configure a usable worker runner, for example "
+        "`loopplane configure-agent --project <project> --runner worker --role worker --adapter codex_cli --command codex` "
+        "or a shell runner with `--arg` and `--prompt-delivery-mode stdin`."
+    )
+    if result.version_control_status == "waiting_config":
+        print("Version control status: waiting_config")
+        if result.version_control_problem:
+            print(f"Configuration problem: {result.version_control_problem}")
+        return EXIT_INVALID_CONFIG
+    return 0
+
+
+def _init_payload(
+    project: Path,
+    *,
+    status: str,
+    ok: bool,
+    errors: Sequence[str],
+    warnings: Sequence[str],
+    result: Any | None = None,
+    existing_markers: Sequence[str] = (),
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "schema_version": "1.5",
+        "ok": ok,
+        "status": status,
+        "project_root": project.as_posix(),
+        "workflow_id": None,
+        "workspace_id": None,
+        "created": [],
+        "preserved": [],
+        "version_control_status": None,
+        "version_control_problem": None,
+        "errors": list(errors),
+        "warnings": list(warnings),
+    }
+    if existing_markers:
+        payload["existing_markers"] = list(existing_markers)
+    if result is not None:
+        payload.update(
+            {
+                "project_root": result.project.as_posix(),
+                "workflow_id": result.workflow_id,
+                "workspace_id": result.workspace_id,
+                "created": list(result.created),
+                "preserved": list(result.preserved),
+                "version_control_status": result.version_control_status,
+                "version_control_problem": result.version_control_problem,
+            }
+        )
+    return payload
+
+
+def _detect_init_nesting(project: Path) -> dict[str, Any]:
+    try:
+        return detect_nested_loopplane_instances(project)
+    except OSError as error:
+        return {
+            "nested_workspace_count": 0,
+            "warnings": [f"Unable to scan for nested LoopPlane workspaces before init: {error}"],
+        }
+
+
+def _existing_init_markers(project: Path) -> list[str]:
+    root = project.expanduser()
+    markers = (
+        ".loopplane/workspace.json",
+        ".loopplane/config/instance.json",
+        ".loopplane/config/workflow.json",
+    )
+    return [marker for marker in markers if (root / marker).exists()]
+
+
+def run_configure_agent(args: argparse.Namespace) -> int:
+    result = configure_agent_runner(
+        Path(args.project or "."),
+        runner_id=args.runner,
+        role=args.role,
+        adapter=args.adapter,
+        command=args.command,
+        args=args.runner_arg,
+        cwd=args.cwd,
+        prompt_delivery_mode=args.prompt_delivery_mode,
+        prompt_argument_template=args.prompt_argument_template,
+        prompt_flag=args.prompt_flag,
+        prompt_file=args.prompt_file,
+        timeout_seconds=args.timeout_seconds,
+        env=args.env,
+        model=args.model,
+        reasoning_effort=args.reasoning_effort,
+        codex_sandbox=args.codex_sandbox,
+        doctor_check_command=args.doctor_check_command,
+        no_version_check=args.no_version_check,
+        prune_stale=args.prune,
+    )
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+    else:
+        print(format_agent_configuration_text(result), end="")
+    return agent_command_exit_code(result)
+
+
+def run_doctor_agent(args: argparse.Namespace) -> int:
+    result = doctor_agent_runners(
+        Path(args.project or "."),
+        runner_id=args.runner,
+        all_runners=args.all,
+        required_only=args.required,
+    )
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+    else:
+        print(format_agent_doctor_text(result), end="")
+    return agent_command_exit_code(result)
+
+
+def run_skill_doctor(args: argparse.Namespace) -> int:
+    result = doctor_skill_package(Path(args.package_root) if args.package_root else REPO_ROOT)
+    if args.json:
+        _print_json_result(result, args, compact_lists=True)
+    else:
+        print(format_skill_doctor_text(result), end="")
+    return skill_doctor_exit_code(result)
+
+
+def run_skill_install(args: argparse.Namespace) -> int:
+    if not args.target:
+        print("loopplane skill install: --target is required.")
+        return EXIT_INVALID_CONFIG
+    if args.no_agent_skill_projection and (args.agent_style or args.all_agent_skills):
+        print("loopplane skill install: --no-agent-skill-projection cannot be combined with --agent-style or --all-agent-skills.")
+        return EXIT_INVALID_CONFIG
+    if args.all_agent_skills and args.agent_style:
+        print("loopplane skill install: --all-agent-skills cannot be combined with --agent-style.")
+        return EXIT_INVALID_CONFIG
+    result = install_skill_project(
+        Path(args.target),
+        agent_styles=None if args.all_agent_skills else args.agent_style,
+        project_agent_skills=not args.no_agent_skill_projection,
+    )
+    if args.json:
+        _print_json_result(result, args, compact_lists=True)
+    else:
+        print(format_skill_install_text(result), end="")
+    return skill_install_exit_code(result)
+
+
+def run_skill_update(args: argparse.Namespace) -> int:
+    if not args.target:
+        print("loopplane skill update: --target is required.")
+        return EXIT_INVALID_CONFIG
+    result = update_skill_project(Path(args.target))
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+    else:
+        print(format_skill_update_text(result), end="")
+    return skill_update_exit_code(result)
+
+
+def run_skill_pack(args: argparse.Namespace) -> int:
+    result = pack_skill_package(
+        Path(args.package_root) if args.package_root else REPO_ROOT,
+        output=Path(args.output) if args.output else None,
+    )
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+    else:
+        print(format_skill_pack_text(result), end="")
+    return skill_pack_exit_code(result)
+
+
+def run_plan(args: argparse.Namespace) -> int:
+    project = Path(args.project or ".")
+    progress_interval = float(getattr(args, "progress_interval", 30.0))
+    with _PlanningProgressReporter(project, command="plan", roles={"planner"}, interval_seconds=progress_interval):
+        result = run_planner(project, runner_id=args.runner)
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+    else:
+        print(format_planner_text(result), end="")
+    return planner_exit_code(result)
+
+
+def run_audit_plan(args: argparse.Namespace) -> int:
+    project = Path(args.project or ".")
+    progress_interval = float(getattr(args, "progress_interval", 30.0))
+    with _PlanningProgressReporter(project, command="audit-plan", roles={"auditor"}, interval_seconds=progress_interval):
+        result = run_auditor(project, runner_id=args.runner)
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+    else:
+        print(format_auditor_text(result), end="")
+    return auditor_exit_code(result)
+
+
+def run_revise_plan(args: argparse.Namespace) -> int:
+    project = Path(args.project or ".")
+    progress_interval = float(getattr(args, "progress_interval", 30.0))
+    with _PlanningProgressReporter(
+        project,
+        command="revise-plan",
+        roles={"planner", "auditor"},
+        interval_seconds=progress_interval,
+    ):
+        result = run_plan_revision_loop(
+            project,
+            planner_runner_id=args.planner_runner,
+            auditor_runner_id=args.auditor_runner,
+            max_iterations=args.max_iterations,
+        )
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+    else:
+        print(format_plan_revision_text(result), end="")
+    return plan_revision_exit_code(result)
+
+
+def run_acknowledge_plan(args: argparse.Namespace) -> int:
+    result = acknowledge_active_plan_change(Path(args.project or "."))
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+    else:
+        print(format_planner_text(result), end="")
+    return planner_exit_code(result)
+
+
+def run_activate_plan(args: argparse.Namespace) -> int:
+    result = activate_plan(Path(args.project or "."), source_plan_file=Path(args.file) if args.file else None)
+    if args.json:
+        _print_json_result(result, args, compact_lists=True)
+    else:
+        print(format_plan_activation_text(result), end="")
+    return plan_activation_exit_code(result)
+
+
+def run_write_brief(args: argparse.Namespace) -> int:
+    brief_file = getattr(args, "brief_file", None)
+    sources = [
+        bool(args.text is not None),
+        bool(args.file is not None or brief_file is not None),
+        bool(args.stdin),
+    ]
+    if sum(1 for selected in sources if selected) != 1:
+        result = {
+            "schema_version": "1.5",
+            "ok": False,
+            "status": "missing_input" if not any(sources) else "ambiguous_input",
+            "project_root": str(Path(args.project or ".").expanduser().resolve()),
+            "workflow_id": None,
+            "changed": False,
+            "errors": ["Use exactly one of --text, --file, or --stdin."],
+            "warnings": [],
+        }
+    else:
+        try:
+            if args.text is not None:
+                content = args.text
+                source = "cli --text"
+            elif args.file is not None or brief_file is not None:
+                input_path = Path(args.file or brief_file).expanduser()
+                content = input_path.read_text(encoding="utf-8")
+                source = f"cli --file {input_path.as_posix()}"
+            else:
+                content = sys.stdin.read()
+                source = "cli --stdin"
+            result = write_project_brief(
+                Path(args.project or "."),
+                content,
+                source=source,
+                force=args.force,
+            )
+        except OSError as error:
+            result = {
+                "schema_version": "1.5",
+                "ok": False,
+                "status": "input_read_failed",
+                "project_root": str(Path(args.project or ".").expanduser().resolve()),
+                "workflow_id": None,
+                "changed": False,
+                "errors": [f"Unable to read brief input: {error}"],
+                "warnings": [],
+            }
+
+    if args.json:
+        _print_json_result(result, args, compact_lists=True)
+    else:
+        print(format_write_brief_text(result), end="")
+    return write_brief_exit_code(result)
+
+
+def run_scheduler_command(args: argparse.Namespace) -> int:
+    if getattr(args, "dry_run", False):
+        result = preview_scheduler(Path(args.project or "."))
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return preview_exit_code(result)
+    project = Path(args.project or ".")
+    progress_interval = float(getattr(args, "progress_interval", 30.0))
+    max_ticks = 1_000_000 if getattr(args, "until_complete", False) else args.max_ticks
+    with _SchedulerProgressReporter(project, interval_seconds=progress_interval):
+        result = run_scheduler(
+            project,
+            max_ticks=max_ticks,
+            continue_after_final_verification=bool(getattr(args, "until_complete", False)),
+        )
+    if args.json:
+        payload = scheduler_summary(result) if getattr(args, "summary", False) else result
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    elif getattr(args, "summary", False):
+        print(format_scheduler_summary_text(result), end="")
+    else:
+        print(format_scheduler_text(result), end="")
+    return scheduler_exit_code(result)
+
+
+class _SchedulerProgressReporter:
+    _ACTIVE_STATUSES = {"starting", "running", "pending", "waiting"}
+    _DIR_FIELDS = ("task_evidence_run_dir", "role_output_dir", "scheduler_run_dir")
+    _SKIP_PROJECT_DIRS = {".loopplane", ".git", ".hg", ".svn", "__pycache__", ".pytest_cache", "node_modules", ".venv", "venv"}
+
+    def __init__(self, project: Path, *, interval_seconds: float, stream: Any | None = None) -> None:
+        self.project = project.expanduser().resolve()
+        self.interval_seconds = max(0.0, interval_seconds)
+        self.stream = stream if stream is not None else sys.stderr
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._seen_files: set[str] = set()
+        self._seen_project_files: set[str] = set()
+        self._started_at = time.time()
+        self._evidence_since: dict[str, float] = {}
+
+    def __enter__(self) -> "_SchedulerProgressReporter":
+        if self.interval_seconds > 0:
+            self._thread = threading.Thread(target=self._run, name="loopplane-run-progress", daemon=True)
+            self._thread.start()
+        return self
+
+    def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=min(1.0, max(0.05, self.interval_seconds)))
+
+    def _run(self) -> None:
+        while not self._stop.wait(self.interval_seconds):
+            try:
+                line = self._progress_line()
+            except Exception:
+                continue
+            if line:
+                print(line, file=self.stream, flush=True)
+
+    def _progress_line(self) -> str | None:
+        lease = self._latest_active_lease()
+        if lease is None:
+            return None
+        new_files = self._new_files(lease)
+        parts = [
+            "[loopplane run] active",
+            f"run_id={_progress_text(lease.get('run_id'))}",
+            f"role={_progress_text(lease.get('role'))}",
+            f"task={_progress_text(lease.get('task_id'))}",
+            f"runner={_progress_text(lease.get('runner_id'))}",
+            f"status={_progress_text(lease.get('status'))}",
+            f"scheduler_pid={_progress_text(lease.get('scheduler_pid') or lease.get('adapter_pid'))}",
+            f"adapter_pid={_progress_text(lease.get('adapter_child_pid'))}",
+            f"heartbeat={_progress_text(lease.get('heartbeat_count'))}",
+        ]
+        if new_files:
+            sample = ", ".join(new_files[:6])
+            suffix = "" if len(new_files) <= 6 else f", +{len(new_files) - 6} more"
+            parts.append(f"new_files={sample}{suffix}")
+        project_files = self._recent_project_files()
+        if project_files:
+            sample = ", ".join(project_files[:6])
+            suffix = "" if len(project_files) <= 6 else f", +{len(project_files) - 6} more"
+            parts.append(f"project_changes={sample}{suffix}")
+        if self._evidence_present(lease):
+            parts.append("adapter_phase=awaiting_adapter_exit")
+            elapsed = self._adapter_phase_elapsed(lease)
+            if elapsed is not None:
+                parts.append(f"adapter_phase_elapsed={elapsed}s")
+            stdout_tail = _progress_log_tail(_progress_project_path(self.project, lease.get("stdout_path")))
+            stderr_tail = _progress_log_tail(_progress_project_path(self.project, lease.get("stderr_path")))
+            if stdout_tail:
+                parts.append(f"stdout_tail={stdout_tail}")
+            if stderr_tail:
+                parts.append(f"stderr_tail={stderr_tail}")
+        return " ".join(parts)
+
+    def _latest_active_lease(self) -> dict[str, Any] | None:
+        context_result = load_scheduler_context(self.project)
+        if not context_result.get("ok"):
+            return None
+        context = context_result.get("context")
+        paths = getattr(context, "paths", None)
+        runtime_dir = getattr(paths, "runtime_dir", None)
+        if not isinstance(runtime_dir, Path):
+            return None
+        lease_dir = runtime_dir / "active_run_leases"
+        if not lease_dir.is_dir():
+            return None
+        leases: list[tuple[float, dict[str, Any]]] = []
+        for path in lease_dir.glob("*.json"):
+            lease = _read_progress_json(path)
+            if not isinstance(lease, dict):
+                continue
+            status = str(lease.get("status") or "").strip()
+            if status not in self._ACTIVE_STATUSES:
+                continue
+            try:
+                modified = path.stat().st_mtime
+            except OSError:
+                modified = 0.0
+            leases.append((modified, lease))
+        if not leases:
+            return None
+        leases.sort(key=lambda item: item[0], reverse=True)
+        return leases[0][1]
+
+    def _new_files(self, lease: Mapping[str, Any]) -> list[str]:
+        observed: list[str] = []
+        for field in self._DIR_FIELDS:
+            directory = _progress_project_path(self.project, lease.get(field))
+            if directory is None or not directory.is_dir():
+                continue
+            for path in sorted(directory.rglob("*")):
+                if not path.is_file():
+                    continue
+                rel = _progress_relative_path(self.project, path)
+                if rel in self._seen_files:
+                    continue
+                self._seen_files.add(rel)
+                observed.append(rel)
+                if len(observed) >= 20:
+                    return observed
+        return observed
+
+    def _evidence_present(self, lease: Mapping[str, Any]) -> bool:
+        evidence_dir = _progress_project_path(self.project, lease.get("task_evidence_run_dir"))
+        if evidence_dir is None or not evidence_dir.is_dir():
+            return False
+        return any((evidence_dir / name).is_file() for name in ("agent_status.json", "report.md", "commands.sh"))
+
+    def _adapter_phase_elapsed(self, lease: Mapping[str, Any]) -> int | None:
+        run_id = str(lease.get("run_id") or "")
+        if not run_id:
+            return None
+        now = time.time()
+        self._evidence_since.setdefault(run_id, now)
+        return max(0, int(now - self._evidence_since[run_id]))
+
+    def _recent_project_files(self) -> list[str]:
+        observed: list[str] = []
+        for root, dirs, files in os.walk(self.project):
+            dirs[:] = [name for name in dirs if name not in self._SKIP_PROJECT_DIRS]
+            for name in sorted(files):
+                path = Path(root) / name
+                try:
+                    stat = path.stat()
+                except OSError:
+                    continue
+                if stat.st_mtime < self._started_at:
+                    continue
+                rel = _progress_relative_path(self.project, path)
+                if rel in self._seen_project_files or rel.startswith(".loopplane/"):
+                    continue
+                self._seen_project_files.add(rel)
+                observed.append(rel)
+                if len(observed) >= 20:
+                    return observed
+        return observed
+
+
+class _PlanningProgressReporter:
+    _ROLE_PROMPTS = {
+        "planner": "planner_prompt.md",
+        "auditor": "auditor_prompt.md",
+    }
+
+    def __init__(
+        self,
+        project: Path,
+        *,
+        command: str,
+        roles: set[str],
+        interval_seconds: float,
+        stream: Any | None = None,
+    ) -> None:
+        self.project = project.expanduser().resolve()
+        self.command = command
+        self.roles = set(roles)
+        self.interval_seconds = max(0.0, interval_seconds)
+        self.stream = stream if stream is not None else sys.stderr
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._seen_files: set[str] = set()
+        self._known_run_dirs: set[Path] = set()
+
+    def __enter__(self) -> "_PlanningProgressReporter":
+        if self.interval_seconds > 0:
+            self._known_run_dirs = set(self._planning_run_dirs())
+            self._thread = threading.Thread(target=self._run, name=f"loopplane-{self.command}-progress", daemon=True)
+            self._thread.start()
+        return self
+
+    def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=min(1.0, max(0.05, self.interval_seconds)))
+
+    def _run(self) -> None:
+        while not self._stop.wait(self.interval_seconds):
+            try:
+                line = self._progress_line()
+            except Exception:
+                continue
+            if line:
+                print(line, file=self.stream, flush=True)
+
+    def _progress_line(self) -> str | None:
+        run = self._latest_active_run()
+        if run is None:
+            return None
+        run_dir, role, adapter_input = run
+        new_files = self._new_files(run_dir)
+        parts = [
+            f"[loopplane {self.command}] active",
+            f"run_id={run_dir.name}",
+            f"role={role}",
+            f"runner={_progress_text(adapter_input.get('runner_id') if isinstance(adapter_input, Mapping) else None)}",
+            f"run_dir={_progress_relative_path(self.project, run_dir)}",
+        ]
+        if new_files:
+            sample = ", ".join(new_files[:6])
+            suffix = "" if len(new_files) <= 6 else f", +{len(new_files) - 6} more"
+            parts.append(f"new_files={sample}{suffix}")
+        stdout_tail = _progress_log_tail(run_dir / "stdout.log")
+        stderr_tail = _progress_log_tail(run_dir / "stderr.log")
+        if stdout_tail:
+            parts.append(f"stdout_tail={stdout_tail}")
+        if stderr_tail:
+            parts.append(f"stderr_tail={stderr_tail}")
+        return " ".join(parts)
+
+    def _planning_run_dirs(self) -> list[Path]:
+        runs_dir = self.project / ".loopplane" / "planning" / "runs"
+        if not runs_dir.is_dir():
+            return []
+        return sorted((path for path in runs_dir.iterdir() if path.is_dir()), key=lambda path: path.name)
+
+    def _latest_active_run(self) -> tuple[Path, str, Mapping[str, Any] | None] | None:
+        candidates: list[tuple[float, Path, str, Mapping[str, Any] | None]] = []
+        for run_dir in self._planning_run_dirs():
+            if run_dir in self._known_run_dirs:
+                continue
+            role = self._run_role(run_dir)
+            if role not in self.roles:
+                continue
+            if (run_dir / "node_summary.json").is_file():
+                continue
+            adapter_input = _read_progress_json(run_dir / "adapter_input.json")
+            try:
+                modified = max((path.stat().st_mtime for path in run_dir.rglob("*") if path.is_file()), default=run_dir.stat().st_mtime)
+            except OSError:
+                modified = 0.0
+            candidates.append((modified, run_dir, role, adapter_input if isinstance(adapter_input, Mapping) else None))
+        if not candidates:
+            return None
+        candidates.sort(key=lambda item: item[0], reverse=True)
+        _modified, run_dir, role, adapter_input = candidates[0]
+        return run_dir, role, adapter_input
+
+    def _run_role(self, run_dir: Path) -> str:
+        adapter_input = _read_progress_json(run_dir / "adapter_input.json")
+        if isinstance(adapter_input, Mapping):
+            role = str(adapter_input.get("role") or "").strip()
+            if role:
+                return role
+        for role, prompt_name in self._ROLE_PROMPTS.items():
+            if (run_dir / prompt_name).is_file():
+                return role
+        return "planning"
+
+    def _new_files(self, run_dir: Path) -> list[str]:
+        observed: list[str] = []
+        for path in sorted(run_dir.rglob("*")):
+            if not path.is_file():
+                continue
+            rel = _progress_relative_path(self.project, path)
+            if rel in self._seen_files:
+                continue
+            self._seen_files.add(rel)
+            observed.append(rel)
+            if len(observed) >= 20:
+                break
+        return observed
+
+
+def _read_progress_json(path: Path) -> object | None:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def _progress_project_path(project: Path, value: object) -> Path | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    path = Path(value)
+    if path.is_absolute():
+        return path
+    return project / path
+
+
+def _progress_relative_path(project: Path, path: Path) -> str:
+    try:
+        return path.resolve().relative_to(project).as_posix()
+    except ValueError:
+        return path.as_posix()
+
+
+def _progress_log_tail(path: Path | None, *, limit: int = 180) -> str:
+    if path is None or not path.is_file():
+        return ""
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    text = " ".join(text.strip().split())
+    if not text:
+        return ""
+    if len(text) <= limit:
+        return text
+    return text[-limit:].lstrip()
+
+
+def _progress_text(value: object) -> str:
+    if value is None or value == "":
+        return "-"
+    return str(value)
+
+
+def run_preview(args: argparse.Namespace) -> int:
+    result = preview_scheduler(Path(args.project or "."), write=args.write)
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+    else:
+        print(format_preview_text(result), end="")
+    return preview_exit_code(result)
+
+
+def run_health(args: argparse.Namespace) -> int:
+    if getattr(args, "all", False) and getattr(args, "workflow", None):
+        result = {
+            "schema_version": "1.6",
+            "ok": False,
+            "status": "invalid_arguments",
+            "project_root": str(Path(args.project or ".").expanduser().resolve()),
+            "errors": ["--all and --workflow cannot be combined."],
+            "workflow_results": [],
+        }
+        if args.json:
+            print(json.dumps(result, indent=2, sort_keys=True))
+        else:
+            print("loopplane health: invalid_arguments")
+            print("error: --all and --workflow cannot be combined.")
+        return EXIT_INVALID_CONFIG
+    if getattr(args, "all", False):
+        result = _run_health_all(Path(args.project or "."), strict=args.strict, write=args.write)
+        if args.json:
+            print(json.dumps(result, indent=2, sort_keys=True))
+        else:
+            print(_format_health_all_text(result), end="")
+        return _health_all_exit_code(result)
+
+    result = run_health_probe(
+        Path(args.project or "."),
+        workflow_id=getattr(args, "workflow", None),
+        strict=args.strict,
+        write=args.write,
+    )
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+    else:
+        print(format_health_text(result), end="")
+    return health_exit_code(result)
+
+
+def _run_health_all(project: Path, *, strict: bool, write: bool) -> dict[str, Any]:
+    project = project.expanduser().resolve()
+    listed = list_workflows(project)
+    if not listed.get("ok"):
+        return {
+            "schema_version": "1.6",
+            "ok": False,
+            "status": "workflow_list_failed",
+            "project_root": project.as_posix(),
+            "strict": strict,
+            "write": write,
+            "workflow_count": 0,
+            "workflow_results": [],
+            "errors": list(listed.get("errors") or ["Unable to list workflow histories."]),
+            "warnings": list(listed.get("warnings") or []),
+        }
+    workflow_results = []
+    for workflow in listed.get("workflows") or []:
+        if not isinstance(workflow, Mapping):
+            continue
+        workflow_id = str(workflow.get("workflow_id") or "").strip()
+        if not workflow_id:
+            continue
+        health = run_health_probe(project, workflow_id=workflow_id, strict=strict, write=write)
+        workflow_results.append(
+            {
+                "workflow_id": workflow_id,
+                "name": workflow.get("name"),
+                "current": bool(workflow.get("current")),
+                "status": health.get("status"),
+                "ok": health.get("ok"),
+                "requires_attention": list(health.get("requires_attention") or []),
+                "health": health,
+            }
+        )
+    ok = all(bool(item.get("ok")) for item in workflow_results) if workflow_results else False
+    return {
+        "schema_version": "1.6",
+        "ok": ok,
+        "status": "healthy" if ok else "requires_attention",
+        "project_root": project.as_posix(),
+        "strict": strict,
+        "write": write,
+        "workspace_id": listed.get("workspace_id"),
+        "current_workflow_id": listed.get("current_workflow_id"),
+        "workflow_count": len(workflow_results),
+        "workflow_results": workflow_results,
+        "errors": [],
+        "warnings": list(listed.get("warnings") or []),
+    }
+
+
+def _format_health_all_text(result: Mapping[str, Any]) -> str:
+    lines = [
+        f"loopplane health --all: {result.get('status', 'unknown')}",
+        f"project: {result.get('project_root') or 'unknown'}",
+        f"workspace_id: {result.get('workspace_id') or 'unknown'}",
+        f"current_workflow_id: {result.get('current_workflow_id') or 'unknown'}",
+        f"strict: {str(bool(result.get('strict'))).lower()}",
+    ]
+    errors = result.get("errors")
+    if isinstance(errors, Sequence) and errors and not isinstance(errors, (str, bytes)):
+        lines.append("errors:")
+        lines.extend(f"  - {error}" for error in errors)
+    workflow_results = result.get("workflow_results")
+    if isinstance(workflow_results, Sequence) and not isinstance(workflow_results, (str, bytes)):
+        lines.append("workflows:")
+        for item in workflow_results:
+            if not isinstance(item, Mapping):
+                continue
+            current = " current" if item.get("current") else ""
+            lines.append(
+                "  - "
+                f"{item.get('workflow_id') or 'unknown'}{current}: "
+                f"{item.get('status') or 'unknown'} "
+                f"ok={str(bool(item.get('ok'))).lower()} "
+                f"name={item.get('name') or 'unknown'}"
+            )
+            attention = item.get("requires_attention")
+            if isinstance(attention, Sequence) and attention and not isinstance(attention, (str, bytes)):
+                lines.append(f"    requires_attention: {len(attention)} item(s)")
+    warnings = result.get("warnings")
+    if isinstance(warnings, Sequence) and warnings and not isinstance(warnings, (str, bytes)):
+        lines.append("warnings:")
+        lines.extend(f"  - {warning}" for warning in warnings)
+    return "\n".join(lines) + "\n"
+
+
+def _health_all_exit_code(result: Mapping[str, Any]) -> int:
+    if not result.get("ok"):
+        return EXIT_HEALTH_FAILURE
+    return 0
+
+
+def run_validate(args: argparse.Namespace) -> int:
+    result = run_validator(
+        Path(args.project or "."),
+        task_id=args.task,
+        run_dir=Path(args.run_dir),
+        write=not args.no_write,
+    )
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+    else:
+        print(format_validation_text(result), end="")
+    return validation_exit_code(result)
+
+
+def run_reconcile(args: argparse.Namespace) -> int:
+    result = run_reconciler(
+        Path(args.project or "."),
+        task_id=args.task,
+        run_dir=Path(args.run_dir) if args.run_dir else None,
+        validation_path=Path(args.validation) if args.validation else None,
+        write=not args.no_write,
+    )
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+    else:
+        print(format_reconciliation_text(result), end="")
+    return reconciliation_exit_code(result)
+
+
+def run_summarize(args: argparse.Namespace) -> int:
+    result = ensure_human_summaries(
+        Path(args.project or "."),
+        task_ids=list(getattr(args, "task", None) or []),
+        force=bool(getattr(args, "force", False)),
+        write=not bool(getattr(args, "no_write", False)),
+    )
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+    else:
+        print(format_human_summary_text(result), end="")
+    return human_summary_exit_code(result)
+
+
+def run_rebuild_read_models(args: argparse.Namespace) -> int:
+    result = rebuild_read_models(
+        Path(args.project or "."),
+        write=not args.no_write,
+        workflow_id=getattr(args, "workflow", None),
+        max_dashboard_events=getattr(args, "max_dashboard_events", None),
+    )
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+    else:
+        print(format_read_model_rebuild_text(result), end="")
+    return read_model_rebuild_exit_code(result)
+
+
+def run_final_verify(args: argparse.Namespace) -> int:
+    result = run_final_verifier(Path(args.project or "."), owner="cli", write=not args.no_write, force=args.force)
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+    else:
+        print(format_final_verifier_text(result), end="")
+    return final_verifier_exit_code(result)
+
+
+def run_verify_objectives(args: argparse.Namespace) -> int:
+    result = run_objective_verifier_once(
+        Path(args.project or "."),
+        scope=args.scope,
+        phase_id=args.phase_id,
+        owner="cli",
+        force=args.force,
+    )
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+    else:
+        print(f"loopplane verify-objectives: {result.get('status', 'unknown')}")
+        execution = result.get("execution_result")
+        if isinstance(execution, Mapping):
+            print(f"ok: {execution.get('ok')}")
+            if execution.get("objective_verification_report"):
+                print(f"objective_verification_report: {execution.get('objective_verification_report')}")
+        errors = result.get("errors")
+        if isinstance(errors, Sequence) and not isinstance(errors, (str, bytes)):
+            for error in errors:
+                print(f"error: {error}")
+    return 0 if result.get("ok") else EXIT_GENERIC_FAILURE
+
+
+def run_self_expansion_status(args: argparse.Namespace) -> int:
+    result = load_expansion_status(Path(args.project or "."))
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+    else:
+        print(format_self_expansion_text(result), end="")
+    return 0 if result.get("ok") else 1
+
+
+def run_self_expansion_validate(args: argparse.Namespace) -> int:
+    result = validate_expansion_proposal(Path(args.project or "."), Path(args.proposal), write_registry=args.write_registry)
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+    else:
+        print(format_self_expansion_text(result), end="")
+    return 0 if result.get("ok") else 1
+
+
+def run_self_expansion_apply(args: argparse.Namespace) -> int:
+    result = apply_expansion_proposal(
+        Path(args.project or "."),
+        Path(args.proposal),
+        run_id=args.run_id,
+        runner_id=args.runner,
+        owner="cli",
+    )
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+    else:
+        print(format_self_expansion_text(result), end="")
+    return 0 if result.get("ok") else 1
+
+
+def format_self_expansion_text(result: Mapping[str, Any]) -> str:
+    lines = [
+        f"loopplane self-expansion: {result.get('status', 'unknown')}",
+        f"workflow_id: {result.get('workflow_id') or 'unknown'}",
+    ]
+    if result.get("registry_path"):
+        lines.append(f"registry: {result.get('registry_path')}")
+    if result.get("cycle") is not None:
+        lines.append(f"cycle: {result.get('cycle')}")
+    if result.get("proposal_count") is not None:
+        lines.append(f"proposals: {result.get('proposal_count')}")
+    if result.get("proposal_id"):
+        lines.append(f"proposal_id: {result.get('proposal_id')}")
+    if result.get("resolution_strategy"):
+        lines.append(f"resolution_strategy: {result.get('resolution_strategy')}")
+    if result.get("added_task_ids"):
+        lines.append("added_task_ids:")
+        lines.extend(f"  - {task_id}" for task_id in result.get("added_task_ids") or [])
+    latest = result.get("latest_proposal")
+    if isinstance(latest, Mapping):
+        lines.append(f"latest_proposal: {latest.get('proposal_id') or 'unknown'} ({latest.get('status') or 'unknown'})")
+    policy = result.get("policy")
+    if isinstance(policy, Mapping):
+        lines.append(f"enabled: {policy.get('enabled')}")
+        lines.append(f"max_cycles: {policy.get('max_cycles')}")
+        lines.append(f"max_tasks_per_cycle: {policy.get('max_tasks_per_cycle')}")
+    for key in ("errors", "warnings"):
+        values = result.get(key)
+        if isinstance(values, Sequence) and values and not isinstance(values, (str, bytes)):
+            lines.append(f"{key}:")
+            lines.extend(f"  - {value}" for value in values)
+    return "\n".join(lines) + "\n"
+
+
+def run_migrate(args: argparse.Namespace) -> int:
+    result = migrate_project(Path(args.project or "."), dry_run=args.dry_run)
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+    else:
+        print(format_migration_text(result), end="")
+    return migration_exit_code(result)
+
+
+def run_export(args: argparse.Namespace) -> int:
+    result = export_project(
+        Path(args.project or "."),
+        profile=args.profile,
+        output=Path(args.output),
+    )
+    if args.json:
+        _print_json_result(result, args, compact_lists=True)
+    else:
+        print(format_export_text(result), end="")
+    return export_exit_code(result)
+
+
+def run_import(args: argparse.Namespace) -> int:
+    result = import_project_archive(
+        Path(args.archive),
+        target=Path(args.target),
+        read_only=bool(args.read_only),
+    )
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+    else:
+        print(format_import_text(result), end="")
+    return import_exit_code(result)
+
+
+def run_dashboard(args: argparse.Namespace) -> int:
+    if getattr(args, "dashboard_action", None) == "list":
+        result = list_dashboard_servers(Path(args.project or "."))
+        if args.json:
+            print(json.dumps(result, indent=2, sort_keys=True))
+        else:
+            print(format_dashboard_list_text(result), end="")
+        return dashboard_list_exit_code(result)
+    if getattr(args, "dashboard_action", None) in {"cleanup", "stop"}:
+        result = cleanup_dashboard_servers(
+            Path(args.project or "."),
+            stop=getattr(args, "dashboard_action", None) == "stop",
+            terminate_orphans=bool(getattr(args, "terminate_orphans", False)),
+        )
+        if args.json:
+            print(json.dumps(result, indent=2, sort_keys=True))
+        else:
+            print(format_dashboard_cleanup_text(result), end="")
+        return dashboard_list_exit_code(result)
+
+    if args.port is not None:
+        try:
+            server, result = create_dashboard_server(
+                Path(args.project or "."),
+                port=args.port,
+                host=args.host,
+                rebuild_read_models_first=args.rebuild_read_models,
+                workflow_id=args.workflow,
+                max_dashboard_events=getattr(args, "max_dashboard_events", None),
+            )
+        except DashboardServerError as error:
+            result = error.result
+            if args.json:
+                print(json.dumps(result, indent=2, sort_keys=True))
+            else:
+                print(format_dashboard_text(result), end="")
+            return dashboard_exit_code(result)
+        except (OSError, ValueError, json.JSONDecodeError, WorkflowPathError) as error:
+            result = {
+                "schema_version": "1.5",
+                "ok": False,
+                "status": "failed",
+                "server_mode": True,
+                "project_root": str(Path(args.project or ".").expanduser().resolve()),
+                "workflow_id": args.workflow,
+                "errors": [str(error)],
+                "warnings": [],
+            }
+            if args.json:
+                print(json.dumps(result, indent=2, sort_keys=True))
+            else:
+                print(format_dashboard_text(result), end="")
+            return dashboard_exit_code(result)
+
+        if args.json:
+            print(json.dumps(result, sort_keys=True), flush=True)
+            _close_stdout_for_foreground_json_server()
+        else:
+            print(format_dashboard_text(result), end="", flush=True)
+            print("Press Ctrl-C to stop.", flush=True)
+        try:
+            server.serve_forever()
+        except KeyboardInterrupt:
+            pass
+        finally:
+            server.server_close()
+        return 0
+
+    result = render_static_dashboard(
+        Path(args.project or "."),
+        output_dir=Path(args.output) if args.output else None,
+        rebuild_read_models_first=args.rebuild_read_models,
+        workflow_id=args.workflow,
+        max_dashboard_events=getattr(args, "max_dashboard_events", None),
+    )
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+    else:
+        print(format_dashboard_text(result), end="")
+    return dashboard_exit_code(result)
+
+
+def _close_stdout_for_foreground_json_server() -> None:
+    try:
+        sys.stdout.flush()
+        os.close(sys.stdout.fileno())
+        sys.stdout = open(os.devnull, "w", encoding="utf-8")
+    except (OSError, ValueError):
+        pass
+
+
+def run_control_request(args: argparse.Namespace) -> int:
+    payload: dict[str, Any] = {}
+    control_type = str(args.control_type)
+    if control_type == "start":
+        payload["detach"] = bool(getattr(args, "detach", False))
+    if control_type == "migrate":
+        payload["mode"] = "schema_check"
+    try:
+        result = record_control_request(
+            Path(args.project or "."),
+            control_type,
+            source="cli",
+            payload=payload,
+        )
+    except (OSError, json.JSONDecodeError, WorkflowPathError, WorkflowLifecycleError) as error:
+        result = _control_command_failure(args.project, f"Unable to record control request: {error}")
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+    else:
+        print(format_control_request_text(result), end="")
+    return control_exit_code(result)
+
+
+def run_start(args: argparse.Namespace) -> int:
+    if getattr(args, "detach", False):
+        try:
+            result = start_detached_scheduler(Path(args.project or "."))
+        except (OSError, json.JSONDecodeError, WorkflowPathError) as error:
+            result = _waiting_config_command_failure(args.project, f"Unable to start detached scheduler: {error}")
+        if args.json:
+            print(json.dumps(result, indent=2, sort_keys=True))
+        else:
+            print(format_detached_start_text(result), end="")
+        return detached_start_exit_code(result)
+    return run_control_request(args)
+
+
+def run_resume(args: argparse.Namespace) -> int:
+    try:
+        result = resume_detached_scheduler(Path(args.project or "."))
+    except (OSError, json.JSONDecodeError, WorkflowPathError) as error:
+        result = _waiting_config_command_failure(args.project, f"Unable to resume detached scheduler: {error}")
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+    else:
+        print(format_control_request_text(result), end="")
+    return control_exit_code(result)
+
+
+def run_status(args: argparse.Namespace) -> int:
+    try:
+        result = load_control_status(Path(args.project or "."))
+    except (OSError, json.JSONDecodeError, WorkflowPathError, WorkflowLifecycleError) as error:
+        result = _waiting_config_command_failure(args.project, f"Unable to load workflow status: {error}")
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+    else:
+        print(format_control_status_text(result), end="")
+    return control_exit_code(result)
+
+
+def run_logs(args: argparse.Namespace) -> int:
+    try:
+        result = load_control_logs(Path(args.project or "."), lines=args.lines)
+    except (OSError, json.JSONDecodeError, WorkflowPathError, WorkflowLifecycleError) as error:
+        result = _control_command_failure(args.project, f"Unable to load workflow logs: {error}")
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+    else:
+        print(format_control_logs_text(result), end="")
+    return control_exit_code(result)
+
+
+def run_background_start(args: argparse.Namespace) -> int:
+    try:
+        env = _parse_background_env(getattr(args, "env", None) or [])
+        result = start_background_job(
+            Path(args.project or "."),
+            command=list(getattr(args, "command", None) or []),
+            shell=bool(getattr(args, "shell", False)),
+            cwd=Path(args.cwd) if getattr(args, "cwd", None) else None,
+            env=env,
+            job_id=getattr(args, "job_id", None),
+            label=getattr(args, "label", None),
+            task_id=getattr(args, "task", None),
+            run_id=getattr(args, "run", None),
+            workflow_id=getattr(args, "workflow", None),
+            timeout_seconds=getattr(args, "timeout_seconds", None),
+            wake_next_agent_when=getattr(args, "wake_next_agent_when", None),
+            watchdog_interval_seconds=getattr(args, "watchdog_interval_seconds", None),
+            watchdog_runner=getattr(args, "watchdog_runner", None),
+            watchdog_question=getattr(args, "watchdog_question", None),
+        )
+    except ValueError as error:
+        result = _control_command_failure(args.project, f"Invalid background job request: {error}")
+        result["status"] = "invalid_background_job_request"
+        result["exit_code"] = EXIT_INVALID_CONFIG
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+    else:
+        print(format_background_text(result), end="")
+    return background_exit_code(result)
+
+
+def run_background_status(args: argparse.Namespace) -> int:
+    result = list_background_jobs(
+        Path(args.project or "."),
+        workflow_id=getattr(args, "workflow", None),
+        job_id=getattr(args, "job", None),
+        refresh=not bool(getattr(args, "no_refresh", False)),
+    )
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+    else:
+        print(format_background_text(result), end="")
+    return background_exit_code(result)
+
+
+def run_background_complete(args: argparse.Namespace) -> int:
+    result = complete_background_job(
+        Path(args.project or "."),
+        args.job_id,
+        workflow_id=getattr(args, "workflow", None),
+        status=getattr(args, "status", "completed"),
+        reason=getattr(args, "reason", None),
+    )
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+    else:
+        print(format_background_text(result), end="")
+    return background_exit_code(result)
+
+
+def run_background_cancel(args: argparse.Namespace) -> int:
+    result = cancel_background_job(
+        Path(args.project or "."),
+        args.job_id,
+        workflow_id=getattr(args, "workflow", None),
+        reason=getattr(args, "reason", None),
+    )
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+    else:
+        print(format_background_text(result), end="")
+    return background_exit_code(result)
+
+
+def _parse_background_env(values: Sequence[str]) -> dict[str, str]:
+    env: dict[str, str] = {}
+    for value in values:
+        if "=" not in value:
+            raise ValueError("--env entries must use KEY=VALUE.")
+        key, text = value.split("=", 1)
+        key = key.strip()
+        if not key:
+            raise ValueError("--env entries must include a non-empty key.")
+        env[key] = text
+    return env
+
+
+def run_attach(args: argparse.Namespace) -> int:
+    if getattr(args, "request", False):
+        return run_control_request(args)
+    try:
+        result = load_control_attach(
+            Path(args.project or "."),
+            lines=args.lines,
+            follow=args.follow,
+            timeout_seconds=args.timeout,
+            poll_interval_seconds=args.poll_interval,
+        )
+    except (OSError, json.JSONDecodeError, WorkflowPathError, WorkflowLifecycleError) as error:
+        result = _control_command_failure(args.project, f"Unable to attach to detached scheduler: {error}")
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+    else:
+        print(format_control_attach_text(result), end="")
+    return control_attach_exit_code(result)
+
+
+def run_inspection(args: argparse.Namespace) -> int:
+    question = args.question or getattr(args, "question_option", None) or ""
+    try:
+        result = answer_inspection(
+            Path(args.project or "."),
+            question,
+            runner_id=args.runner or "inspector",
+            allowed_paths=args.allowed_path,
+            source="cli",
+        )
+    except (OSError, json.JSONDecodeError, WorkflowPathError) as error:
+        result = _control_command_failure(args.project, f"Unable to answer inspection request: {error}")
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+    else:
+        print(format_inspection_text(result), end="")
+    return inspection_exit_code(result)
+
+
+def run_change_request_submit(args: argparse.Namespace) -> int:
+    try:
+        result = submit_change_request(
+            Path(args.project or "."),
+            args.request or "",
+            source="cli",
+        )
+    except (OSError, json.JSONDecodeError, WorkflowPathError) as error:
+        result = _control_command_failure(args.project, f"Unable to submit change request: {error}")
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+    else:
+        print(format_change_request_text(result), end="")
+    return change_request_exit_code(result)
+
+
+def run_change_request_review(args: argparse.Namespace) -> int:
+    try:
+        result = review_change_request(
+            Path(args.project or "."),
+            args.change_request_id,
+            source="cli",
+            audit=args.audit if args.audit else None,
+            runner_id=args.runner,
+        )
+    except (OSError, json.JSONDecodeError, WorkflowPathError) as error:
+        result = _control_command_failure(args.project, f"Unable to review change request: {error}")
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+    else:
+        print(format_change_request_text(result), end="")
+    return change_request_exit_code(result)
+
+
+def run_change_request_apply(args: argparse.Namespace) -> int:
+    try:
+        result = apply_change_request(
+            Path(args.project or "."),
+            args.change_request_id or "",
+            source="cli",
+        )
+    except (OSError, json.JSONDecodeError, WorkflowPathError) as error:
+        result = _control_command_failure(args.project, f"Unable to apply change request: {error}")
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+    else:
+        print(format_change_request_text(result), end="")
+    return change_request_exit_code(result)
+
+
+def run_change_request_status(args: argparse.Namespace) -> int:
+    try:
+        result = load_change_request_status(
+            Path(args.project or "."),
+            change_request_id=args.change_request_id,
+            include_all=args.all,
+        )
+    except (OSError, json.JSONDecodeError, WorkflowPathError) as error:
+        result = _control_command_failure(args.project, f"Unable to load change requests: {error}")
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+    else:
+        print(format_change_request_text(result), end="")
+    return change_request_exit_code(result)
+
+
+def _control_command_failure(project: str | None, message: str) -> dict[str, Any]:
+    return {
+        "schema_version": "1.5",
+        "ok": False,
+        "status": "failed",
+        "project_root": str(Path(project or ".").expanduser()),
+        "workflow_id": None,
+        "message": message,
+        "errors": [message],
+        "warnings": [],
+    }
+
+
+def _waiting_config_command_failure(project: str | None, message: str) -> dict[str, Any]:
+    project_path = Path(project or ".").expanduser()
+    workflow_path = project_path / ".loopplane" / "config" / "workflow.json"
+    problem = {
+        "code": "workflow_config_unavailable",
+        "message": message,
+        "recoverable": True,
+        "path": workflow_path.as_posix(),
+        "recovery_actions": [
+            "Restore .loopplane/config/workflow.json from a checkpoint or backup.",
+            "Run loopplane init --project <project> --brief <brief> if this directory has not been initialized.",
+        ],
+    }
+    return {
+        "schema_version": "1.5",
+        "ok": False,
+        "status": "waiting_config",
+        "project_root": str(project_path),
+        "workflow_id": None,
+        "message": message,
+        "configuration_problems": [problem],
+        "recovery_actions": list(problem["recovery_actions"]),
+        "errors": [message],
+        "warnings": [],
+    }
+
+
+def run_approvals(args: argparse.Namespace) -> int:
+    try:
+        result = load_approval_status(Path(args.project or "."), include_all=args.all)
+    except (OSError, json.JSONDecodeError, WorkflowPathError) as error:
+        result = {
+            "schema_version": "1.5",
+            "ok": False,
+            "status": "failed",
+            "errors": [f"Unable to load approval state: {error}"],
+            "warnings": [],
+        }
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+    else:
+        print(format_approval_status_text(result), end="")
+    return 0 if result.get("ok") else EXIT_GENERIC_FAILURE
+
+
+def run_approve(args: argparse.Namespace) -> int:
+    result = record_approval_response(
+        Path(args.project or "."),
+        args.approval_id or "",
+        decision="approved",
+        approved_by=args.approved_by or "user",
+        notes=args.notes or "",
+        allow_disabled_policy=args.override_disabled_policy,
+    )
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+    else:
+        print(format_approval_response_text(result), end="")
+    return 0 if result.get("ok") else EXIT_GENERIC_FAILURE
+
+
+def run_reject(args: argparse.Namespace) -> int:
+    result = record_approval_response(
+        Path(args.project or "."),
+        args.approval_id or "",
+        decision=args.decision,
+        approved_by=args.approved_by or "user",
+        notes=args.notes or "",
+        allow_disabled_policy=args.override_disabled_policy,
+    )
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+    else:
+        print(format_approval_response_text(result), end="")
+    return 0 if result.get("ok") else EXIT_GENERIC_FAILURE
+
+
+def format_approval_status_text(result: Mapping[str, Any]) -> str:
+    lines = [
+        f"loopplane approvals: {result.get('status', 'unknown')}",
+        f"workflow_id: {result.get('workflow_id') or 'unknown'}",
+    ]
+    policy = result.get("approval_policy")
+    if isinstance(policy, dict):
+        lines.append(f"interactive_approval_enabled: {str(bool(policy.get('enabled'))).lower()}")
+        if not policy.get("enabled"):
+            lines.append(f"disabled_policy: {policy.get('default_action_when_disabled') or 'block_or_defer'}")
+    approvals = result.get("approvals")
+    if isinstance(approvals, list) and approvals:
+        lines.append("approvals:")
+        for approval in approvals:
+            if not isinstance(approval, dict):
+                continue
+            lines.append(
+                "  - "
+                f"{approval.get('approval_id') or approval.get('request_id')}: "
+                f"{approval.get('status', 'unknown')} "
+                f"{approval.get('type', '')} "
+                f"{approval.get('task_id', '')}".rstrip()
+            )
+            message = approval.get("message")
+            if message:
+                lines.append(f"    message: {message}")
+    else:
+        lines.append("approvals: none")
+    for key in ("warnings", "errors"):
+        values = result.get(key)
+        if isinstance(values, list) and values:
+            lines.append(f"{key}:")
+            lines.extend(f"  - {value}" for value in values)
+    return "\n".join(lines) + "\n"
+
+
+def format_approval_response_text(result: Mapping[str, Any]) -> str:
+    lines = [
+        f"loopplane approval response: {result.get('status', 'unknown')}",
+        f"workflow_id: {result.get('workflow_id') or 'unknown'}",
+    ]
+    response = result.get("response")
+    if isinstance(response, dict):
+        lines.append(f"approval_id: {response.get('approval_id')}")
+        lines.append(f"decision: {response.get('decision')}")
+        lines.append(f"responded_at: {response.get('responded_at')}")
+    errors = result.get("errors")
+    if isinstance(errors, list) and errors:
+        lines.append("errors:")
+        lines.extend(f"  - {error}" for error in errors)
+    return "\n".join(lines) + "\n"
+
+
+def run_vc_doctor(args: argparse.Namespace) -> int:
+    result = run_git_doctor(Path(args.project or "."))
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+    else:
+        print(format_doctor_text(result), end="")
+    return doctor_exit_code(result)
+
+
+def run_vc_status(args: argparse.Namespace) -> int:
+    result = load_version_control_status(Path(args.project or "."))
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+    else:
+        print(format_status_text(result), end="")
+    return status_exit_code(result)
+
+
+def run_vc_checkpoint(args: argparse.Namespace) -> int:
+    result = create_git_checkpoint(
+        Path(args.project or "."),
+        reason=args.reason or "manual_checkpoint",
+        task_id=args.task,
+        run_id=args.run,
+    )
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+    else:
+        print(format_checkpoint_text(result), end="")
+    return checkpoint_exit_code(result)
+
+
+def run_vc_run_metadata(args: argparse.Namespace) -> int:
+    result = capture_run_git_metadata(
+        Path(args.project or "."),
+        Path(args.run_dir),
+        stage=args.stage,
+        task_id=args.task,
+        run_id=args.run,
+        run_kind=args.run_kind,
+    )
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+    else:
+        print(format_run_metadata_text(result), end="")
+    return run_metadata_exit_code(result)
+
+
+def run_vc_diff(args: argparse.Namespace) -> int:
+    result = load_task_diff_metadata(Path(args.project or "."), task_id=args.task or "")
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+    else:
+        print(format_task_diff_text(result), end="")
+    return diff_exit_code(result)
+
+
+def run_vc_log(args: argparse.Namespace) -> int:
+    result = load_checkpoint_log(Path(args.project or "."), limit=args.limit)
+    if args.json:
+        _print_json_result(result, args, compact_lists=True)
+    else:
+        print(format_checkpoint_log_text(result), end="")
+    return checkpoint_log_exit_code(result)
+
+
+def run_vc_rollback(args: argparse.Namespace) -> int:
+    result = request_checkpoint_rollback(Path(args.project or "."), checkpoint_id=args.checkpoint or "")
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+    else:
+        print(format_rollback_text(result), end="")
+    return rollback_exit_code(result)
+
+
+def run_vc_export(args: argparse.Namespace) -> int:
+    result = export_git_checkpoint_bundle(Path(args.project or "."), output=Path(args.output))
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+    else:
+        print(format_bundle_export_text(result), end="")
+    return bundle_export_exit_code(result)
+
+
+def run_vc_import(args: argparse.Namespace) -> int:
+    result = import_git_checkpoint_bundle(Path(args.project or "."), bundle=Path(args.bundle))
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+    else:
+        print(format_bundle_import_text(result), end="")
+    return bundle_import_exit_code(result)
+
+
+def run_workspace_current(args: argparse.Namespace) -> int:
+    result = load_current_workspace(Path(args.project or "."))
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+    else:
+        print(format_workspace_current_text(result), end="")
+    return workspace_current_exit_code(result)
+
+
+def run_workspace_register(args: argparse.Namespace) -> int:
+    result = register_workspace(Path(args.project))
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+    else:
+        print(format_workspace_register_text(result), end="")
+    return workspace_register_exit_code(result)
+
+
+def run_workspace_unregister(args: argparse.Namespace) -> int:
+    result = unregister_workspace(args.workspace_id)
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+    else:
+        print(format_workspace_unregister_text(result), end="")
+    return workspace_unregister_exit_code(result)
+
+
+def run_workspace_scan(args: argparse.Namespace) -> int:
+    result = scan_workspaces(
+        args.directory,
+        allow_nested_workspace=bool(getattr(args, "allow_nested_workspace", False)),
+        workspace_namespace=getattr(args, "workspace_namespace", None),
+    )
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+    else:
+        print(format_workspace_scan_text(result), end="")
+    return workspace_scan_exit_code(result)
+
+
+def run_workspace_list(args: argparse.Namespace) -> int:
+    result = list_workspaces()
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+    else:
+        print(format_workspace_list_text(result), end="")
+    return workspace_list_exit_code(result)
+
+
+def run_workspace_doctor(args: argparse.Namespace) -> int:
+    result = doctor_workspace(Path(args.project or "."))
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+    else:
+        print(format_workspace_doctor_text(result), end="")
+    return workspace_doctor_exit_code(result)
+
+
+def run_workflow_list(args: argparse.Namespace) -> int:
+    result = list_workflows(Path(args.project or "."))
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+    else:
+        print(format_workflow_list_text(result), end="")
+    return workflow_list_exit_code(result)
+
+
+def run_workflow_current(args: argparse.Namespace) -> int:
+    result = current_workflow(Path(args.project or "."))
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+    else:
+        print(format_workflow_current_text(result), end="")
+    return workflow_current_exit_code(result)
+
+
+def run_workflow_show(args: argparse.Namespace) -> int:
+    result = show_workflow(Path(args.project or "."), str(args.workflow_id))
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+    else:
+        print(format_workflow_show_text(result), end="")
+    return workflow_show_exit_code(result)
+
+
+def run_workflow_switch(args: argparse.Namespace) -> int:
+    result = switch_workflow(Path(args.project or "."), str(args.workflow_id))
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+    else:
+        print(format_workflow_switch_text(result), end="")
+    return workflow_switch_exit_code(result)
+
+
+def run_workflow_create(args: argparse.Namespace) -> int:
+    result = create_workflow(Path(args.project or "."), str(args.brief))
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+    else:
+        print(format_workflow_create_text(result), end="")
+    return workflow_create_exit_code(result)
+
+
+def run_workflow_archive(args: argparse.Namespace) -> int:
+    result = archive_workflow(Path(args.project or "."), str(args.workflow_id))
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+    else:
+        print(format_workflow_archive_text(result), end="")
+    return workflow_archive_exit_code(result)
+
+
+def run_workflow_restore(args: argparse.Namespace) -> int:
+    result = restore_workflow(Path(args.project or "."), str(args.workflow_id))
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+    else:
+        print(format_workflow_restore_text(result), end="")
+    return workflow_restore_exit_code(result)
+
+
+def run_workflow_fork(args: argparse.Namespace) -> int:
+    result = fork_workflow(Path(args.project or "."), str(args.workflow_id), str(args.name))
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+    else:
+        print(format_workflow_fork_text(result), end="")
+    return workflow_fork_exit_code(result)
+
+
+def add_stub(
+    subparsers: argparse._SubParsersAction[argparse.ArgumentParser],
+    name: str,
+    help_text: str,
+    *,
+    command_path: Sequence[str] | None = None,
+    description: str | None = None,
+) -> argparse.ArgumentParser:
+    parser = subparsers.add_parser(
+        name,
+        help=help_text,
+        description=description or help_text,
+    )
+    parser.set_defaults(
+        handler=not_implemented,
+        command_path=list(command_path or (name,)),
+    )
+    return parser
+
+
+def add_skill_commands(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    parser = subparsers.add_parser(
+        "skill",
+        help="Skill package doctor, install, update, and pack commands.",
+        description="Skill package commands.",
+    )
+    parser.set_defaults(handler=show_help, help_parser=parser)
+    skill_subparsers = parser.add_subparsers(
+        dest="skill_command",
+        metavar="<skill-command>",
+        title="skill commands",
+    )
+
+    doctor = skill_subparsers.add_parser(
+        "doctor",
+        help="Check the installed LoopPlane skill package.",
+        description="Check required LoopPlane portable package files, directories, scripts, and metadata.",
+    )
+    doctor.add_argument(
+        "--package-root",
+        metavar="<path>",
+        help="Package root to inspect. Defaults to the current LoopPlane package.",
+    )
+    doctor.add_argument("--json", action="store_true", help="Emit a machine-readable doctor report.")
+    doctor.add_argument("--verbose-json", action="store_true", help="With --json, include full diagnostic lists instead of compact count/sample summaries.")
+    doctor.set_defaults(handler=run_skill_doctor, command_path=("skill", "doctor"))
+
+    install = skill_subparsers.add_parser(
+        "install",
+        help="Install LoopPlane into a target project.",
+        description="Materialize a project-local LoopPlane workflow instance without overwriting existing files.",
+    )
+    install.add_argument("--target", metavar="<project>", help="Project path to install into.")
+    install.add_argument(
+        "--agent-style",
+        choices=("codex", "claude", "claude_code"),
+        action="append",
+        help="Install only the selected project-local agent skill projection. May be repeated.",
+    )
+    install.add_argument(
+        "--all-agent-skills",
+        action="store_true",
+        help="Install all supported project-local agent skill projections. This is the default.",
+    )
+    install.add_argument(
+        "--no-agent-skill-projection",
+        action="store_true",
+        help="Skip project-local .codex/.claude skill projections during install.",
+    )
+    install.add_argument("--json", action="store_true", help="Emit a machine-readable install report.")
+    install.add_argument("--verbose-json", action="store_true", help="With --json, include full file lists instead of compact count/sample summaries.")
+    install.set_defaults(handler=run_skill_install, command_path=("skill", "install"))
+    update = skill_subparsers.add_parser(
+        "update",
+        help="Update LoopPlane-managed metadata in a target project.",
+        description=(
+            "Refresh project-local LoopPlane package metadata and missing v1.6 flat-layout "
+            "metadata without overwriting workflow state or project artifacts."
+        ),
+    )
+    update.add_argument("--target", metavar="<project>", help="Project path to update.")
+    update.add_argument("--json", action="store_true", help="Emit a machine-readable update report.")
+    update.set_defaults(handler=run_skill_update, command_path=("skill", "update"))
+    pack = skill_subparsers.add_parser(
+        "pack",
+        help="Package the LoopPlane skill bundle.",
+        description="Validate the portable package and create a deterministic ZIP bundle.",
+    )
+    pack.add_argument(
+        "--package-root",
+        metavar="<path>",
+        help="Package root to bundle. Defaults to the current LoopPlane package.",
+    )
+    pack.add_argument(
+        "--output",
+        metavar="<path>",
+        help="Artifact path or existing output directory. Defaults to dist/<package>-<version>.zip.",
+    )
+    pack.add_argument("--json", action="store_true", help="Emit a machine-readable pack report.")
+    pack.set_defaults(handler=run_skill_pack, command_path=("skill", "pack"))
+
+
+def add_agent_runner_commands(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    configure = subparsers.add_parser(
+        "configure-agent",
+        help="Configure or inspect agent runners.",
+        description="Configure or inspect project-local agent runner configuration.",
+    )
+    configure.add_argument("--project", metavar="<path>", help="Project path. Defaults to the current directory.")
+    configure.add_argument("--runner", help="Specific runner id to inspect or configure.")
+    configure.add_argument("--role", help="Runner role, such as planner, auditor, worker, validator, summary, or inspector.")
+    configure.add_argument("--adapter", help="Adapter identifier, such as shell, codex_cli, or claude_code_cli.")
+    configure.add_argument("--command", help="Underlying executable command for the runner.")
+    configure.add_argument("--arg", dest="runner_arg", action="append", help="Append one runner argument. May be repeated.")
+    configure.add_argument("--cwd", help="Runner working directory. Supports {{project_root}}.")
+    configure.add_argument("--prompt-delivery-mode", help="Prompt delivery mode, such as stdin, file_argument, or stdin_or_prompt_flag.")
+    configure.add_argument("--prompt-argument-template", help="Argument template for file_argument prompt delivery.")
+    configure.add_argument("--prompt-flag", help="Prompt flag for stdin_or_prompt_flag delivery.")
+    configure.add_argument("--prompt-file", help="Prompt file template for prompt delivery modes that need one.")
+    configure.add_argument("--timeout-seconds", type=int, help="Runner timeout in seconds.")
+    configure.add_argument("--env", action="append", help="Set one runner environment variable using KEY=VALUE. May be repeated.")
+    configure.add_argument("--model", help="Model name to pass to compatible agent CLI adapters.")
+    configure.add_argument(
+        "--reasoning-effort",
+        choices=("low", "medium", "high", "xhigh"),
+        help="Reasoning/effort level to pass to compatible agent CLI adapters.",
+    )
+    configure.add_argument(
+        "--codex-sandbox",
+        choices=("read-only", "workspace-write", "danger-full-access"),
+        help="Override the default Codex CLI sandbox for a codex_cli runner.",
+    )
+    configure.add_argument(
+        "--doctor-check-command",
+        help="Explicit command used by doctor-agent for runner readiness; mutually exclusive with --no-version-check.",
+    )
+    configure.add_argument(
+        "--no-version-check",
+        action="store_true",
+        help="Do not configure a runner version command; mutually exclusive with --doctor-check-command.",
+    )
+    configure.add_argument("--prune", action="store_true", help="Remove stale LOOPPLANE_HOME runner overrides for deleted projects.")
+    _add_nested_workspace_options(configure)
+    configure.add_argument("--json", action="store_true", help="Emit a machine-readable configuration report.")
+    configure.set_defaults(handler=run_configure_agent, command_path=("configure-agent",))
+
+    doctor = subparsers.add_parser(
+        "doctor-agent",
+        help="Inspect agent runner availability.",
+        description="Inspect one or more configured agent runners.",
+    )
+    doctor.add_argument("--project", metavar="<path>", help="Project path. Defaults to the current directory.")
+    doctor_selection = doctor.add_mutually_exclusive_group()
+    doctor_selection.add_argument("--runner", help="Specific runner id to inspect.")
+    doctor_selection.add_argument("--all", action="store_true", help="Inspect all configured runners.")
+    doctor_selection.add_argument("--required", action="store_true", help="Inspect enabled runners required for normal workflow execution.")
+    _add_nested_workspace_options(doctor)
+    doctor.add_argument("--json", action="store_true", help="Emit a machine-readable doctor report.")
+    doctor.set_defaults(handler=run_doctor_agent, command_path=("doctor-agent",))
+
+
+def add_planning_commands(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    init = add_stub(subparsers, "init", "Create a project-local LoopPlane workflow instance.")
+    init.add_argument("--project", metavar="<path>", help="Project path to initialize.")
+    init.add_argument("--brief", metavar="<text>", help="Initial project brief text.")
+    _add_nested_workspace_options(init)
+    init.add_argument("--json", action="store_true", help="Emit a machine-readable init report.")
+    init.set_defaults(handler=run_init, command_path=("init",))
+
+    write_brief = subparsers.add_parser(
+        "write-brief",
+        help="Create or update the project brief.",
+        description=(
+            "Create or update the configured PROJECT_BRIEF.md. Existing different "
+            "content is refused unless --force is supplied."
+        ),
+    )
+    write_brief.add_argument("--project", metavar="<path>", help="Project path. Defaults to the current directory.")
+    write_brief.add_argument("--text", metavar="<text>", help="Brief text to write.")
+    write_brief.add_argument("--file", metavar="<path>", help="Read brief content from a UTF-8 text file.")
+    write_brief.add_argument("--brief-file", dest="brief_file", metavar="<path>", help="Alias for --file.")
+    write_brief.add_argument("--stdin", action="store_true", help="Read brief content from standard input.")
+    write_brief.add_argument("--force", action="store_true", help="Replace an existing different brief file.")
+    _add_nested_workspace_options(write_brief)
+    write_brief.add_argument("--json", action="store_true", help="Emit a machine-readable write report.")
+    write_brief.add_argument("--verbose-json", action="store_true", help="With --json, include full checkpoint file lists instead of compact count/sample summaries.")
+    write_brief.set_defaults(handler=run_write_brief, command_path=("write-brief",))
+    plan = subparsers.add_parser(
+        "plan",
+        help="Run planner workflow and produce a plan draft.",
+        description="Run the configured planner agent and produce PLAN_DRAFT.md.",
+    )
+    plan.add_argument("--project", metavar="<path>", help="Project path. Defaults to the current directory.")
+    plan.add_argument("--runner", help="Planner runner id override.")
+    plan.add_argument(
+        "--progress-interval",
+        type=float,
+        default=30.0,
+        metavar="<seconds>",
+        help="Emit planner heartbeat summaries to stderr while waiting. Use 0 to disable.",
+    )
+    _add_nested_workspace_options(plan)
+    plan.add_argument("--json", action="store_true", help="Emit a machine-readable planner result.")
+    plan.set_defaults(handler=run_plan, command_path=("plan",))
+    audit = subparsers.add_parser(
+        "audit-plan",
+        help="Run optional plan audit workflow.",
+        description="Run the configured auditor agent over PLAN_DRAFT.md.",
+    )
+    audit.add_argument("--project", metavar="<path>", help="Project path. Defaults to the current directory.")
+    audit.add_argument("--runner", help="Auditor runner id override.")
+    audit.add_argument(
+        "--progress-interval",
+        type=float,
+        default=30.0,
+        metavar="<seconds>",
+        help="Emit auditor heartbeat summaries to stderr while waiting. Use 0 to disable.",
+    )
+    _add_nested_workspace_options(audit)
+    audit.add_argument("--json", action="store_true", help="Emit a machine-readable auditor result.")
+    audit.set_defaults(handler=run_audit_plan, command_path=("audit-plan",))
+    revise = subparsers.add_parser(
+        "revise-plan",
+        help="Run bounded plan revision until readiness and required audit pass.",
+        description="Run the planner/auditor plan revision loop with persisted planning state.",
+    )
+    revise.add_argument("--project", metavar="<path>", help="Project path. Defaults to the current directory.")
+    revise.add_argument("--planner-runner", help="Planner runner id override.")
+    revise.add_argument("--auditor-runner", help="Auditor runner id override.")
+    revise.add_argument("--max-iterations", type=int, help="Override planning.max_planner_iterations for this run.")
+    revise.add_argument(
+        "--progress-interval",
+        type=float,
+        default=30.0,
+        metavar="<seconds>",
+        help="Emit planner/auditor heartbeat summaries to stderr while waiting. Use 0 to disable.",
+    )
+    _add_nested_workspace_options(revise)
+    revise.add_argument("--json", action="store_true", help="Emit a machine-readable revision loop result.")
+    revise.set_defaults(handler=run_revise_plan, command_path=("revise-plan",))
+
+    acknowledge = subparsers.add_parser(
+        "acknowledge-plan",
+        help="Acknowledge an intentional active PLAN.md edit.",
+        description=(
+            "Re-parse active PLAN.md, refresh its accepted hash, clear manual-plan-change blocking state, "
+            "and synchronize active workflow projections after an intentional plan edit."
+        ),
+    )
+    acknowledge.add_argument("--project", metavar="<path>", help="Project path. Defaults to the current directory.")
+    _add_nested_workspace_options(acknowledge)
+    acknowledge.add_argument("--json", action="store_true", help="Emit a machine-readable acknowledgement report.")
+    acknowledge.set_defaults(handler=run_acknowledge_plan, command_path=("acknowledge-plan",))
+
+    activate = subparsers.add_parser(
+        "activate-plan",
+        help="Activate a readiness-checked plan draft.",
+        description="Promote PLAN_DRAFT.md to active PLAN.md after readiness and required audit checks pass.",
+    )
+    activate.add_argument("--project", metavar="<path>", help="Project path. Defaults to the current directory.")
+    _add_nested_workspace_options(activate)
+    activate.add_argument("--json", action="store_true", help="Emit a machine-readable activation result.")
+    activate.add_argument("--verbose-json", action="store_true", help="With --json, include full checkpoint file lists instead of compact count/sample summaries.")
+    activate.add_argument("--file", metavar="<path>", help="Import this plan file as PLAN_DRAFT.md before activation checks.")
+    activate.set_defaults(handler=run_activate_plan, command_path=("activate-plan",))
+
+
+def add_execution_commands(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    start = subparsers.add_parser(
+        "start",
+        help="Request workflow execution start.",
+        description="Append a durable start control request for the scheduler to apply.",
+    )
+    start.add_argument("--project", metavar="<path>", help="Project path. Defaults to the current directory.")
+    start.add_argument("--detach", action="store_true", help="Run the scheduler in the background.")
+    _add_nested_workspace_options(start)
+    start.add_argument("--json", action="store_true", help="Emit a machine-readable control request report.")
+    start.set_defaults(handler=run_start, command_path=("start",), control_type="start")
+
+    run = subparsers.add_parser(
+        "run",
+        help="Run the scheduler loop.",
+        description="Run the durable scheduler loop for the project.",
+    )
+    run.add_argument("--project", metavar="<path>", help="Project path. Defaults to the current directory.")
+    run.add_argument("--dry-run", action="store_true", help="Preview work without executing agents.")
+    run.add_argument("--max-ticks", type=int, default=1, help="Maximum scheduler ticks for this invocation.")
+    run.add_argument(
+        "--until-complete",
+        action="store_true",
+        help="Keep ticking until the workflow completes, waits, fails, or reaches a large safety cap.",
+    )
+    run.add_argument(
+        "--progress-interval",
+        type=float,
+        default=30.0,
+        metavar="<seconds>",
+        help="Emit active-run heartbeat summaries to stderr while waiting. Use 0 to disable.",
+    )
+    run.add_argument(
+        "--summary",
+        action="store_true",
+        help="Emit a compact scheduler summary instead of the default detailed text; with --json, emit compact JSON.",
+    )
+    _add_nested_workspace_options(run)
+    run.add_argument("--json", action="store_true", help="Emit a machine-readable scheduler result.")
+    run.set_defaults(handler=run_scheduler_command, command_path=("run",))
+
+    preview = subparsers.add_parser(
+        "preview",
+        help="Preview scheduler decisions.",
+        description="Preview the next scheduler action without mutating authoritative workflow state.",
+    )
+    preview.add_argument("--project", metavar="<path>", help="Project path. Defaults to the current directory.")
+    _add_nested_workspace_options(preview)
+    preview.add_argument("--json", action="store_true", help="Emit machine-readable preview output.")
+    preview.add_argument(
+        "--write",
+        action="store_true",
+        help="Write non-authoritative preview_result.json under the resolved runtime directory.",
+    )
+    preview.set_defaults(handler=run_preview, command_path=("preview",))
+
+    tick = subparsers.add_parser(
+        "tick",
+        help="Run a single scheduler tick.",
+        description="Run exactly one durable scheduler tick.",
+    )
+    tick.add_argument("--project", metavar="<path>", help="Project path. Defaults to the current directory.")
+    _add_nested_workspace_options(tick)
+    tick.add_argument(
+        "--progress-interval",
+        type=float,
+        default=30.0,
+        metavar="<seconds>",
+        help="Emit active-run heartbeat summaries to stderr while waiting. Use 0 to disable.",
+    )
+    tick.add_argument(
+        "--summary",
+        action="store_true",
+        help="Emit a compact scheduler summary instead of the default detailed text; with --json, emit compact JSON.",
+    )
+    tick.add_argument("--json", action="store_true", help="Emit a machine-readable scheduler result.")
+    tick.set_defaults(handler=run_scheduler_command, command_path=("tick",), dry_run=False, max_ticks=1)
+    pause = subparsers.add_parser(
+        "pause",
+        help="Request workflow execution pause.",
+        description="Append a durable pause control request for the scheduler to apply at a safe point.",
+    )
+    pause.add_argument("--project", metavar="<path>", help="Project path. Defaults to the current directory.")
+    _add_nested_workspace_options(pause)
+    pause.add_argument("--json", action="store_true", help="Emit a machine-readable control request report.")
+    pause.set_defaults(handler=run_control_request, command_path=("pause",), control_type="pause")
+
+    resume = subparsers.add_parser(
+        "resume",
+        help="Request workflow execution resume.",
+        description="Append a durable resume control request for the scheduler to apply.",
+    )
+    resume.add_argument("--project", metavar="<path>", help="Project path. Defaults to the current directory.")
+    _add_nested_workspace_options(resume)
+    resume.add_argument("--json", action="store_true", help="Emit a machine-readable control request report.")
+    resume.set_defaults(handler=run_resume, command_path=("resume",), control_type="resume")
+
+    stop = subparsers.add_parser(
+        "stop",
+        help="Request workflow execution stop.",
+        description="Append a durable stop control request for the scheduler to apply at a safe point.",
+    )
+    stop.add_argument("--project", metavar="<path>", help="Project path. Defaults to the current directory.")
+    _add_nested_workspace_options(stop)
+    stop.add_argument("--json", action="store_true", help="Emit a machine-readable control request report.")
+    stop.set_defaults(handler=run_control_request, command_path=("stop",), control_type="stop")
+
+    attach = subparsers.add_parser(
+        "attach",
+        help="Attach to a detached runtime.",
+        description="Show a bounded tail of the active detached scheduler runtime when a supervisor is running.",
+    )
+    attach.add_argument("--project", metavar="<path>", help="Project path. Defaults to the current directory.")
+    attach.add_argument("--lines", type=int, default=50, help="Maximum recent records/log lines to show. Defaults to 50.")
+    attach.add_argument("--follow", action="store_true", help="Poll briefly before returning instead of taking one snapshot.")
+    attach.add_argument(
+        "--timeout",
+        type=float,
+        default=0.0,
+        help="Maximum seconds to poll with --follow. Defaults to 0.",
+    )
+    attach.add_argument(
+        "--poll-interval",
+        type=float,
+        default=0.2,
+        help="Polling interval in seconds for --follow. Defaults to 0.2.",
+    )
+    attach.add_argument(
+        "--request",
+        action="store_true",
+        help="Append a durable attach control request instead of attaching to the current supervisor.",
+    )
+    _add_nested_workspace_options(attach)
+    attach.add_argument("--json", action="store_true", help="Emit a machine-readable attach report.")
+    attach.set_defaults(handler=run_attach, command_path=("attach",), control_type="attach")
+
+    status = subparsers.add_parser(
+        "status",
+        help="Show workflow status.",
+        description="Show runtime state, scheduler control state, and durable control request status.",
+    )
+    status.add_argument("--project", metavar="<path>", help="Project path. Defaults to the current directory.")
+    _add_nested_workspace_options(status)
+    status.add_argument("--json", action="store_true", help="Emit machine-readable workflow status.")
+    status.set_defaults(handler=run_status, command_path=("status",))
+
+    health = subparsers.add_parser(
+        "health",
+        help="Run runtime health checks.",
+        description="Inspect authoritative runtime files and report LoopPlane runtime health.",
+    )
+    health.add_argument("--project", metavar="<path>", help="Project path. Defaults to the current directory.")
+    _add_nested_workspace_options(health)
+    health.add_argument("--json", action="store_true", help="Emit machine-readable health output.")
+    health.add_argument("--workflow", metavar="<workflow_id>", help="Check a registered workflow without changing current_workflow.json.")
+    health.add_argument("--all", action="store_true", help="Check every workflow in the current workspace.")
+    health.add_argument("--strict", action="store_true", help="Return non-zero for advisory health warnings.")
+    health.add_argument("--write", action="store_true", help="Write health_report.json under the resolved runtime directory.")
+    health.set_defaults(handler=run_health, command_path=("health",))
+
+    validate = subparsers.add_parser(
+        "validate",
+        help="Run authoritative validation for a worker evidence run.",
+        description="Run the deterministic validator and write authoritative validation.json.",
+    )
+    validate.add_argument("--project", metavar="<path>", help="Project path. Defaults to the current directory.")
+    validate.add_argument("--task", required=True, help="Primary task id to validate.")
+    validate.add_argument("--run-dir", required=True, metavar="<path>", help="Worker evidence run directory.")
+    validate.add_argument("--json", action="store_true", help="Emit machine-readable validation output.")
+    validate.add_argument("--no-write", action="store_true", help="Do not write validation.json or validator.log.")
+    _add_nested_workspace_options(validate)
+    validate.set_defaults(handler=run_validate, command_path=("validate",))
+
+    reconcile = subparsers.add_parser(
+        "reconcile",
+        help="Apply authoritative validation to plan and runtime state.",
+        description="Run the reconciler over an authoritative validation.json and update plan, latest pointers, failures, approvals, events, and read-model rebuild triggers.",
+    )
+    reconcile.add_argument("--project", metavar="<path>", help="Project path. Defaults to the current directory.")
+    reconcile.add_argument("--task", help="Primary task id expected in validation.json.")
+    reconcile.add_argument("--run-dir", metavar="<path>", help="Worker evidence run directory containing validation.json.")
+    reconcile.add_argument("--validation", metavar="<path>", help="Explicit validation.json path.")
+    reconcile.add_argument("--json", action="store_true", help="Emit machine-readable reconciliation output.")
+    reconcile.add_argument("--no-write", action="store_true", help="Validate reconciliation inputs without mutating authoritative files.")
+    _add_nested_workspace_options(reconcile)
+    reconcile.set_defaults(handler=run_reconcile, command_path=("reconcile",))
+
+    summarize = subparsers.add_parser(
+        "summarize",
+        help="Generate human-readable task and phase summaries.",
+        description=(
+            "Generate concise human-readable task summaries for terminal tasks and phase summaries "
+            "for phases whose tasks are all terminal. Reconciliation runs this automatically after "
+            "accepted validations; this command backfills or refreshes summary artifacts."
+        ),
+    )
+    summarize.add_argument("--project", metavar="<path>", help="Project path. Defaults to the current directory.")
+    summarize.add_argument(
+        "--task",
+        action="append",
+        metavar="<task-id>",
+        help="Task id to summarize. Repeat to summarize multiple tasks. Defaults to all terminal tasks.",
+    )
+    summarize.add_argument("--force", action="store_true", help="Regenerate summaries even when source hashes are current.")
+    summarize.add_argument("--no-write", action="store_true", help="Preview summary generation without writing artifacts.")
+    summarize.add_argument("--json", action="store_true", help="Emit machine-readable summary generation output.")
+    _add_nested_workspace_options(summarize)
+    summarize.set_defaults(handler=run_summarize, command_path=("summarize",))
+
+    logs = subparsers.add_parser(
+        "logs",
+        help="Show workflow logs.",
+        description="Show recent runtime events and control request/response records.",
+    )
+    logs.add_argument("--project", metavar="<path>", help="Project path. Defaults to the current directory.")
+    logs.add_argument("--lines", type=int, default=50, help="Maximum recent records to show. Defaults to 50.")
+    _add_nested_workspace_options(logs)
+    logs.add_argument("--json", action="store_true", help="Emit machine-readable logs.")
+    logs.set_defaults(handler=run_logs, command_path=("logs",))
+
+    rebuild = subparsers.add_parser(
+        "rebuild-read-models",
+        help="Rebuild derived runtime read models.",
+        description="Rebuild dashboard read models from PLAN.md, latest pointers, validations, event snapshots, event logs, and sanitized version-control status.",
+    )
+    rebuild.add_argument("--project", metavar="<path>", help="Project path. Defaults to the current directory.")
+    _add_nested_workspace_options(rebuild)
+    rebuild.add_argument("--workflow", metavar="<workflow_id>", help="Rebuild read models for a registered workflow without changing current_workflow.json.")
+    rebuild.add_argument(
+        "--max-dashboard-events",
+        type=int,
+        metavar="<count>",
+        help="Maximum recent events included in dashboard graph/feed read models. Defaults to dashboard config or 200.",
+    )
+    rebuild.add_argument("--json", action="store_true", help="Emit a machine-readable rebuild report.")
+    rebuild.add_argument("--no-write", action="store_true", help="Validate generated read models without writing them.")
+    rebuild.set_defaults(handler=run_rebuild_read_models, command_path=("rebuild-read-models",))
+
+    final_verify = subparsers.add_parser(
+        "final-verify",
+        help="Run deterministic final verification.",
+        description="Run deterministic global completion checks and write the final report plus completion marker only on pass.",
+    )
+    final_verify.add_argument("--project", metavar="<path>", help="Project path. Defaults to the current directory.")
+    _add_nested_workspace_options(final_verify)
+    final_verify.add_argument("--json", action="store_true", help="Emit a machine-readable final verification report.")
+    final_verify.add_argument("--no-write", action="store_true", help="Run checks without writing report, marker, events, or checkpoints.")
+    final_verify.add_argument("--force", action="store_true", help="Write a new final verification report, marker, and checkpoints even when the existing completion marker is fresh.")
+    final_verify.set_defaults(handler=run_final_verify, command_path=("final-verify",))
+
+    verify_objectives = subparsers.add_parser(
+        "verify-objectives",
+        help="Run agentic objective verification.",
+        description="Run the objective verifier for a pending phase or workflow objective gate.",
+    )
+    verify_objectives.add_argument("--project", metavar="<path>", help="Project path. Defaults to the current directory.")
+    _add_nested_workspace_options(verify_objectives)
+    verify_objectives.add_argument("--scope", choices=("auto", "phase", "workflow"), default="auto", help="Objective gate scope to verify.")
+    verify_objectives.add_argument("--phase-id", metavar="<phase-id>", help="Specific phase objective id, for example P0.")
+    verify_objectives.add_argument("--force", action="store_true", help="Run even if the selected objective gate is already closed or waiting for expansion.")
+    verify_objectives.add_argument("--json", action="store_true", help="Emit a machine-readable objective verification result.")
+    verify_objectives.set_defaults(handler=run_verify_objectives, command_path=("verify-objectives",))
+
+    migrate = subparsers.add_parser(
+        "migrate",
+        help="Run explicit schema migrations.",
+        description="Run explicit project-local schema migrations with backups and migration records.",
+    )
+    migrate.add_argument("--project", metavar="<path>", help="Project path. Defaults to the current directory.")
+    migrate.add_argument("--dry-run", action="store_true", help="Report the planned migration without modifying files.")
+    _add_nested_workspace_options(migrate)
+    migrate.add_argument("--json", action="store_true", help="Emit a machine-readable migration report.")
+    migrate.set_defaults(handler=run_migrate, command_path=("migrate",))
+
+
+def add_background_commands(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    background = subparsers.add_parser(
+        "background",
+        help="Start and inspect LoopPlane-managed background jobs.",
+        description=(
+            "Run long-lived commands under LoopPlane supervision. Background jobs are recorded in "
+            "the workflow runtime registry so the scheduler can wait instead of advancing unsafely."
+        ),
+    )
+    background.set_defaults(handler=show_help, help_parser=background, command_path=("background",))
+    background_subparsers = background.add_subparsers(
+        dest="background_command",
+        metavar="<background-command>",
+        title="background commands",
+    )
+
+    start = background_subparsers.add_parser(
+        "start",
+        help="Start a command under LoopPlane background supervision.",
+        description=(
+            "Start a long-running command with a LoopPlane supervisor process. Use '--' before "
+            "the command. The JSON result includes an agent_status_fragment for workers that "
+            "need to report running_background."
+        ),
+    )
+    start.add_argument("--project", metavar="<path>", help="Project path. Defaults to the current directory.")
+    start.add_argument("--workflow", metavar="<workflow_id>", help="Target a registered workflow without changing current_workflow.json.")
+    start.add_argument("--job-id", metavar="<job_id>", help="Explicit background job id. Defaults to a generated id.")
+    start.add_argument("--label", help="Short human label for the background job.")
+    start.add_argument("--task", help="Task id that owns this background job. Defaults to LOOPPLANE_TASK_ID when present.")
+    start.add_argument("--run", help="Run id that owns this background job. Defaults to LOOPPLANE_RUN_ID when present.")
+    start.add_argument("--cwd", metavar="<path>", help="Working directory for the command. Defaults to the project root.")
+    start.add_argument("--env", action="append", help="Set one command environment variable using KEY=VALUE. May be repeated.")
+    start.add_argument("--timeout-seconds", type=int, help="Mark the job timed_out if it runs longer than this many seconds.")
+    start.add_argument(
+        "--watchdog-interval-seconds",
+        type=int,
+        help="Periodically run an inspector agent while the job is active. Disabled unless set.",
+    )
+    start.add_argument("--watchdog-runner", help="Inspector runner id for background watchdog checks. Defaults to inspector when watchdog is enabled.")
+    start.add_argument(
+        "--watchdog-question",
+        help="Optional custom question/invariant for each background watchdog inspection.",
+    )
+    start.add_argument(
+        "--wake-next-agent-when",
+        help="Human-readable wake condition recorded for scheduler/dashboard inspection.",
+    )
+    start.add_argument("--shell", action="store_true", help="Run the command through the platform shell.")
+    _add_nested_workspace_options(start)
+    start.add_argument("--json", action="store_true", help="Emit a machine-readable start result.")
+    start.add_argument("command", nargs=argparse.REMAINDER, help="Command to run after '--'.")
+    start.set_defaults(handler=run_background_start, command_path=("background", "start"))
+
+    status = background_subparsers.add_parser(
+        "status",
+        help="List LoopPlane-managed background jobs.",
+        description="Inspect background_jobs.json and refresh simple process/exit-code derived statuses.",
+    )
+    status.add_argument("--project", metavar="<path>", help="Project path. Defaults to the current directory.")
+    status.add_argument("--workflow", metavar="<workflow_id>", help="Target a registered workflow without changing current_workflow.json.")
+    status.add_argument("--job", metavar="<job_id>", help="Show only one background job.")
+    status.add_argument("--no-refresh", action="store_true", help="Read the registry without deriving fresh status fields.")
+    _add_nested_workspace_options(status)
+    status.add_argument("--json", action="store_true", help="Emit a machine-readable status result.")
+    status.set_defaults(handler=run_background_status, command_path=("background", "status"))
+
+    complete = background_subparsers.add_parser(
+        "complete",
+        help="Manually resolve a background job.",
+        description="Mark a background job completed or in another terminal/recovery status.",
+    )
+    complete.add_argument("job_id", metavar="<job_id>", help="Background job id to update.")
+    complete.add_argument("--project", metavar="<path>", help="Project path. Defaults to the current directory.")
+    complete.add_argument("--workflow", metavar="<workflow_id>", help="Target a registered workflow without changing current_workflow.json.")
+    complete.add_argument(
+        "--status",
+        choices=("completed", "failed", "timed_out", "cancelled", "needs_recovery"),
+        default="completed",
+        help="Status to record. Defaults to completed.",
+    )
+    complete.add_argument("--reason", help="Optional manual resolution reason.")
+    _add_nested_workspace_options(complete)
+    complete.add_argument("--json", action="store_true", help="Emit a machine-readable completion result.")
+    complete.set_defaults(handler=run_background_complete, command_path=("background", "complete"))
+
+    cancel = background_subparsers.add_parser(
+        "cancel",
+        help="Cancel a LoopPlane-managed background job.",
+        description="Terminate the recorded process group when possible and mark the job cancelled.",
+    )
+    cancel.add_argument("job_id", metavar="<job_id>", help="Background job id to cancel.")
+    cancel.add_argument("--project", metavar="<path>", help="Project path. Defaults to the current directory.")
+    cancel.add_argument("--workflow", metavar="<workflow_id>", help="Target a registered workflow without changing current_workflow.json.")
+    cancel.add_argument("--reason", help="Optional cancellation reason.")
+    _add_nested_workspace_options(cancel)
+    cancel.add_argument("--json", action="store_true", help="Emit a machine-readable cancellation result.")
+    cancel.set_defaults(handler=run_background_cancel, command_path=("background", "cancel"))
+
+
+def add_migration_commands(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    export = subparsers.add_parser(
+        "export",
+        help="Export a LoopPlane project through a migration profile.",
+        description=(
+            "Create a migration archive from project-local files inside the workspace boundary. "
+            "The source profile preserves portable source/evidence metadata; the stateful and "
+            "archive profiles also preserve workflow events, snapshots, failure registry, "
+            "historical results, and final reports. Archive exports declare read-only viewing "
+            "intent for later imports. Export excludes stale process state, dashboard tokens, locks, "
+            "leases, machine-local runner overrides, derived read models, and sibling workspaces."
+        ),
+    )
+    export.add_argument("--project", metavar="<path>", help="Project path. Defaults to the current directory.")
+    export.add_argument(
+        "--profile",
+        required=True,
+        choices=("source", "stateful", "archive"),
+        help="Migration profile to export.",
+    )
+    export.add_argument("--output", required=True, metavar="<archive>", help="Archive path to create.")
+    _add_nested_workspace_options(export)
+    export.add_argument("--json", action="store_true", help="Emit a machine-readable export report.")
+    export.add_argument("--verbose-json", action="store_true", help="With --json, include full manifest file lists instead of compact count/sample summaries.")
+    export.set_defaults(handler=run_export, command_path=("export",))
+
+    import_cmd = subparsers.add_parser(
+        "import",
+        help="Import a LoopPlane migration archive into a new target project.",
+        description=(
+            "Restore project-local workflow truth and evidence from a stateful migration archive, or import an "
+            "archive-profile migration with --read-only for dashboard-only viewing. The target project must be "
+            "absent or empty. Import validates the archive manifest, member hashes, path boundaries, and schemas "
+            "before installing files. It refuses stale process state, machine-local overrides, derived read models, "
+            "unsafe members, and archive-profile imports that omit --read-only."
+        ),
+    )
+    import_cmd.add_argument("archive", metavar="<archive>", help="Migration archive to import.")
+    import_cmd.add_argument("--target", required=True, metavar="<project>", help="New project path to restore into.")
+    import_cmd.add_argument(
+        "--read-only",
+        action="store_true",
+        help="Import an archive-profile migration as read_only_imported dashboard-only workflow history.",
+    )
+    _add_nested_workspace_options(import_cmd)
+    import_cmd.add_argument("--json", action="store_true", help="Emit a machine-readable import report.")
+    import_cmd.set_defaults(handler=run_import, command_path=("import",))
+
+
+def add_dashboard_and_inspection_commands(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    dashboard = subparsers.add_parser(
+        "dashboard",
+        help="Generate, serve, or inspect workflow dashboards.",
+        description=(
+            "Generate a read-only static dashboard bundle, start a local dashboard server, "
+            "or list workspace-scoped dashboard server records."
+        ),
+    )
+    dashboard.add_argument(
+        "dashboard_action",
+        nargs="?",
+        choices=("list", "cleanup", "stop"),
+        help=(
+            "Use 'list' to inspect dashboard server records, 'cleanup' to remove stale records, "
+            "or 'stop' to terminate registered project dashboard servers."
+        ),
+    )
+    dashboard.add_argument("--project", metavar="<path>", help="Project path. Defaults to the current directory.")
+    dashboard.add_argument(
+        "--output",
+        metavar="<path>",
+        help="Output directory. Relative paths are resolved under the project root. Defaults to .loopplane/dashboard_static.",
+    )
+    dashboard.add_argument("--port", metavar="<port>", help="Start a local dashboard server on this port, or use 'auto'.")
+    dashboard.add_argument(
+        "--workflow",
+        metavar="<workflow_id>",
+        help=(
+            "Select a workflow from .loopplane/workflow_registry.json for dashboard visualization "
+            "without updating .loopplane/current_workflow.json."
+        ),
+    )
+    dashboard.add_argument("--host", metavar="<host>", help="Dashboard bind host. Defaults to security/dashboard config host.")
+    dashboard.add_argument("--rebuild-read-models", action="store_true", help="Rebuild derived read models before rendering.")
+    dashboard.add_argument(
+        "--max-dashboard-events",
+        type=int,
+        metavar="<count>",
+        help="Maximum recent events included in dashboard graph/feed read models. Defaults to dashboard config or 200.",
+    )
+    dashboard.add_argument(
+        "--terminate-orphans",
+        action="store_true",
+        help="With 'cleanup' or 'stop', SIGTERM unregistered dashboard processes whose command line targets this project.",
+    )
+    _add_nested_workspace_options(dashboard)
+    dashboard.add_argument("--json", action="store_true", help="Emit a machine-readable dashboard render report.")
+    dashboard.set_defaults(handler=run_dashboard, command_path=("dashboard",), command_aliases=(("dashboard", "list"),))
+
+    ask = subparsers.add_parser(
+        "ask",
+        help="Ask an inspection question about the workflow.",
+        description="Ask a read-only workflow inspection question and write chat request/response records.",
+    )
+    ask.add_argument("question", nargs="?", help="Question to answer from workflow state.")
+    ask.add_argument("--question", dest="question_option", help="Question to answer from workflow state. Alias for the positional argument.")
+    ask.add_argument("--project", metavar="<path>", help="Project path. Defaults to the current directory.")
+    ask.add_argument("--runner", default="inspector", help="Inspector runner id to record. Defaults to inspector.")
+    ask.add_argument(
+        "--allowed-path",
+        action="append",
+        help="Restrict read scope to a configured inspector allowlist path. May be repeated.",
+    )
+    _add_nested_workspace_options(ask)
+    ask.add_argument("--json", action="store_true", help="Emit a machine-readable inspection response.")
+    ask.set_defaults(handler=run_inspection, command_path=("ask",))
+
+    change_request = subparsers.add_parser(
+        "change-request",
+        help="Submit, review, inspect, or apply workflow change requests.",
+        description=(
+            "Append change requests and drive the planner response, approval, and reconciler patch flow. "
+            "The shorthand `loopplane change-request \"...\"` is equivalent to `loopplane change-request submit \"...\"`."
+        ),
+    )
+    change_request.set_defaults(handler=show_help, help_parser=change_request)
+    change_subparsers = change_request.add_subparsers(
+        dest="change_request_command",
+        metavar="<change-request-command>",
+        title="change request commands",
+    )
+
+    change_submit = change_subparsers.add_parser(
+        "submit",
+        help="Append a workflow change request.",
+        description="Append a pending change request without mutating PLAN.md.",
+    )
+    change_submit.add_argument("request", nargs="?", help="Change request text.")
+    change_submit.add_argument("--project", metavar="<path>", help="Project path. Defaults to the current directory.")
+    _add_nested_workspace_options(change_submit)
+    change_submit.add_argument("--json", action="store_true", help="Emit a machine-readable change request report.")
+    change_submit.set_defaults(handler=run_change_request_submit, command_path=("change-request", "submit"))
+
+    change_review = change_subparsers.add_parser(
+        "review",
+        help="Run change request planner review and write PLAN_PATCH.md.",
+        description="Review a pending change request, write planner response artifacts, and request approval when required.",
+    )
+    change_review.add_argument("change_request_id", nargs="?", help="Change request id. Defaults to the oldest pending request.")
+    change_review.add_argument("--project", metavar="<path>", help="Project path. Defaults to the current directory.")
+    change_review.add_argument("--runner", help="Change-request planner runner id override.")
+    change_review.add_argument("--audit", action="store_true", help="Write an optional plan patch audit report.")
+    _add_nested_workspace_options(change_review)
+    change_review.add_argument("--json", action="store_true", help="Emit a machine-readable change request report.")
+    change_review.set_defaults(handler=run_change_request_review, command_path=("change-request", "review"))
+
+    change_apply = change_subparsers.add_parser(
+        "apply",
+        help="Apply an approved change request PLAN_PATCH.md through reconciliation.",
+        description="Apply an approved plan patch through reconciler-controlled code with before and after Git checkpoints.",
+    )
+    change_apply.add_argument("change_request_id", nargs="?", help="Change request id to apply.")
+    change_apply.add_argument("--project", metavar="<path>", help="Project path. Defaults to the current directory.")
+    _add_nested_workspace_options(change_apply)
+    change_apply.add_argument("--json", action="store_true", help="Emit a machine-readable change request report.")
+    change_apply.set_defaults(handler=run_change_request_apply, command_path=("change-request", "apply"))
+
+    change_status = change_subparsers.add_parser(
+        "status",
+        help="List change request status.",
+        description="Show change request status derived from request, response, approval, and apply records.",
+    )
+    change_status.add_argument("change_request_id", nargs="?", help="Optional change request id to inspect.")
+    change_status.add_argument("--project", metavar="<path>", help="Project path. Defaults to the current directory.")
+    change_status.add_argument("--all", action="store_true", help="Include applied, rejected, and superseded requests.")
+    _add_nested_workspace_options(change_status)
+    change_status.add_argument("--json", action="store_true", help="Emit a machine-readable change request status report.")
+    change_status.set_defaults(handler=run_change_request_status, command_path=("change-request", "status"))
+
+    approvals = subparsers.add_parser(
+        "approvals",
+        help="List pending approvals.",
+        description="List approval requests and their current response status.",
+    )
+    approvals.add_argument("--project", metavar="<path>", help="Project path. Defaults to the current directory.")
+    approvals.add_argument("--all", action="store_true", help="Include closed approvals.")
+    _add_nested_workspace_options(approvals)
+    approvals.add_argument("--json", action="store_true", help="Emit machine-readable approval status.")
+    approvals.set_defaults(handler=run_approvals, command_path=("approvals",))
+
+    approve = subparsers.add_parser(
+        "approve",
+        help="Approve a pending approval request.",
+        description="Record an approved human approval response when interactive approval is enabled.",
+    )
+    approve.add_argument("approval_id", nargs="?", help="Approval id to approve.")
+    approve.add_argument("--project", metavar="<path>", help="Project path. Defaults to the current directory.")
+    approve.add_argument("--approved-by", default="user", help="Approver label to record. Defaults to user.")
+    approve.add_argument("--notes", default="", help="Optional approval notes.")
+    approve.add_argument(
+        "--override-disabled-policy",
+        action="store_true",
+        help="Explicitly record the response even when interactive approval is disabled.",
+    )
+    _add_nested_workspace_options(approve)
+    approve.add_argument("--json", action="store_true", help="Emit machine-readable approval response.")
+    approve.set_defaults(handler=run_approve, command_path=("approve",))
+
+    reject = subparsers.add_parser(
+        "reject",
+        help="Reject a pending approval request.",
+        description="Record a rejected, expired, or superseded human approval response when interactive approval is enabled.",
+    )
+    reject.add_argument("approval_id", nargs="?", help="Approval id to reject.")
+    reject.add_argument("--project", metavar="<path>", help="Project path. Defaults to the current directory.")
+    reject.add_argument(
+        "--decision",
+        choices=tuple(sorted(ALLOWED_APPROVAL_DECISIONS - {"approved"})),
+        default="rejected",
+        help="Decision to record. Defaults to rejected.",
+    )
+    reject.add_argument("--approved-by", default="user", help="Responder label to record. Defaults to user.")
+    reject.add_argument("--notes", default="", help="Optional rejection notes.")
+    reject.add_argument(
+        "--override-disabled-policy",
+        action="store_true",
+        help="Explicitly record the response even when interactive approval is disabled.",
+    )
+    _add_nested_workspace_options(reject)
+    reject.add_argument("--json", action="store_true", help="Emit machine-readable approval response.")
+    reject.set_defaults(handler=run_reject, command_path=("reject",))
+
+
+def add_self_expansion_commands(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    parser = subparsers.add_parser(
+        "self-expansion",
+        help="Inspect, validate, and apply self-expansion proposals.",
+        description="Inspect LoopPlane self-expansion policy/registry and validate or apply generated expansion proposals.",
+    )
+    parser.set_defaults(handler=show_help, help_parser=parser)
+    expansion_subparsers = parser.add_subparsers(
+        dest="self_expansion_command",
+        metavar="<self-expansion-command>",
+        title="self-expansion commands",
+    )
+
+    status = expansion_subparsers.add_parser(
+        "status",
+        help="Show self-expansion status.",
+        description="Show self-expansion policy, registry path, cycle count, and latest proposal.",
+    )
+    status.add_argument("--project", metavar="<path>", help="Project path. Defaults to the current directory.")
+    _add_nested_workspace_options(status)
+    status.add_argument("--json", action="store_true", help="Emit machine-readable self-expansion status.")
+    status.set_defaults(handler=run_self_expansion_status, command_path=("self-expansion", "status"))
+
+    validate = expansion_subparsers.add_parser(
+        "validate",
+        help="Validate an expansion proposal.",
+        description="Validate an expansion_proposal.json and its PLAN_PATCH.md without mutating PLAN.md.",
+    )
+    validate.add_argument("proposal", metavar="<proposal.json>", help="Expansion proposal JSON file.")
+    validate.add_argument("--project", metavar="<path>", help="Project path. Defaults to the current directory.")
+    validate.add_argument("--write-registry", action="store_true", help="Record validation result in expansion_registry.json.")
+    _add_nested_workspace_options(validate)
+    validate.add_argument("--json", action="store_true", help="Emit machine-readable validation output.")
+    validate.set_defaults(handler=run_self_expansion_validate, command_path=("self-expansion", "validate"))
+
+    apply = expansion_subparsers.add_parser(
+        "apply",
+        help="Apply a validated expansion proposal.",
+        description="Validate and apply an expansion proposal through the append-only PLAN patch reconciler.",
+    )
+    apply.add_argument("proposal", metavar="<proposal.json>", help="Expansion proposal JSON file.")
+    apply.add_argument("--project", metavar="<path>", help="Project path. Defaults to the current directory.")
+    apply.add_argument("--run-id", help="Optional run id to attach to registry/event records.")
+    apply.add_argument("--runner", help="Optional runner id to attach to registry records.")
+    _add_nested_workspace_options(apply)
+    apply.add_argument("--json", action="store_true", help="Emit machine-readable apply output.")
+    apply.set_defaults(handler=run_self_expansion_apply, command_path=("self-expansion", "apply"))
+
+
+def add_version_control_commands(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    parser = subparsers.add_parser(
+        "vc",
+        help="Version control status, checkpoint, diff, log, rollback, and doctor commands.",
+        description="Version control commands.",
+    )
+    parser.set_defaults(handler=show_help, help_parser=parser)
+    vc_subparsers = parser.add_subparsers(
+        dest="vc_command",
+        metavar="<vc-command>",
+        title="version control commands",
+    )
+
+    status = vc_subparsers.add_parser(
+        "status",
+        help="Show version-control status.",
+        description="Show concise sanitized version-control status for dashboard and CLI inspection.",
+    )
+    status.add_argument("--project", metavar="<path>", help="Project path to inspect. Defaults to the current directory.")
+    _add_nested_workspace_options(status)
+    status.add_argument("--json", action="store_true", help="Emit a machine-readable status report.")
+    status.set_defaults(handler=run_vc_status, command_path=("vc", "status"))
+
+    checkpoint = add_stub(vc_subparsers, "checkpoint", "Create a manual checkpoint.", command_path=("vc", "checkpoint"))
+    checkpoint.add_argument("--project", metavar="<path>", help="Project path to checkpoint. Defaults to current directory.")
+    checkpoint.add_argument("--reason", help="Manual checkpoint reason.")
+    checkpoint.add_argument("--task", help="Task id associated with the checkpoint.")
+    checkpoint.add_argument("--run", help="Run id associated with the checkpoint.")
+    _add_nested_workspace_options(checkpoint)
+    checkpoint.add_argument("--json", action="store_true", help="Emit a machine-readable checkpoint report.")
+    checkpoint.set_defaults(handler=run_vc_checkpoint, command_path=("vc", "checkpoint"))
+
+    run_metadata = add_stub(
+        vc_subparsers,
+        "run-metadata",
+        "Capture Git metadata for a worker or recovery run.",
+        command_path=("vc", "run-metadata"),
+    )
+    run_metadata.add_argument("--project", metavar="<path>", help="Project path. Defaults to current directory.")
+    run_metadata.add_argument("--run-dir", required=True, metavar="<path>", help="Run evidence directory.")
+    run_metadata.add_argument("--stage", required=True, choices=("pre", "post"), help="Capture stage.")
+    run_metadata.add_argument("--task", required=True, help="Task id associated with the run.")
+    run_metadata.add_argument("--run", required=True, help="Run id associated with the run.")
+    run_metadata.add_argument(
+        "--run-kind",
+        choices=("worker", "recovery"),
+        default="worker",
+        help="Run kind. Defaults to worker.",
+    )
+    _add_nested_workspace_options(run_metadata)
+    run_metadata.add_argument("--json", action="store_true", help="Emit a machine-readable metadata report.")
+    run_metadata.set_defaults(handler=run_vc_run_metadata, command_path=("vc", "run-metadata"))
+
+    diff = vc_subparsers.add_parser(
+        "diff",
+        help="Show checkpoint or task diff.",
+        description="Show sanitized task/run diff metadata captured under a LoopPlane evidence run directory.",
+    )
+    diff.add_argument("--project", metavar="<path>", help="Project path to inspect. Defaults to the current directory.")
+    diff.add_argument("--task", required=True, help="Task id whose diff should be shown.")
+    _add_nested_workspace_options(diff)
+    diff.add_argument("--json", action="store_true", help="Emit a machine-readable task diff report.")
+    diff.set_defaults(handler=run_vc_diff, command_path=("vc", "diff"))
+
+    log = vc_subparsers.add_parser(
+        "log",
+        help="Show checkpoint log.",
+        description="Show sanitized checkpoint metadata from the LoopPlane checkpoint log.",
+    )
+    log.add_argument("--project", metavar="<path>", help="Project path to inspect. Defaults to the current directory.")
+    _add_nested_workspace_options(log)
+    log.add_argument("--json", action="store_true", help="Emit a machine-readable checkpoint log.")
+    log.add_argument("--verbose-json", action="store_true", help="With --json, preserve any full file lists available in checkpoint records.")
+    log.add_argument("--limit", type=int, help="Return at most this many checkpoints, newest first.")
+    log.set_defaults(handler=run_vc_log, command_path=("vc", "log"))
+
+    rollback = vc_subparsers.add_parser(
+        "rollback",
+        help="Request rollback to a checkpoint.",
+        description=(
+            "Create an approval-gated rollback request for a managed LoopPlane checkpoint. "
+            "This command does not mutate the worktree or rewrite history."
+        ),
+    )
+    rollback.add_argument("--project", metavar="<path>", help="Project path. Defaults to the current directory.")
+    rollback.add_argument("--checkpoint", required=True, help="Checkpoint id to roll back to.")
+    _add_nested_workspace_options(rollback)
+    rollback.add_argument("--json", action="store_true", help="Emit a machine-readable rollback request report.")
+    rollback.set_defaults(handler=run_vc_rollback, command_path=("vc", "rollback"))
+
+    export = vc_subparsers.add_parser(
+        "export",
+        help="Export LoopPlane-managed checkpoint refs to a Git bundle.",
+        description=(
+            "Create a standard Git bundle containing only LoopPlane-managed checkpoint refs under "
+            "refs/loopplane/<workflow_id>/checkpoints. This command does not push, fetch, switch "
+            "branches, rewrite history, or modify the user's index."
+        ),
+    )
+    export.add_argument("--project", metavar="<path>", help="Project path. Defaults to the current directory.")
+    export.add_argument("--output", required=True, metavar="<bundle>", help="Git bundle path to create.")
+    _add_nested_workspace_options(export)
+    export.add_argument("--json", action="store_true", help="Emit a machine-readable bundle export report.")
+    export.set_defaults(handler=run_vc_export, command_path=("vc", "export"))
+
+    import_refs = vc_subparsers.add_parser(
+        "import",
+        help="Import LoopPlane-managed checkpoint refs from a Git bundle.",
+        description=(
+            "Import only LoopPlane-managed checkpoint refs under refs/loopplane/<workflow_id>/checkpoints "
+            "from a standard Git bundle. Non-LoopPlane refs in the bundle are ignored; this command "
+            "does not push, fetch remotes, switch branches, rewrite history, or modify the user's index."
+        ),
+    )
+    import_refs.add_argument("bundle", metavar="<bundle>", help="Git bundle path to import.")
+    import_refs.add_argument("--project", metavar="<path>", help="Project path. Defaults to the current directory.")
+    _add_nested_workspace_options(import_refs)
+    import_refs.add_argument("--json", action="store_true", help="Emit a machine-readable bundle import report.")
+    import_refs.set_defaults(handler=run_vc_import, command_path=("vc", "import"))
+
+    doctor = add_stub(vc_subparsers, "doctor", "Inspect version-control availability.", command_path=("vc", "doctor"))
+    doctor.add_argument("--project", metavar="<path>", help="Project path to inspect. Defaults to the current directory.")
+    _add_nested_workspace_options(doctor)
+    doctor.add_argument("--json", action="store_true", help="Emit a machine-readable doctor report.")
+    doctor.set_defaults(handler=run_vc_doctor, command_path=("vc", "doctor"))
+
+
+def add_workspace_commands(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    parser = subparsers.add_parser(
+        "workspace",
+        help="Workspace identity and current workflow commands.",
+        description="Inspect project-local LoopPlane workspace identity and current workflow selection.",
+    )
+    parser.set_defaults(handler=show_help, help_parser=parser)
+    workspace_subparsers = parser.add_subparsers(
+        dest="workspace_command",
+        metavar="<workspace-command>",
+        title="workspace commands",
+    )
+
+    current = workspace_subparsers.add_parser(
+        "current",
+        help="Show the current project workspace and selected workflow.",
+        description=(
+            "Show workspace identity, registry selection, current workflow pointer, "
+            "and resolved workflow paths for a project-local LoopPlane workspace."
+        ),
+    )
+    current.add_argument("--project", metavar="<path>", help="Project path. Defaults to the current directory.")
+    _add_nested_workspace_options(current)
+    current.add_argument("--json", action="store_true", help="Emit machine-readable workspace status.")
+    current.set_defaults(handler=run_workspace_current, command_path=("workspace", "current"))
+
+    register = workspace_subparsers.add_parser(
+        "register",
+        help="Register a project in the LOOPPLANE_HOME workspace index.",
+        description=(
+            "Validate a project-local LoopPlane workspace and upsert a machine-local "
+            "convenience entry in $LOOPPLANE_HOME/registry/workspaces.json. The global "
+            "registry never overrides project-local .loopplane workflow truth."
+        ),
+    )
+    register.add_argument("project", metavar="<project>", help="Project path to register.")
+    _add_nested_workspace_options(register)
+    register.add_argument("--json", action="store_true", help="Emit a machine-readable result.")
+    register.set_defaults(handler=run_workspace_register, command_path=("workspace", "register"))
+
+    unregister = workspace_subparsers.add_parser(
+        "unregister",
+        help="Remove a workspace from the LOOPPLANE_HOME workspace index.",
+        description=(
+            "Remove matching entries from $LOOPPLANE_HOME/registry/workspaces.json. "
+            "This changes only the machine-local convenience index and never "
+            "deletes or rewrites project-local .loopplane workflow truth."
+        ),
+    )
+    unregister.add_argument("workspace_id", nargs="?", metavar="<workspace_id>", help="Workspace id to unregister.")
+    unregister.add_argument("--json", action="store_true", help="Emit a machine-readable result.")
+    unregister.set_defaults(handler=run_workspace_unregister, command_path=("workspace", "unregister"))
+
+    scan = workspace_subparsers.add_parser(
+        "scan",
+        help="Scan one or more directories for LoopPlane workspaces.",
+        description=(
+            "Discover project-local LoopPlane workspace identity files under one or more directories "
+            "and rebuild those scan scopes in $LOOPPLANE_HOME/registry/workspaces.json. "
+            "The scan is read-only with respect to project-local .loopplane workflow truth."
+        ),
+    )
+    scan.add_argument("directory", nargs="*", metavar="<directory>", help="Directory to scan.")
+    _add_nested_workspace_options(scan)
+    scan.add_argument("--json", action="store_true", help="Emit a machine-readable result.")
+    scan.set_defaults(handler=run_workspace_scan, command_path=("workspace", "scan"))
+
+    list_command = workspace_subparsers.add_parser(
+        "list",
+        help="List registered LoopPlane workspaces.",
+        description=(
+            "Read $LOOPPLANE_HOME/registry/workspaces.json as a machine-local "
+            "convenience index and report each registered workspace with "
+            "read-only project-local health checks. Project-local .loopplane "
+            "workflow truth is never changed by this command."
+        ),
+    )
+    list_command.add_argument("--json", action="store_true", help="Emit a machine-readable result.")
+    list_command.set_defaults(handler=run_workspace_list, command_path=("workspace", "list"))
+
+    doctor = workspace_subparsers.add_parser(
+        "doctor",
+        help="Inspect workspace registry and identity health.",
+        description=(
+            "Run read-only project-local workspace-history and LOOPPLANE_HOME "
+            "registry diagnostics. Project-local .loopplane files remain "
+            "authoritative and are not created, deleted, or rewritten."
+        ),
+    )
+    doctor.add_argument("--project", metavar="<path>", help="Project path. Defaults to the current directory.")
+    _add_nested_workspace_options(doctor)
+    doctor.add_argument("--json", action="store_true", help="Emit a machine-readable result.")
+    doctor.set_defaults(handler=run_workspace_doctor, command_path=("workspace", "doctor"))
+
+
+def _add_workflow_common_options(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--project", metavar="<path>", help="Project path. Defaults to the current directory.")
+    _add_nested_workspace_options(parser)
+    parser.add_argument("--json", action="store_true", help="Emit a machine-readable workflow command result.")
+
+
+def add_workflow_commands(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    parser = subparsers.add_parser(
+        "workflow",
+        help="Workflow history inspection and lifecycle commands.",
+        description=(
+            "Inspect or mutate same-workspace LoopPlane workflow histories. The list, "
+            "current, and show commands are read-only; switch is an explicit "
+            "current-pointer control operation."
+        ),
+    )
+    parser.set_defaults(handler=workflow_missing_command, help_parser=parser, command_path=("workflow",))
+    workflow_subparsers = parser.add_subparsers(
+        dest="workflow_command",
+        metavar="<workflow-command>",
+        title="workflow commands",
+    )
+
+    list_command = workflow_subparsers.add_parser(
+        "list",
+        help="List workflow histories in the current workspace.",
+        description="List workflow records from the project-local .loopplane/workflow_registry.json.",
+    )
+    _add_workflow_common_options(list_command)
+    list_command.set_defaults(handler=run_workflow_list, command_path=("workflow", "list"))
+
+    current = workflow_subparsers.add_parser(
+        "current",
+        help="Show the current workflow pointer.",
+        description="Show .loopplane/current_workflow.json and the selected registry record.",
+    )
+    _add_workflow_common_options(current)
+    current.set_defaults(handler=run_workflow_current, command_path=("workflow", "current"))
+
+    show = workflow_subparsers.add_parser(
+        "show",
+        help="Show one workflow history.",
+        description="Show one workflow record and resolved workflow paths from the workspace registry.",
+    )
+    show.add_argument("workflow_id", metavar="<workflow_id>", help="Workflow id to inspect.")
+    _add_workflow_common_options(show)
+    show.set_defaults(handler=run_workflow_show, command_path=("workflow", "show"))
+
+    switch = workflow_subparsers.add_parser(
+        "switch",
+        help="Switch the current workflow pointer when safe.",
+        description=(
+            "Switch .loopplane/current_workflow.json only when scheduler locks, active-run "
+            "leases, archived/read-only status, and the one-active-running policy allow it."
+        ),
+    )
+    switch.add_argument("workflow_id", metavar="<workflow_id>", help="Workflow id to select.")
+    _add_workflow_common_options(switch)
+    switch.set_defaults(handler=run_workflow_switch, command_path=("workflow", "switch"))
+
+    create = workflow_subparsers.add_parser(
+        "create",
+        help="Create a new workflow history from a brief.",
+        description="Create a new workflow_id without overwriting existing workflow history.",
+    )
+    create.add_argument("--brief", required=True, metavar="<text>", help="Brief text for the new workflow.")
+    _add_workflow_common_options(create)
+    create.set_defaults(handler=run_workflow_create, command_path=("workflow", "create"))
+
+    archive = workflow_subparsers.add_parser(
+        "archive",
+        help="Archive a workflow history when safe.",
+        description="Mark a workflow archived only after running-workflow safety checks pass.",
+    )
+    archive.add_argument("workflow_id", metavar="<workflow_id>", help="Workflow id to archive.")
+    _add_workflow_common_options(archive)
+    archive.set_defaults(handler=run_workflow_archive, command_path=("workflow", "archive"))
+
+    restore = workflow_subparsers.add_parser(
+        "restore",
+        help="Restore an archived workflow history when safe.",
+        description="Restore a workflow explicitly and update registry/current pointer only when allowed.",
+    )
+    restore.add_argument("workflow_id", metavar="<workflow_id>", help="Workflow id to restore.")
+    _add_workflow_common_options(restore)
+    restore.set_defaults(handler=run_workflow_restore, command_path=("workflow", "restore"))
+
+    fork = workflow_subparsers.add_parser(
+        "fork",
+        help="Fork an existing workflow history.",
+        description="Create a new workflow history from an existing workflow without mutating the source.",
+    )
+    fork.add_argument("workflow_id", metavar="<workflow_id>", help="Workflow id to fork.")
+    fork.add_argument("--name", required=True, metavar="<new attempt>", help="Name for the forked workflow.")
+    _add_workflow_common_options(fork)
+    fork.set_defaults(handler=run_workflow_fork, command_path=("workflow", "fork"))
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="loopplane",
+        description="LoopPlane command-line interface.",
+        epilog=COMMAND_GROUPS,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    subparsers = parser.add_subparsers(
+        dest="command",
+        metavar="<command>",
+        title="commands",
+    )
+    parser.set_defaults(handler=show_help, help_parser=parser)
+
+    add_skill_commands(subparsers)
+    add_agent_runner_commands(subparsers)
+    add_planning_commands(subparsers)
+    add_execution_commands(subparsers)
+    add_background_commands(subparsers)
+    add_migration_commands(subparsers)
+    add_dashboard_and_inspection_commands(subparsers)
+    add_self_expansion_commands(subparsers)
+    add_version_control_commands(subparsers)
+    add_workspace_commands(subparsers)
+    add_workflow_commands(subparsers)
+
+    return parser
+
+
+def _normalize_legacy_change_request_args(argv: Sequence[str] | None) -> list[str] | None:
+    args = list(argv) if argv is not None else None
+    parse_args = list(sys.argv[1:] if args is None else args)
+    if not parse_args or parse_args[0] != "change-request":
+        return args
+    if len(parse_args) == 1 or any(token in {"-h", "--help"} for token in parse_args[1:]):
+        return args
+    subcommands = {"submit", "review", "apply", "status"}
+    if any(token in subcommands for token in parse_args[1:]):
+        return args
+    normalized = ["change-request", "submit", *parse_args[1:]]
+    return normalized
+
+
+def _normalize_configure_agent_args(argv: Sequence[str] | None) -> list[str] | None:
+    args = list(argv) if argv is not None else None
+    parse_args = list(sys.argv[1:] if args is None else args)
+    if not parse_args or parse_args[0] != "configure-agent":
+        return args
+    normalized: list[str] = []
+    index = 0
+    changed = False
+    while index < len(parse_args):
+        token = parse_args[index]
+        if token == "--arg" and index + 1 < len(parse_args):
+            value = parse_args[index + 1]
+            if value.startswith("-") and value != "--":
+                normalized.append(f"--arg={value}")
+                index += 2
+                changed = True
+                continue
+        normalized.append(token)
+        index += 1
+    return normalized if changed else args
+
+
+def _normalize_cli_args(argv: Sequence[str] | None) -> list[str] | None:
+    normalized = _normalize_legacy_change_request_args(argv)
+    return _normalize_configure_agent_args(normalized if normalized is not None else argv)
+
+
+def _auto_dashboard_after_command(args: argparse.Namespace, exit_code: int) -> None:
+    if exit_code != 0 or not _auto_dashboard_enabled():
+        return
+    command_path = tuple(getattr(args, "command_path", ()) or ())
+    if not command_path or command_path[0] == "dashboard":
+        return
+    if getattr(args, "dry_run", False):
+        return
+    if _auto_dashboard_suppressed_for_command(command_path):
+        return
+    project_value = _auto_dashboard_project_value(args, command_path)
+    if not project_value:
+        return
+    project = Path(project_value).expanduser().resolve()
+    if not _looks_like_loopplane_workspace(project):
+        return
+    try:
+        listing = list_dashboard_servers(project)
+    except Exception:
+        return
+    if listing.get("ok") is True:
+        current_workflow_id = str(listing.get("current_workflow_id") or "")
+        alive_servers = [
+            server
+            for server in listing.get("dashboard_servers") or []
+            if isinstance(server, Mapping) and server.get("liveness") == "alive" and server.get("stale") is not True
+        ]
+        if alive_servers:
+            preferred = next(
+                (
+                    server
+                    for server in alive_servers
+                    if current_workflow_id and _server_workflow_id(server) == current_workflow_id
+                ),
+                alive_servers[0],
+            )
+            _write_auto_dashboard_access_link(project, preferred, workflow_id=current_workflow_id)
+            return
+    _spawn_auto_dashboard(project)
+
+
+def _auto_dashboard_enabled() -> bool:
+    value = os.environ.get("LOOPPLANE_AUTO_DASHBOARD")
+    if value is not None:
+        return value.strip().lower() not in AUTO_DASHBOARD_DISABLED_VALUES
+    if os.environ.get("LOOPPLANE_DASHBOARD_CHILD"):
+        return False
+    if os.environ.get("PYTEST_CURRENT_TEST"):
+        return False
+    if not sys.stdout.isatty() or not sys.stderr.isatty():
+        return False
+    return True
+
+
+def _auto_dashboard_suppressed_for_command(command_path: tuple[str, ...]) -> bool:
+    if command_path in {
+        ("ask",),
+        ("doctor-agent",),
+        ("health",),
+        ("logs",),
+        ("preview",),
+        ("status",),
+        ("workspace", "list"),
+        ("workspace", "scan"),
+        ("workspace", "show"),
+        ("workflow", "current"),
+        ("workflow", "list"),
+        ("workflow", "show"),
+        ("workflow", "status"),
+    }:
+        return True
+    if command_path and command_path[0] == "vc":
+        return True
+    return False
+
+
+def _auto_dashboard_project_value(args: argparse.Namespace, command_path: tuple[str, ...]) -> str | None:
+    if command_path == ("import",):
+        return str(getattr(args, "target", "") or "") or None
+    if command_path in {("skill", "install"), ("skill", "update")}:
+        return str(getattr(args, "target", "") or "") or None
+    if command_path in {("skill", "doctor"), ("skill", "pack"), ("workspace", "list"), ("workspace", "scan"), ("workspace", "unregister")}:
+        return None
+    return str(getattr(args, "project", None) or ".")
+
+
+def _looks_like_loopplane_workspace(project: Path) -> bool:
+    markers = (
+        project / ".loopplane" / "config" / "workflow.json",
+        project / ".loopplane" / "current_workflow.json",
+        project / ".loopplane" / "workspace.json",
+    )
+    return any(path.exists() for path in markers)
+
+
+def _server_workflow_id(server: Mapping[str, Any]) -> str:
+    return str(server.get("workflow_id") or server.get("selected_workflow_id") or "").strip()
+
+
+def _write_auto_dashboard_access_link(project: Path, server: Mapping[str, Any], *, workflow_id: str = "") -> None:
+    url = str(server.get("url") or "").strip()
+    if not url:
+        return
+    token = ""
+    if server.get("token_required"):
+        token_file = str(server.get("token_file") or "").strip()
+        if token_file:
+            try:
+                token = (project / token_file).read_text(encoding="utf-8").strip()
+            except OSError:
+                token = ""
+    url = _append_auto_dashboard_query_params(
+        url,
+        [
+            ("token", token),
+            ("workflow", workflow_id),
+        ],
+    )
+    path = project / "LOOPPLANE_DASHBOARD.url"
+    try:
+        path.write_text(f"[InternetShortcut]\nURL={url}\n", encoding="utf-8")
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
+    except OSError:
+        return
+
+
+def _append_auto_dashboard_query_params(url: str, params: Sequence[tuple[str, str]]) -> str:
+    next_url = url
+    for key, value in params:
+        text = str(value or "").strip()
+        if not text:
+            continue
+        separator = "&" if "?" in next_url else "?"
+        next_url = f"{next_url}{separator}{quote(str(key), safe='')}={quote(text, safe='')}"
+    return next_url
+
+
+def _spawn_auto_dashboard(project: Path) -> None:
+    runtime_dir = project / ".loopplane" / "runtime"
+    try:
+        runtime_dir.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return
+    env = os.environ.copy()
+    env["LOOPPLANE_DASHBOARD_CHILD"] = "1"
+    env["LOOPPLANE_AUTO_DASHBOARD"] = "0"
+    command = [
+        sys.executable,
+        str(Path(__file__).resolve()),
+        "dashboard",
+        "--project",
+        project.as_posix(),
+        "--port",
+        "auto",
+        "--json",
+    ]
+    stderr_path = runtime_dir / "dashboard_auto_start.log"
+    try:
+        stderr_handle = stderr_path.open("ab")
+    except OSError:
+        stderr_handle = subprocess.DEVNULL  # type: ignore[assignment]
+    try:
+        process = subprocess.Popen(
+            command,
+            cwd=project,
+            env=env,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=stderr_handle,
+            text=True,
+            start_new_session=True,
+        )
+    except OSError:
+        if hasattr(stderr_handle, "close"):
+            stderr_handle.close()
+        return
+    finally:
+        if hasattr(stderr_handle, "close"):
+            stderr_handle.close()
+    startup = _read_auto_dashboard_startup(process)
+    if startup.get("ok") is True and isinstance(startup, Mapping):
+        workflow_id = str(startup.get("selected_workflow_id") or startup.get("workflow_id") or "").strip()
+        _write_auto_dashboard_access_link(project, startup, workflow_id=workflow_id)
+    if process.stdout is not None:
+        try:
+            process.stdout.close()
+        except OSError:
+            pass
+
+
+def _read_auto_dashboard_startup(process: subprocess.Popen[str]) -> dict[str, Any]:
+    if process.stdout is None:
+        return {}
+    deadline = time.monotonic() + 5.0
+    line = ""
+    while time.monotonic() < deadline:
+        timeout = max(0.0, min(0.2, deadline - time.monotonic()))
+        try:
+            readable, _, _ = select.select([process.stdout], [], [], timeout)
+        except (OSError, ValueError):
+            break
+        if readable:
+            line = process.stdout.readline()
+            break
+        if process.poll() is not None:
+            line = process.stdout.readline()
+            break
+    if not line:
+        return {}
+    try:
+        payload = json.loads(line)
+    except json.JSONDecodeError:
+        return {}
+    return dict(payload) if isinstance(payload, Mapping) else {}
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(_normalize_cli_args(argv))
+    nested_guard = _nested_workspace_preflight(args)
+    if nested_guard is not None:
+        if getattr(args, "json", False):
+            print(json.dumps(nested_guard, indent=2, sort_keys=True))
+        else:
+            print(_format_nested_workspace_preflight_text(nested_guard), end="")
+        return EXIT_SECURITY_POLICY_VIOLATION
+    exit_code = args.handler(args)
+    _auto_dashboard_after_command(args, exit_code)
+    return exit_code
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

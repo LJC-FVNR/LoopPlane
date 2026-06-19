@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "LoopPlane schema_version.json",
+  "type": "object",
+  "required": ["schema_version", "created_with", "last_migrated_at", "required_runtime_version", "files"],
+  "properties": {
+    "schema_version": {"enum": ["1.5", "1.6"]},
+    "created_with": {"type": "string", "minLength": 1},
+    "last_migrated_at": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"},
+    "required_runtime_version": {"type": "string", "minLength": 1},
+    "files": {
+      "type": "object",
+      "additionalProperties": {"enum": ["1.5", "1.6"]}
+    },
+    "compatibility": {
+      "type": "object",
+      "required": ["status", "legacy_schema_version", "reason", "legacy_schema_version_files"],
+      "properties": {
+        "status": {"enum": ["compatibility_tagged", "legacy_schema_compatibility"]},
+        "legacy_schema_version": {"const": "1.5"},
+        "reason": {"type": "string", "minLength": 1},
+        "legacy_schema_version_files": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1},
+          "uniqueItems": true
+        }
+      }
+    }
+  }
+}

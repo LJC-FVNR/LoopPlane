@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "LoopPlane security.json",
+  "type": "object",
+  "required": ["schema_version", "dashboard", "redaction", "approval", "git_command_policy", "file_access"],
+  "properties": {
+    "schema_version": {"const": "1.5"},
+    "dashboard": {
+      "type": "object",
+      "required": ["bind_host", "require_token", "token_file", "mutating_api_requires_token", "same_origin_required"],
+      "properties": {
+        "bind_host": {"type": "string", "enum": ["127.0.0.1", "localhost"]},
+        "require_token": {"type": "boolean"},
+        "token_file": {"type": "string", "minLength": 1},
+        "mutating_api_requires_token": {"type": "boolean"},
+        "same_origin_required": {"type": "boolean"},
+        "trusted_local_mode": {"type": "boolean"}
+      }
+    },
+    "redaction": {"type": "object", "required": ["enabled", "redact_env_vars", "redact_patterns"]},
+    "approval": {
+      "type": "object",
+      "required": ["enabled", "default_action_when_disabled"],
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "default_action_when_disabled": {"type": "string", "enum": ["auto_authorize", "block_or_defer", "block", "defer"]}
+      }
+    },
+    "git_command_policy": {"type": "object"},
+    "file_access": {
+      "type": "object",
+      "required": ["allowlist", "denylist"],
+      "properties": {
+        "allowlist": {"type": "array", "items": {"type": "string"}},
+        "denylist": {"type": "array", "items": {"type": "string"}},
+        "allow_out_of_boundary_writes": {"type": "boolean"},
+        "out_of_boundary_write_allowlist": {"type": "array", "items": {"type": "string"}}
+      }
+    }
+  }
+}

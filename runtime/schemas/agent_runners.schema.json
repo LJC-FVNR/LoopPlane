@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "LoopPlane agent_runners.json",
+  "type": "object",
+  "required": ["schema_version", "default_runner", "runners"],
+  "properties": {
+    "schema_version": {"const": "1.5"},
+    "default_runner": {"type": "string", "minLength": 1},
+    "runner_failover": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["strategy", "runners", "mark_unhealthy_after", "failure_window_seconds"],
+        "properties": {
+          "strategy": {"const": "ordered"},
+          "runners": {
+            "type": "array",
+            "minItems": 1,
+            "items": {"type": "string", "minLength": 1}
+          },
+          "mark_unhealthy_after": {"type": "integer", "minimum": 1},
+          "failure_window_seconds": {"type": "integer", "minimum": 1},
+          "cooldown_seconds": {"type": "integer", "minimum": 1},
+          "recover_after_doctor_ok": {"type": "boolean"}
+        },
+        "additionalProperties": false
+      }
+    },
+    "runners": {
+      "type": "object",
+      "required": ["worker", "worker_fallback", "planner", "auditor", "inspector"],
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "role": {"type": "string", "enum": ["worker", "planner", "auditor", "validator", "recovery_worker", "change_request_planner", "inspector", "summary", "expansion_planner", "objective_verifier", "final_reviewer"]},
+          "adapter": {"type": "string", "minLength": 1},
+          "enabled": {"type": "boolean"},
+          "command": {"type": "string", "minLength": 1},
+          "cwd": {"type": "string", "minLength": 1},
+          "inherits": {"type": "string", "minLength": 1},
+          "prompt_delivery": {
+            "type": "object",
+            "properties": {
+              "mode": {"type": "string", "enum": ["file_argument", "stdin", "stdin_or_prompt_flag", "interactive_terminal", "custom_adapter"]}
+            }
+          },
+          "args": {"type": "array", "items": {"type": "string"}},
+          "env": {"type": "object"},
+          "timeout_seconds": {"type": "integer", "minimum": 1},
+          "stream_logs": {"type": "boolean"},
+          "permission_policy": {"type": "object"},
+          "adapter_options": {"type": "object"},
+          "doctor": {"type": "object"},
+          "resource_policy": {
+            "type": "object",
+            "properties": {
+              "global_concurrency_limit": {"type": "integer", "minimum": 1},
+              "lock_scope": {"type": "string", "enum": ["machine", "workspace"]},
+              "lock_key": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9._-]+$",
+                "not": {"enum": [".", ".."]}
+              },
+              "queue_when_busy": {"type": "boolean"}
+            },
+            "additionalProperties": false
+          }
+        }
+      }
+    }
+  }
+}

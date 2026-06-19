@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "LoopPlane final verification report",
+  "type": "object",
+  "required": ["schema_version", "workflow_id", "status", "checks"],
+  "properties": {
+    "schema_version": {"const": "1.5"},
+    "workflow_id": {"type": "string"},
+    "status": {"type": "string"},
+    "checks": {"type": "array"}
+  }
+}

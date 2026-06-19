@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "LoopPlane schema migration record",
+  "type": "object",
+  "required": ["schema_version", "migration_id", "status", "from_version", "to_version", "workflow_id", "started_at", "ended_at", "migration_script", "backup_dir", "backup_files", "modified_files", "validation_status", "validation_errors"],
+  "properties": {
+    "schema_version": {"const": "1.5"},
+    "migration_id": {"type": "string", "minLength": 1},
+    "status": {"type": "string", "enum": ["migrated", "blocked", "dry_run", "migration_required", "no_op"]},
+    "from_version": {"type": "string", "minLength": 1},
+    "to_version": {"type": "string", "minLength": 1},
+    "workflow_id": {"type": "string"},
+    "started_at": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"},
+    "ended_at": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"},
+    "migration_script": {"type": "string", "minLength": 1},
+    "backup_dir": {"type": "string", "minLength": 1},
+    "backup_files": {"type": "array", "items": {"type": "string"}},
+    "modified_files": {"type": "array", "items": {"type": "string"}},
+    "validation_status": {"type": "string"},
+    "validation_errors": {"type": "array", "items": {"type": "string"}}
+  },
+  "additionalProperties": true
+}

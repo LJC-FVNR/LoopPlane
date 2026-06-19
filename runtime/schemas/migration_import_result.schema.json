@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "LoopPlane migration import result",
+  "type": "object",
+  "required": ["schema_version", "ok", "status", "archive", "target", "imported_count", "warnings", "errors"],
+  "properties": {
+    "schema_version": {"const": "loopplane-migration-import-1"},
+    "ok": {"type": "boolean"},
+    "status": {"type": "string"},
+    "profile": {"type": ["string", "null"], "enum": ["source", "stateful", "archive", null]},
+    "archive": {"type": "string", "minLength": 1},
+    "target": {"type": "string", "minLength": 1},
+    "project_root": {"type": "string"},
+    "workspace_id": {"type": ["string", "null"]},
+    "workflow_id": {"type": ["string", "null"]},
+    "read_only": {"type": "boolean"},
+    "post_import_actions": {"type": "array", "items": {"type": "string"}},
+    "imported_count": {"type": "integer", "minimum": 0},
+    "warnings": {"type": "array", "items": {"type": "string"}},
+    "errors": {"type": "array", "items": {"type": "string"}},
+    "recovery_actions": {"type": "array", "items": {"type": "string"}}
+  },
+  "additionalProperties": true
+}

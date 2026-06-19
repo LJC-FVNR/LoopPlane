@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "LoopPlane background jobs",
+  "anyOf": [
+    {
+      "type": "object",
+      "required": ["schema_version", "jobs"],
+      "properties": {
+        "schema_version": {"const": "1.5"},
+        "workflow_id": {"type": "string"},
+        "jobs": {"type": "array", "items": {"type": "object"}}
+      }
+    },
+    {
+      "type": "array",
+      "items": {"type": "object"}
+    }
+  ]
+}

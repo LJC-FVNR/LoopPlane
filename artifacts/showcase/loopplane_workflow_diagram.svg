@@ -1,0 +1,133 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="860" viewBox="0 0 1400 860" role="img" aria-label="LoopPlane workflow architecture diagram">
+  <defs>
+    <pattern id="grid" width="44" height="44" patternUnits="userSpaceOnUse">
+      <path d="M44 0H0V44" fill="none" stroke="#38bdf8" stroke-width="1" opacity="0.07"/>
+    </pattern>
+    <linearGradient id="loopStroke" x1="100" y1="210" x2="1260" y2="660" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#00e5ff"/>
+      <stop offset="0.52" stop-color="#39ff88"/>
+      <stop offset="1" stop-color="#ff4fd8"/>
+    </linearGradient>
+    <marker id="arrowCyan" markerWidth="14" markerHeight="14" refX="12" refY="7" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M0 0 14 7 0 14 4 7Z" fill="#5ee7f8"/>
+    </marker>
+    <marker id="arrowGreen" markerWidth="14" markerHeight="14" refX="12" refY="7" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M0 0 14 7 0 14 4 7Z" fill="#39ff88"/>
+    </marker>
+    <marker id="arrowMagenta" markerWidth="14" markerHeight="14" refX="12" refY="7" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M0 0 14 7 0 14 4 7Z" fill="#ff4fd8"/>
+    </marker>
+    <style>
+      .bg { fill: #07111f; }
+      .panel { fill: #0b1323; stroke: #26344d; stroke-width: 1.6; }
+      .frame { fill: none; stroke: url(#loopStroke); stroke-width: 2.2; stroke-dasharray: 10 9; opacity: 0.92; }
+      .title { fill: #f8fafc; font-family: "Liberation Sans", "DejaVu Sans", sans-serif; font-size: 36px; font-weight: 700; letter-spacing: 0; }
+      .eyebrow { fill: #7dd3fc; font-family: "Liberation Sans", "DejaVu Sans", sans-serif; font-size: 13px; font-weight: 700; letter-spacing: 1.7px; }
+      .section { fill: #93c5fd; font-family: "Liberation Sans", "DejaVu Sans", sans-serif; font-size: 13px; font-weight: 700; letter-spacing: 1.4px; }
+      .node-title { fill: #f8fafc; font-family: "Liberation Sans", "DejaVu Sans", sans-serif; font-size: 21px; font-weight: 700; letter-spacing: 0; }
+      .terminal-title { fill: #f8fafc; font-family: "Liberation Sans", "DejaVu Sans", sans-serif; font-size: 20px; font-weight: 700; letter-spacing: 0; }
+      .node-text { fill: #b9c7dc; font-family: "Liberation Sans", "DejaVu Sans", sans-serif; font-size: 15px; font-weight: 400; letter-spacing: 0; }
+      .small { fill: #9fb0c9; font-family: "Liberation Sans", "DejaVu Sans", sans-serif; font-size: 13px; font-weight: 400; letter-spacing: 0; }
+      .label { fill: #c4b5fd; font-family: "Liberation Sans", "DejaVu Sans", sans-serif; font-size: 12px; font-weight: 700; letter-spacing: 0; }
+      .package { fill: #111827; stroke: #2b3c59; stroke-width: 1.5; }
+      .agent { fill: #071f21; stroke: #2dd4bf; stroke-width: 2; }
+      .gate { fill: #171329; stroke: #ff4fd8; stroke-width: 2; }
+      .expand { fill: #0d2119; stroke: #39ff88; stroke-width: 2; }
+      .terminal { fill: #101827; stroke: #a78bfa; stroke-width: 2; }
+      .record { fill: #0e1828; stroke: #38bdf8; stroke-width: 1.8; }
+      .surface { fill: #101827; stroke: #a3e635; stroke-width: 1.8; }
+      .edge { fill: none; stroke: #5ee7f8; stroke-width: 3.4; marker-end: url(#arrowCyan); }
+      .gate-edge { fill: none; stroke: #ff4fd8; stroke-width: 3.2; marker-end: url(#arrowMagenta); }
+      .expand-edge { fill: none; stroke: #39ff88; stroke-width: 3.2; marker-end: url(#arrowGreen); }
+      .record-edge { fill: none; stroke: #7fb6c9; stroke-width: 2.1; stroke-dasharray: 6 7; marker-end: url(#arrowCyan); opacity: 0.78; }
+      .surface-edge { fill: none; stroke: #a3e635; stroke-width: 2.7; marker-end: url(#arrowGreen); }
+      .chip { fill: #052f2e; stroke: #2dd4bf; stroke-width: 1.2; }
+      .chip-text { fill: #99f6e4; font-family: "Liberation Sans", "DejaVu Sans", sans-serif; font-size: 12px; font-weight: 700; letter-spacing: 0; }
+    </style>
+  </defs>
+
+  <rect class="bg" width="1400" height="860"/>
+  <rect width="1400" height="860" fill="url(#grid)" opacity="0.92"/>
+
+  <text x="70" y="68" class="eyebrow">LOOPPLANE WORKFLOW ARCHITECTURE</text>
+  <text x="70" y="114" class="title">Portable agent loops with objective-gated closure</text>
+  <text x="72" y="146" class="small">Execution stays local. Agents write evidence. Objective gates decide whether the evidence is enough.</text>
+
+  <rect x="58" y="176" width="1284" height="546" rx="24" class="panel"/>
+
+  <text x="96" y="218" class="section">PROJECT PACKAGE</text>
+  <rect x="92" y="250" width="230" height="118" rx="12" class="package"/>
+  <text x="120" y="289" class="node-title">Plan + context</text>
+  <text x="120" y="318" class="node-text">PLAN.md tasks</text>
+  <text x="120" y="342" class="node-text">Phase/workflow objectives</text>
+
+  <rect x="368" y="206" width="712" height="400" rx="18" class="frame"/>
+  <text x="398" y="238" class="section">INNER AGENT LOOP</text>
+
+  <rect x="412" y="276" width="170" height="92" rx="12" class="agent"/>
+  <text x="438" y="313" class="node-title">Scheduler</text>
+  <text x="438" y="340" class="node-text">selects next work</text>
+
+  <rect x="638" y="276" width="170" height="92" rx="12" class="agent"/>
+  <text x="664" y="313" class="node-title">Worker</text>
+  <text x="664" y="340" class="node-text">artifacts + logs</text>
+
+  <rect x="864" y="276" width="170" height="92" rx="12" class="agent"/>
+  <text x="890" y="313" class="node-title">Validator</text>
+  <text x="890" y="340" class="node-text">checks evidence</text>
+
+  <rect x="850" y="454" width="200" height="96" rx="12" class="gate"/>
+  <text x="878" y="491" class="node-title">Objective gate</text>
+  <text x="878" y="518" class="node-text">semantic closure</text>
+
+  <rect x="548" y="454" width="220" height="96" rx="12" class="expand"/>
+  <text x="574" y="491" class="node-title">Self-expansion</text>
+  <text x="574" y="518" class="node-text">bounded follow-up</text>
+
+  <rect x="1112" y="454" width="190" height="88" rx="12" class="terminal"/>
+  <text x="1138" y="488" class="terminal-title">Workflow</text>
+  <text x="1138" y="512" class="terminal-title">satisfied</text>
+  <text x="1138" y="532" class="node-text">run final review</text>
+
+  <rect x="1112" y="304" width="190" height="86" rx="12" class="terminal"/>
+  <text x="1138" y="338" class="terminal-title">Complete /</text>
+  <text x="1138" y="362" class="terminal-title">handoff</text>
+  <text x="1138" y="382" class="node-text">reviewable result</text>
+
+  <path d="M322 309H412" class="edge"/>
+  <path d="M582 322H638" class="edge"/>
+  <path d="M808 322H864" class="edge"/>
+  <path d="M949 368V454" class="edge"/>
+  <path d="M850 502H768" class="gate-edge"/>
+  <text x="790" y="492" class="label">gap</text>
+  <path d="M658 454V414H500V368" class="expand-edge"/>
+  <path d="M950 454V400H500V368" class="edge"/>
+  <text x="560" y="392" class="label">phase satisfied -> next phase</text>
+  <path d="M1050 498H1112" class="edge"/>
+  <path d="M1207 454V390" class="edge"/>
+
+  <text x="96" y="620" class="section">LOCAL RECORDS AND REVIEW SURFACES</text>
+  <rect x="300" y="630" width="285" height="70" rx="12" class="record"/>
+  <text x="326" y="660" class="node-title">Local runtime truth</text>
+  <text x="326" y="684" class="node-text">events, results, validations</text>
+
+  <rect x="665" y="630" width="220" height="70" rx="12" class="surface"/>
+  <text x="691" y="660" class="node-title">Read models</text>
+  <text x="691" y="684" class="node-text">rebuilt projections</text>
+
+  <rect x="970" y="630" width="270" height="70" rx="12" class="surface"/>
+  <text x="996" y="660" class="node-title">Dashboard + reports</text>
+  <text x="996" y="684" class="node-text">inspect evidence and state</text>
+
+  <path d="M497 368V586L442 630" class="record-edge"/>
+  <path d="M723 368V594H510V630" class="record-edge"/>
+  <path d="M950 550V610H555V630" class="record-edge"/>
+  <path d="M585 665H665" class="surface-edge"/>
+  <path d="M885 665H970" class="surface-edge"/>
+
+  <rect x="70" y="764" width="1260" height="58" rx="12" class="package"/>
+  <rect x="96" y="779" width="142" height="28" rx="2" class="chip"/>
+  <text x="116" y="798" class="chip-text">AUTHORITY MODEL</text>
+  <text x="268" y="790" class="small">PLAN.md describes intended work. Objective gates judge actual evidence at phase and workflow boundaries.</text>
+  <text x="268" y="812" class="small">Satisfied gates continue to the next phase or final handoff; unmet gates trigger bounded self-expansion and return to the scheduler.</text>
+</svg>

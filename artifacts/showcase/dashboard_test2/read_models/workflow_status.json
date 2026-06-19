@@ -1,0 +1,234 @@
+{
+  "active_run_id": null,
+  "active_task_id": null,
+  "change_requests": {
+    "applied_count": 0,
+    "approved_count": 0,
+    "commands": [
+      "loopplane change-request submit \"<request>\" --project <project>",
+      "loopplane change-request review <change_request_id> --project <project>",
+      "loopplane approvals --project <project>",
+      "loopplane change-request apply <change_request_id> --project <project>",
+      "loopplane change-request status --project <project>"
+    ],
+    "failed_count": 0,
+    "latest_change_request_id": null,
+    "latest_status": null,
+    "needs_user_approval_count": 0,
+    "pending_review_count": 0,
+    "recent": []
+  },
+  "control": {
+    "applied_count": 3,
+    "commands": [
+      "loopplane start --detach --project <project>",
+      "loopplane pause --project <project>",
+      "loopplane resume --project <project>",
+      "loopplane stop --project <project>",
+      "loopplane status --project <project>",
+      "loopplane logs --project <project>",
+      "loopplane attach --project <project>",
+      "loopplane migrate --project <project>"
+    ],
+    "latest_request_id": "ctrl_20260616_093403_9637eac0",
+    "latest_status": "applied",
+    "latest_type": "resume",
+    "pending_count": 0,
+    "recent": [
+      {
+        "created_at": "2026-06-16T09:33:56Z",
+        "handled_at": "2026-06-16T09:33:56Z",
+        "request_id": "ctrl_20260616_093356_82c892f8",
+        "resulting_workflow_status": "running",
+        "status": "applied",
+        "type": "start"
+      },
+      {
+        "created_at": "2026-06-16T09:34:00Z",
+        "handled_at": "2026-06-16T09:34:01Z",
+        "request_id": "ctrl_20260616_093400_0537a5f9",
+        "resulting_workflow_status": "running",
+        "status": "applied",
+        "type": "resume"
+      },
+      {
+        "created_at": "2026-06-16T09:34:03Z",
+        "handled_at": "2026-06-16T09:34:03Z",
+        "request_id": "ctrl_20260616_093403_9637eac0",
+        "resulting_workflow_status": "running",
+        "status": "applied",
+        "type": "resume"
+      }
+    ],
+    "rejected_count": 0
+  },
+  "current_activity": {
+    "started_at": null,
+    "title": "completed",
+    "type": "status"
+  },
+  "generated_at": "2026-06-16T21:26:30Z",
+  "last_event_seq": 101,
+  "objective_progress": {
+    "closed": 2,
+    "needs_expansion": 0,
+    "needs_verification": 0,
+    "objective_unresolved": 0,
+    "open": 0,
+    "parse_error_count": 0,
+    "total": 2
+  },
+  "objectives": [
+    {
+      "checkbox": "[x]",
+      "closed": true,
+      "evidence_scope": ".loopplane/workflows/wf_20260616_085d0238/results/PF01/ and .loopplane/workflows/wf_20260616_085d0238/results/PF02/",
+      "expandable": false,
+      "fields": {
+        "evidence_scope": [
+          ".loopplane/workflows/wf_20260616_085d0238/results/PF01/ and .loopplane/workflows/wf_20260616_085d0238/results/PF02/"
+        ],
+        "judgment_guidance": [
+          "Confirm the CSV, report table, and SVG figure together support a human review of the analytics outcome."
+        ],
+        "linked_tasks": [
+          "PF01, PF02"
+        ],
+        "max_expansions": [
+          "2"
+        ],
+        "unmet_action": [
+          "self_expand"
+        ],
+        "verifier": [
+          "objective_verifier"
+        ]
+      },
+      "judgment_guidance": "Confirm the CSV, report table, and SVG figure together support a human review of the analytics outcome.",
+      "line_index": 42,
+      "linked_tasks": "PF01, PF02",
+      "max_expansions": "2",
+      "objective_id": "PF.O1",
+      "phase_id": "PF",
+      "phase_title": "Phase PF: Portfolio Evidence",
+      "plan_status": "satisfied",
+      "report_path": ".loopplane/workflows/wf_20260616_085d0238/runtime/objectives/phases/PF/objective_verification.json",
+      "report_status": "satisfied",
+      "result": {
+        "agent_rationale": "Validated task evidence is present and decision-useful for this clean regression fixture.",
+        "confidence": "high",
+        "evidence_reviewed": [
+          "PF01, PF02",
+          ".loopplane/workflows/wf_20260616_085d0238/results/PF01/ and .loopplane/workflows/wf_20260616_085d0238/results/PF02/"
+        ],
+        "expandable": false,
+        "gap_summary": "",
+        "objective_id": "PF.O1",
+        "status": "satisfied",
+        "unmet_action": "self_expand",
+        "verdict": "satisfied"
+      },
+      "scope": "phase",
+      "status": "closed",
+      "text": "Civic Analytics Portfolio evidence is decision-useful.",
+      "unmet_action": "self_expand",
+      "verified_at": "2026-06-16T09:34:03Z",
+      "verifier": "objective_verifier"
+    },
+    {
+      "checkbox": "[x]",
+      "closed": true,
+      "evidence_scope": ".loopplane/workflows/wf_20260616_085d0238/results/ plus read_models/",
+      "expandable": false,
+      "fields": {
+        "evidence_scope": [
+          ".loopplane/workflows/wf_20260616_085d0238/results/ plus read_models/"
+        ],
+        "judgment_guidance": [
+          "Confirm validated task evidence and human-readable summaries are sufficient for dashboard handoff."
+        ],
+        "linked_tasks": [
+          "PF01, PF02"
+        ],
+        "max_expansions": [
+          "2"
+        ],
+        "unmet_action": [
+          "self_expand"
+        ],
+        "verifier": [
+          "objective_verifier"
+        ]
+      },
+      "judgment_guidance": "Confirm validated task evidence and human-readable summaries are sufficient for dashboard handoff.",
+      "line_index": 52,
+      "linked_tasks": "PF01, PF02",
+      "max_expansions": "2",
+      "objective_id": "FO1",
+      "plan_status": "satisfied",
+      "report_path": ".loopplane/workflows/wf_20260616_085d0238/runtime/objectives/final_objective_verification.json",
+      "report_status": "satisfied",
+      "result": {
+        "agent_rationale": "Validated task evidence is present and decision-useful for this clean regression fixture.",
+        "confidence": "high",
+        "evidence_reviewed": [
+          "PF01, PF02",
+          ".loopplane/workflows/wf_20260616_085d0238/results/ plus read_models/"
+        ],
+        "expandable": false,
+        "gap_summary": "",
+        "objective_id": "FO1",
+        "status": "satisfied",
+        "unmet_action": "self_expand",
+        "verdict": "satisfied"
+      },
+      "scope": "workflow",
+      "status": "closed",
+      "text": "Civic Analytics Portfolio workflow is complete and dashboard-ready.",
+      "unmet_action": "self_expand",
+      "verified_at": "2026-06-16T09:34:04Z",
+      "verifier": "objective_verifier"
+    }
+  ],
+  "phase": "completion",
+  "plan_source": {
+    "active_plan_file": ".loopplane/workflows/wf_20260616_085d0238/PLAN.md",
+    "kind": "active",
+    "path": ".loopplane/workflows/wf_20260616_085d0238/PLAN.md"
+  },
+  "progress": {
+    "blocked_tasks": 0,
+    "completed_tasks": 2,
+    "partial_tasks": 0,
+    "progress_percent": 100.0,
+    "skipped_tasks": 0,
+    "total_tasks": 2
+  },
+  "requires_attention": [],
+  "schema_version": "1.5",
+  "self_expansion": {
+    "applied_count": 0,
+    "cycle": 0,
+    "latest_proposal": null,
+    "pending_resolution_count": 0,
+    "proposal_count": 0,
+    "schema_version": "1.5"
+  },
+  "source_event_id": "evt_000000000101",
+  "source_hashes": {
+    "active_leases": "sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+    "active_plan": "sha256:5f7d101abebbe8d8e8934ab6d4688e9a910c3aa96b317aa1d50047ac9e40c060",
+    "events_count": 101,
+    "events_head": "evt_000000000101",
+    "events_sha256": "sha256:90b077b1e57d7bf1ba0bc569dd289e855aed1fd864f65b713aca06a0ffa94d3c",
+    "expansion_registry": "sha256:066fda366c3fac1799a518dd024972fc5c12c44c54a4d113fec50687bc0da00b",
+    "plan": "sha256:5f7d101abebbe8d8e8934ab6d4688e9a910c3aa96b317aa1d50047ac9e40c060",
+    "plan_file": ".loopplane/workflows/wf_20260616_085d0238/PLAN.md",
+    "plan_source": "active",
+    "state": "sha256:9d6fe17ca14dbf3e4d65ae1f18733e225cc53e2bebd2dd653731b4d0dbf772e1",
+    "validations_manifest": "sha256:43bc14d4b1153aba188ff188431706ab9e982914af0171847fb1a1bde5e3f029"
+  },
+  "status": "completed",
+  "workflow_id": "wf_20260616_085d0238",
+  "workflow_title": "Civic Analytics Portfolio"
+}

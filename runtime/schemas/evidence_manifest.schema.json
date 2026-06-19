@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "LoopPlane evidence manifest",
+  "type": "object",
+  "required": ["schema_version", "workflow_id", "tasks"],
+  "properties": {
+    "schema_version": {"const": "1.5"},
+    "workflow_id": {"type": "string"},
+    "generated_at": {"type": "string"},
+    "tasks": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["task_id", "status", "evidence_root"],
+        "properties": {
+          "task_id": {"type": "string"},
+          "status": {"type": "string"},
+          "evidence_root": {"type": "string"},
+          "latest_path": {"type": "string"},
+          "latest_run_id": {"type": "string"},
+          "validation_path": {"type": ["string", "null"]},
+          "validation_status": {"type": "string"},
+          "skip_reason": {"type": "string"},
+          "skip_authorization": {"type": "string"}
+        },
+        "additionalProperties": true
+      }
+    }
+  }
+}

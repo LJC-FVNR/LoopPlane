@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "LoopPlane self expansion policy",
+  "type": "object",
+  "properties": {
+    "enabled": {"type": "boolean"},
+    "default_mode": {"type": "string", "enum": ["append_only"]},
+    "max_cycles": {"type": "integer", "minimum": 0},
+    "max_tasks_added_total": {"type": "integer", "minimum": 0},
+    "max_tasks_per_cycle": {"type": "integer", "minimum": 0},
+    "max_repeated_signature_count": {"type": "integer", "minimum": 0},
+    "auto_apply_low_risk": {"type": "boolean"},
+    "require_approval_for_medium_risk": {"type": "boolean"},
+    "require_approval_for_high_risk": {"type": "boolean"},
+    "allow_after_recovery_exhausted": {"type": "boolean"},
+    "allow_after_final_verification_failure": {"type": "boolean"},
+    "allow_when_no_executable_tasks": {"type": "boolean"},
+    "allow_after_objective_gap": {"type": "boolean"},
+    "auto_apply_objective_gap_low_medium_risk": {"type": "boolean"}
+  },
+  "additionalProperties": false
+}

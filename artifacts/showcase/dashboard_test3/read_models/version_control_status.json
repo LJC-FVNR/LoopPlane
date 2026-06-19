@@ -1,0 +1,53 @@
+{
+  "configuration": {
+    "checkpoint_backend": "managed_refs",
+    "config_found": true,
+    "config_path": ".loopplane/workflows/wf_20260616_59c00268/config/version_control.json",
+    "do_not_modify_user_index": true,
+    "do_not_switch_user_branch": true,
+    "enabled": true,
+    "no_remote_push": true,
+    "provider": "git",
+    "refs_namespace": "refs/loopplane/{{workflow_id}}",
+    "repository_mode": "existing_or_local_init",
+    "resolved_refs_namespace": "refs/loopplane/wf_20260616_59c00268"
+  },
+  "errors": [],
+  "generated_at": "2026-06-16T21:26:30Z",
+  "git_available": true,
+  "last_event_seq": null,
+  "latest_checkpoint": null,
+  "ok": true,
+  "plan_source": {
+    "active_plan_file": ".loopplane/workflows/wf_20260616_59c00268/PLAN.md",
+    "kind": "active",
+    "path": ".loopplane/workflows/wf_20260616_59c00268/PLAN.md"
+  },
+  "problem": null,
+  "provider": "git",
+  "repository": {
+    "dirty": true,
+    "dirty_files_count": 9,
+    "head_commit": null,
+    "inside_work_tree": true,
+    "root": "."
+  },
+  "schema_version": "1.5",
+  "source_event_id": null,
+  "source_hashes": {
+    "active_leases": "sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+    "active_plan": "sha256:8bb3fc1978cced1cfaa076a0b9dbb0a7177e6211657ebc9769ef471c84e57957",
+    "events_count": 0,
+    "events_head": null,
+    "events_sha256": "sha256:c884f737785b8e9bacfce32a71ff433cd608b118a4ce9875bb0d4680e48d48ac",
+    "expansion_registry": "sha256:3ef663c23b471d66e4a2f1ff732c315430a8419cdf6a8c0c8228f61b3b00c8d2",
+    "plan": "sha256:8bb3fc1978cced1cfaa076a0b9dbb0a7177e6211657ebc9769ef471c84e57957",
+    "plan_file": ".loopplane/workflows/wf_20260616_59c00268/PLAN.md",
+    "plan_source": "active",
+    "state": "sha256:af943d6de8456cf54a47dfb07dcd06e9b8ca6f806fb952bb39b669b1b9793a69",
+    "validations_manifest": "sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+  },
+  "status": "ok",
+  "warnings": [],
+  "workflow_id": "wf_20260616_59c00268"
+}

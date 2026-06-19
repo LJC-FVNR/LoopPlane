@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "LoopPlane version_control.json",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "enabled",
+    "provider",
+    "default_on",
+    "user_configuration_required",
+    "auto_init_if_missing",
+    "repository_mode",
+    "checkpoint_backend",
+    "refs_namespace",
+    "no_remote_push",
+    "do_not_switch_user_branch",
+    "do_not_modify_user_index",
+    "checkpoint_policy",
+    "commit_policy",
+    "path_policy",
+    "rollback_policy"
+  ],
+  "properties": {
+    "schema_version": {"const": "1.5"},
+    "enabled": {"type": "boolean"},
+    "provider": {"type": "string", "enum": ["git"]},
+    "default_on": {"type": "boolean"},
+    "user_configuration_required": {"type": "boolean"},
+    "auto_init_if_missing": {"type": "boolean"},
+    "repository_mode": {"type": "string", "enum": ["existing_or_local_init"]},
+    "checkpoint_backend": {"type": "string", "enum": ["managed_refs"]},
+    "refs_namespace": {"type": "string", "minLength": 1},
+    "no_remote_push": {"type": "boolean"},
+    "do_not_switch_user_branch": {"type": "boolean"},
+    "do_not_modify_user_index": {"type": "boolean"},
+    "checkpoint_policy": {"type": "object"},
+    "run_metadata": {
+      "type": "object",
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "detail_level": {"type": "string", "enum": ["status", "full"]}
+      }
+    },
+    "commit_policy": {"type": "object"},
+    "path_policy": {
+      "type": "object",
+      "required": ["include", "exclude"],
+      "properties": {
+        "include": {"type": "array", "items": {"type": "string"}},
+        "exclude": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "rollback_policy": {"type": "object"}
+  }
+}
