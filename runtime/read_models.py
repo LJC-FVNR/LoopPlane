@@ -732,7 +732,7 @@ def _objective_model(paths: WorkflowPaths, *, objectives: Sequence[Any], parse_e
         result_verdict = str(_mapping_value(result, "verdict") or "").lower() if isinstance(result, Mapping) else ""
         if closed:
             status = "closed"
-        elif objective.status == "!" or result_status == "blocked" or result_verdict in {"unmet_repeated", "blocked_external"}:
+        elif objective.status == "!" or result_status == "blocked" or result_verdict == "blocked_external":
             status = "objective_unresolved"
         elif expandable:
             status = "needs_expansion"

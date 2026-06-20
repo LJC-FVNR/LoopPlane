@@ -104,3 +104,13 @@ Also write `{{role_output_dir}}/agent_status.json` with:
 Use agent judgment. Deterministic facts are evidence, not the final authority.
 If task validations passed but a high-level objective is still not reviewable or
 not decision-useful, mark the objective unmet and explain the gap.
+
+Respect objective self-expansion policy. If an objective declares
+`unmet_action: self_expand` and its configured expansion budget is not
+exhausted, do not use `unmet_repeated` with `escalate_unresolved` merely because
+the latest follow-up failed or a narrower human scope decision would be
+convenient. Return `unmet_expandable`, `unmet_action: self_expand`, and
+`expandable: true` for gaps that can still be attacked by materially different
+phases. Reserve `unmet_repeated`/`escalate_unresolved` for exhausted objective
+expansion budget, true external blockers, or cases where the plan explicitly
+permits unresolved human scope escalation.

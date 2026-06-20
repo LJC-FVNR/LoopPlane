@@ -529,6 +529,83 @@ class ObjectiveGateTest(unittest.TestCase):
             self.assertEqual(candidate["expansion_type"], "objective_gap")
             self.assertEqual(candidate["target_objective_ids"], ["PO1"])
 
+    def test_unmet_repeated_uses_remaining_objective_expansion_budget(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp)
+            init_project(project, "Repeated objective gap with remaining budget fixture")
+            write_objective_plan(project, max_expansions=50)
+            wid = workflow_id(project)
+            plan_sha = "sha256:" + sha256((project / "PLAN.md").read_bytes()).hexdigest()
+            report_path = project / ".loopplane" / "runtime" / "objectives" / "phases" / "P0" / "objective_verification.json"
+            write_json(
+                report_path,
+                {
+                    "schema_version": "1.5",
+                    "workflow_id": wid,
+                    "scope": "phase",
+                    "phase_id": "P0",
+                    "phase_title": "Phase P0: Produce Baseline",
+                    "status": "unmet",
+                    "verified_at": "2026-01-01T00:00:00Z",
+                    "plan_sha256": plan_sha,
+                    "objective_results": [
+                        {
+                            "objective_id": "PO1",
+                            "status": "unmet",
+                            "verdict": "unmet_repeated",
+                            "confidence": "high",
+                            "evidence_reviewed": [".loopplane/results/T001/latest.json"],
+                            "agent_rationale": "The latest follow-up remains insufficient.",
+                            "gap_summary": "A materially different expansion is still possible.",
+                            "unmet_action": "escalate_unresolved",
+                            "expandable": False,
+                        }
+                    ],
+                    "summary": {"total": 1, "passed": 0, "unmet": 1, "blocked": 0, "waived": 0},
+                },
+            )
+            write_json(
+                project / ".loopplane" / "runtime" / "expansion_registry.json",
+                {
+                    "schema_version": "1.5",
+                    "workflow_id": wid,
+                    "cycle": 5,
+                    "events": [],
+                    "proposals": [
+                        {
+                            "proposal_id": f"exp_prior_{index}",
+                            "workflow_id": wid,
+                            "status": "applied",
+                            "created_at": "2026-01-01T00:00:00Z",
+                            "expansion_type": "objective_gap",
+                            "resolution_strategy": "append_followup_only",
+                            "loop_signature": f"sig-{index}",
+                            "target_objective_ids": ["PO1"],
+                        }
+                        for index in range(5)
+                    ],
+                },
+            )
+
+            apply_result = apply_objective_verification_report(project, report_path)
+            self.assertTrue(apply_result["ok"], json.dumps(apply_result, indent=2, sort_keys=True))
+            plan_text = (project / "PLAN.md").read_text(encoding="utf-8")
+            self.assertIn("- [ ] `PO1` Baseline table is sufficient", plan_text)
+            self.assertNotIn("- [!] `PO1`", plan_text)
+
+            snapshot = load_scheduler_snapshot(project)
+            gate = snapshot["objective_reports"]["by_key"]["phase:P0"]
+            self.assertEqual(gate["status"], "needs_expansion")
+            self.assertEqual(gate["expandable_objective_ids"], ["PO1"])
+            self.assertEqual(gate["objective_expansion_counts"]["PO1"], 5)
+            self.assertEqual(gate["objective_expansion_limits"]["PO1"], 50)
+            candidate = expansion_candidate(snapshot, mode="objective_gap")
+            self.assertIsNotNone(candidate)
+            assert candidate is not None
+            self.assertEqual(candidate["target_objective_ids"], ["PO1"])
+            selected = select_next_action(snapshot)
+            self.assertEqual(selected["action"], "run_expansion_planner")
+
     def test_blocked_task_is_terminal_for_phase_objective_gate(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             project = Path(tmp)

@@ -599,7 +599,9 @@ def _marker_for_objective_result(result: Mapping[str, Any], *, current: str) -> 
         return "x"
     if verdict == "waived_by_policy" or status == "waived":
         return "-"
-    if verdict in {"unmet_repeated", "blocked_external"} or status == "blocked":
+    # Repeated unmet objectives may still be expandable; the scheduler owns
+    # the max_expansions budget check before an objective becomes unresolved.
+    if verdict == "blocked_external" or status == "blocked":
         return "!"
     if status == "partial":
         return "~"
