@@ -941,6 +941,7 @@ def _write_default_final_output(
 
 def _process_env(adapter_input: AdapterInput, paths: Any) -> dict[str, str]:
     env = dict(os.environ)
+    env.update(_project_dotenv_env(adapter_input, env))
     env.update(dict(adapter_input.env))
     env.update(
         {
@@ -960,6 +961,60 @@ def _process_env(adapter_input: AdapterInput, paths: Any) -> dict[str, str]:
     if adapter_input.task_evidence_run_dir is not None:
         env["LOOPPLANE_TASK_EVIDENCE_RUN_DIR"] = adapter_input.task_evidence_run_dir.as_posix()
     return env
+
+
+
+def _project_dotenv_env(adapter_input: AdapterInput, base_env: Mapping[str, str]) -> dict[str, str]:
+    """Load project-local .env values into the child process only.
+
+    The values returned here are not serialized into adapter_input.json, runner
+    config, or LoopPlane logs by this adapter. Existing process environment
+    values take precedence over .env values.
+    """
+    dotenv = _project_dotenv_path(adapter_input)
+    if dotenv is None or not dotenv.is_file():
+        return {}
+    loaded: dict[str, str] = {}
+    try:
+        lines = dotenv.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return loaded
+    for raw_line in lines:
+        key_value = _parse_dotenv_assignment(raw_line)
+        if key_value is None:
+            continue
+        key, value = key_value
+        if key in base_env or key in loaded:
+            continue
+        loaded[key] = value
+    return loaded
+
+
+def _project_dotenv_path(adapter_input: AdapterInput) -> Path | None:
+    cwd = adapter_input.cwd.strip()
+    if not cwd or "{{" in cwd:
+        return None
+    try:
+        project = Path(cwd).expanduser().resolve()
+    except OSError:
+        return None
+    return project / ".env"
+
+
+def _parse_dotenv_assignment(line: str) -> tuple[str, str] | None:
+    stripped = line.strip()
+    if not stripped or stripped.startswith("#") or "=" not in stripped:
+        return None
+    if stripped.startswith("export "):
+        stripped = stripped[len("export ") :].lstrip()
+    key, value = stripped.split("=", 1)
+    key = key.strip()
+    if not key or not key.replace("_", "A").isalnum() or key[0].isdigit():
+        return None
+    value = value.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+        value = value[1:-1]
+    return key, value
 
 
 def _write_adapter_child_pid_file(path_value: str | None, pid: int) -> None:
