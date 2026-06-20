@@ -234,7 +234,7 @@ def expansion_candidate(snapshot: Mapping[str, Any], *, mode: str = "default") -
         final_report = _latest_final_verifier_failure(paths)
         if final_report is not None:
             blockers = [dict(item) for item in final_report.get("blockers", []) if isinstance(item, Mapping)]
-            expandable = [item for item in blockers if item.get("expandable") is not False]
+            expandable = [item for item in blockers if _final_verifier_blocker_allows_expansion(item)]
             if expandable or not blockers:
                 return {
                     "trigger": "final_verification_failed",
@@ -1523,6 +1523,13 @@ def _latest_final_verifier_failure(paths: WorkflowPaths) -> dict[str, Any] | Non
     if report.get("pass") is True or report.get("status") == "pass" or report.get("ok") is True:
         return None
     return dict(report)
+
+
+def _final_verifier_blocker_allows_expansion(blocker: Mapping[str, Any]) -> bool:
+    if blocker.get("expandable") is not False:
+        return True
+    details = blocker.get("details") if isinstance(blocker.get("details"), Mapping) else {}
+    return str(details.get("recommended_action") or "").strip().lower() == "self_expand"
 
 
 def _objective_gap_from_snapshot(snapshot: Mapping[str, Any]) -> dict[str, Any] | None:

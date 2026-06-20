@@ -328,6 +328,9 @@ class FinalVerifierTest(unittest.TestCase):
             self.assertEqual(result["final_reviewer"]["review"]["status"], "rejected")
             blocker = next(item for item in result["blockers"] if item["check"] == "semantic_final_review")
             self.assertEqual(blocker["details"]["recommended_action"], "self_expand")
+            self.assertTrue(blocker["expandable"])
+            self.assertEqual(blocker["kind"], "semantic_final_review")
+            self.assertEqual(blocker["suggested_expansion_type"], "final_verifier_retry")
 
     def test_enabled_final_reviewer_agent_can_accept_over_narrow_validation_failure(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

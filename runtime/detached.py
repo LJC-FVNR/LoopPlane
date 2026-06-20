@@ -568,6 +568,9 @@ def _final_verification_has_expandable_blocker(execution: Any) -> bool:
             continue
         if blocker.get("expandable") is True:
             return True
+        details = blocker.get("details") if isinstance(blocker.get("details"), Mapping) else {}
+        if str(details.get("recommended_action") or "").strip().lower() == "self_expand":
+            return True
     return False
 
 

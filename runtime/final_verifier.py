@@ -1572,6 +1572,7 @@ def _classified_blocker(check: Mapping[str, Any]) -> dict[str, Any]:
     name = str(check.get("check") or "unknown")
     message = str(check.get("message") or "")
     details = check.get("details") if isinstance(check.get("details"), Mapping) else {}
+    recommended_action = str(details.get("recommended_action") or "").strip().lower()
     blocker: dict[str, Any] = {
         "check": name,
         "message": message,
@@ -1638,6 +1639,14 @@ def _classified_blocker(check: Mapping[str, Any]) -> dict[str, Any]:
         blocker["kind"] = "runtime_configuration"
     elif name in {"no_active_run_leases", "no_active_background_jobs", "no_pending_approval_requests"}:
         blocker["kind"] = "runtime_wait"
+    elif name == "semantic_final_review" and recommended_action == "self_expand":
+        blocker.update(
+            {
+                "kind": "semantic_final_review",
+                "expandable": True,
+                "suggested_expansion_type": "final_verifier_retry",
+            }
+        )
     if details:
         blocker["details"] = _json_safe(details)
     return blocker

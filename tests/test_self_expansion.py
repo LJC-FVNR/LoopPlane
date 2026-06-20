@@ -667,6 +667,43 @@ class SelfExpansionTest(unittest.TestCase):
             self.assertEqual(action["action"], "run_expansion_planner")
             self.assertEqual(action["selected"]["role"], "expansion_planner")
 
+    def test_scheduler_selects_expansion_for_semantic_final_review_self_expand(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "Semantic final review expansion.")
+            write_plan(project, first_status="x", second_status="x")
+            record_active_plan(project)
+            write_json(
+                project / ".loopplane" / "runtime" / "final_verification_report.json",
+                {
+                    "schema_version": "1.5",
+                    "workflow_id": json.loads((project / ".loopplane" / "config" / "workflow.json").read_text(encoding="utf-8"))["workflow_id"],
+                    "status": "fail",
+                    "pass": False,
+                    "ok": False,
+                    "blockers": [
+                        {
+                            "check": "semantic_final_review",
+                            "message": "Final reviewer rejected completion semantics.",
+                            "kind": "non_expandable",
+                            "expandable": False,
+                            "details": {
+                                "status": "rejected",
+                                "recommended_action": "self_expand",
+                                "rationale": "Research bar is unmet and expansion budget remains.",
+                            },
+                        }
+                    ],
+                },
+            )
+
+            action = select_next_action(load_scheduler_snapshot(project))
+
+            self.assertEqual(action["action"], "run_expansion_planner")
+            self.assertEqual(action["selected"]["role"], "expansion_planner")
+            self.assertEqual(action["selected"]["candidate"]["trigger"], "final_verification_failed")
+            self.assertEqual(action["selected"]["candidate"]["blockers"][0]["check"], "semantic_final_review")
+
     def test_reopen_expansion_failure_after_added_evidence_task_is_terminal(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             project = Path(tmp) / "project"
