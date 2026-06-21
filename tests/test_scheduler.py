@@ -869,13 +869,21 @@ class SchedulerSelectionTest(unittest.TestCase):
                 processes,
             )
 
-    def test_stale_dead_active_run_lease_requires_attention(self) -> None:
+    def test_stale_dead_active_run_lease_is_reclaimed_and_does_not_block(self) -> None:
+        # A lease whose runner process is *definitively* dead and whose heartbeat
+        # has expired is crash debris (SIGKILL / OOM / host restart): the runner
+        # cannot still be writing, so the scheduler auto-reclaims it (mirroring the
+        # instance-lock's _reclaim_stale_owner) and proceeds with normal work,
+        # instead of wedging the workflow in requires_attention forever.
         with tempfile.TemporaryDirectory() as tmp:
             project = Path(tmp) / "project"
             init_project(project, "Dead active lease fixture.")
             write_active_plan(project, {"P0.T001": " ", "P1.T001": " "})
+            lease_path = (
+                project / ".loopplane" / "runtime" / "active_run_leases" / "run_dead_stale.json"
+            )
             write_json(
-                project / ".loopplane" / "runtime" / "active_run_leases" / "run_dead_stale.json",
+                lease_path,
                 {
                     "schema_version": "1.5",
                     "workflow_id": "wf_test",
@@ -898,23 +906,76 @@ class SchedulerSelectionTest(unittest.TestCase):
 
             result = run_scheduler(project)
 
-            self.assertEqual(result["exit_code"], EXIT_GENERIC_FAILURE, json.dumps(result, indent=2, sort_keys=True))
+            # The dead-stale lease must NOT force requires_attention; the scheduler
+            # reclaims it and advances to dispatch the first executable task.
             selected = result["selected_action"]
-            self.assertEqual(selected["action"], "requires_attention")
-            self.assertIn("active_run_lease_stale_dead", selected["blocking_conditions"])
-            self.assertEqual(selected["selected"]["type"], "active_run_lease_needs_recovery")
-            lease = selected["selected"]["job"]
-            self.assertEqual(lease["run_id"], "run_dead_stale")
-            self.assertEqual(lease["status"], "stale")
-            self.assertEqual(lease["runner_liveness"], "dead")
-            self.assertEqual(lease["status_problem"], "stale_heartbeat")
-            self.assertIn(
-                {"field": "scheduler_pid", "pid": os.getpid(), "liveness": "alive"},
-                lease["process_liveness"]["processes"],
+            self.assertNotEqual(selected["action"], "requires_attention", json.dumps(result, indent=2, sort_keys=True))
+            self.assertNotIn(
+                "active_run_lease_stale_dead",
+                selected.get("blocking_conditions", []),
             )
+            # The lease file is persisted as a released (inactive) terminal status,
+            # so the reclaim survives across ticks and is auditable.
+            released = json.loads(lease_path.read_text(encoding="utf-8"))
+            self.assertEqual(released["status"], "released")
+            self.assertEqual(
+                released["status_problem"], "stale_heartbeat_process_dead_reclaimed"
+            )
+            self.assertEqual(
+                released["released_reason"], "runner_process_dead_and_heartbeat_stale"
+            )
+            self.assertTrue(released.get("released_at"))
             state = json.loads((project / ".loopplane" / "runtime" / "state.json").read_text(encoding="utf-8"))
-            self.assertEqual(state["status"], "requires_attention")
-            self.assertEqual(state["requires_attention"][0]["type"], "active_run_lease_needs_recovery")
+            self.assertNotEqual(state["status"], "requires_attention")
+
+    def test_stale_active_run_lease_with_unknown_liveness_is_not_reclaimed(self) -> None:
+        # Conservative boundary: when runner liveness cannot be determined
+        # ("unavailable"/unknown, e.g. a PID we cannot probe) we must NOT reclaim,
+        # to avoid falsely releasing a lease whose runner may still be alive. The
+        # lease stays intact and the scheduler keeps waiting on it rather than
+        # advancing past it or escalating to requires_attention.
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "Unknown-liveness active lease fixture.")
+            write_active_plan(project, {"P0.T001": " ", "P1.T001": " "})
+            lease_path = (
+                project / ".loopplane" / "runtime" / "active_run_leases" / "run_unknown_stale.json"
+            )
+            write_json(
+                lease_path,
+                {
+                    "schema_version": "1.5",
+                    "workflow_id": "wf_test",
+                    "run_id": "run_unknown_stale",
+                    "node_id": "node_worker_P0_T001_run_unknown_stale",
+                    "task_id": "P0.T001",
+                    "role": "worker",
+                    "runner_id": "worker",
+                    "status": "running",
+                    "heartbeat_at": "2000-01-01T00:00:00Z",
+                    "lease_expires_at": "2000-01-01T00:00:01Z",
+                    "adapter_pid": 99999999,
+                    "scheduler_pid": os.getpid(),
+                    "adapter_result_path": ".loopplane/runtime/runs/run_unknown_stale/adapter_result.json",
+                    "stdout_path": ".loopplane/runtime/runs/run_unknown_stale/stdout.log",
+                    "stderr_path": ".loopplane/runtime/runs/run_unknown_stale/stderr.log",
+                    "final_output_path": ".loopplane/runtime/runs/run_unknown_stale/final.md",
+                },
+            )
+
+            # Force every PID probe to be inconclusive -> aggregate liveness is
+            # "unavailable" (never "dead"), so the reclaim must not trigger.
+            with patch("runtime.scheduler._pid_exists", return_value=None):
+                result = run_scheduler(project)
+
+            selected = result["selected_action"]
+            self.assertNotEqual(
+                selected["action"], "requires_attention", json.dumps(result, indent=2, sort_keys=True)
+            )
+            # The lease is left intact (not reclaimed) and still blocks as a wait.
+            untouched = json.loads(lease_path.read_text(encoding="utf-8"))
+            self.assertNotEqual(untouched.get("status"), "released")
+            self.assertEqual(selected["action"], "wait_background_job")
             self.assertFalse((project / ".loopplane" / "results" / "P0.T001" / "runs").exists())
 
     def test_malformed_active_run_lease_requires_attention(self) -> None:

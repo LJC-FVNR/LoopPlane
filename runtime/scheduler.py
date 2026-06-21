@@ -1080,14 +1080,32 @@ def _read_active_run_leases(paths: WorkflowPaths, *, now: datetime) -> list[dict
         liveness = str(process_liveness.get("liveness") or "unavailable")
         status_problem = None
         normalized_status = status
+        reclaimed = False
         if status not in ACTIVE_RUN_LEASE_ACTIVE_STATUSES:
             normalized_status = "needs_recovery"
             status_problem = f"unknown_status:{status}"
         elif not fresh and alive is True:
             status_problem = "stale_heartbeat_process_alive"
+        elif not fresh and alive is False:
+            # Crash-safe reclaim: an active lease whose runner process is
+            # *definitively* dead (not merely unreachable/unavailable) and whose
+            # heartbeat has expired cannot still be writing. Releasing it mirrors
+            # the scheduler instance-lock's _reclaim_stale_owner and prevents a
+            # dead runner (e.g. SIGKILL, OOM, host restart) from wedging the
+            # workflow in requires_attention forever. Conservative on purpose: we
+            # only reclaim when liveness is "dead", never "unavailable"/unknown,
+            # so a runner on another host is never falsely reclaimed.
+            normalized_status = "released"
+            status_problem = "stale_heartbeat_process_dead_reclaimed"
+            reclaimed = True
         elif not fresh:
             normalized_status = "stale"
             status_problem = "stale_heartbeat"
+        if reclaimed:
+            _release_stale_dead_run_lease(lease_file, lease)
+            # Released leases are inactive: drop from the active set so the
+            # scheduler can proceed with normal work on this same tick.
+            continue
         record = dict(lease)
         record.update(
             {
@@ -1105,6 +1123,21 @@ def _read_active_run_leases(paths: WorkflowPaths, *, now: datetime) -> list[dict
             record["status_problem"] = status_problem
         leases.append(record)
     return leases
+
+
+def _release_stale_dead_run_lease(lease_file: Path, lease: Mapping[str, Any]) -> None:
+    """Persist a 'released' terminal status onto a stale lease whose runner is
+    confirmed dead, so the reclaim survives across ticks and is auditable. Best
+    effort: a failed write simply leaves the lease for the next tick to retry."""
+    try:
+        record = dict(lease)
+        record["status"] = "released"
+        record["status_problem"] = "stale_heartbeat_process_dead_reclaimed"
+        record["released_at"] = utc_timestamp()
+        record["released_reason"] = "runner_process_dead_and_heartbeat_stale"
+        _write_json(lease_file, record)
+    except OSError:
+        pass
 
 
 def _lease_output_inspection(paths: WorkflowPaths, lease: Mapping[str, Any]) -> dict[str, Any]:
