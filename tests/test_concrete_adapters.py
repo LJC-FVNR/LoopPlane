@@ -13,7 +13,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from runtime.adapters.base import AdapterInput, AdapterOutput
-from runtime.adapters.claude_code_cli_adapter import ClaudeCodeCliAdapter
+from runtime.adapters.claude_code_cli_adapter import ClaudeCodeCliAdapter, ClaudeStreamRenderer
 from runtime.adapters.codex_cli_adapter import CodexCliAdapter
 from runtime.adapters.noop_adapter import NoopAdapter
 from runtime.adapters.registry import (
@@ -1160,6 +1160,120 @@ class ConcreteAdapterTest(unittest.TestCase):
             self.assertEqual(invocation[0], "claude")
             self.assertNotIn("--dangerously-skip-permissions", invocation)
             self.assertNotIn("--permission-mode", invocation)
+
+    def test_claude_code_cli_injects_streaming_output_flags(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = runner_config(adapter="claude_code_cli", command="claude")
+            invocation, _stdin = ClaudeCodeCliAdapter().build_invocation(adapter_input(root, config))
+
+            self.assertIn("--print", invocation)
+            self.assertIn("--output-format=stream-json", invocation)
+            self.assertIn("--verbose", invocation)
+            # Single-token form keeps the policy classifier from mistaking the
+            # value for a positional subcommand.
+            self.assertNotIn("stream-json", invocation)
+
+    def test_claude_code_cli_streaming_flags_can_be_disabled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = runner_config(
+                adapter="claude_code_cli",
+                command="claude",
+                adapter_options={"claude_stream_logs": False},
+            )
+            invocation, _stdin = ClaudeCodeCliAdapter().build_invocation(adapter_input(root, config))
+
+            self.assertNotIn("--output-format=stream-json", invocation)
+            self.assertNotIn("--output-format", invocation)
+
+    def test_claude_code_cli_respects_explicit_output_format(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = runner_config(
+                adapter="claude_code_cli",
+                command="claude",
+                args=("--output-format", "json"),
+            )
+            invocation, _stdin = ClaudeCodeCliAdapter().build_invocation(adapter_input(root, config))
+
+            self.assertNotIn("--output-format=stream-json", invocation)
+            self.assertEqual(invocation.count("--output-format"), 1)
+
+    def test_claude_stream_renderer_compacts_events_and_captures_final(self) -> None:
+        renderer = ClaudeStreamRenderer(result_preview_chars=40)
+        events = [
+            {"type": "system", "subtype": "init", "model": "opus-test"},
+            {"type": "stream_event", "event": {"x": "y" * 5000}},  # token noise: dropped
+            {"type": "assistant", "message": {"content": [{"type": "text", "text": "Reading the file."}]}},
+            {
+                "type": "assistant",
+                "message": {"content": [{"type": "tool_use", "name": "Read", "input": {"file_path": "/tmp/data.txt"}}]},
+            },
+            {
+                "type": "user",
+                "message": {"content": [{"type": "tool_result", "content": "X" * 8000}]},  # bloat: clipped
+            },
+            {"type": "result", "subtype": "success", "result": "It has 200 lines.", "duration_ms": 9000, "total_cost_usd": 0.05},
+        ]
+        raw = "\n".join(json.dumps(e) for e in events)
+        rendered = "\n".join(line for line in (renderer.render_line(l) for l in raw.splitlines()) if line is not None)
+
+        self.assertIn("▶ session start · model=opus-test", rendered)
+        self.assertIn("Reading the file.", rendered)
+        self.assertIn("🔧 Read(/tmp/data.txt)", rendered)
+        # The 8000-byte tool result is summarized to a size + clipped preview.
+        self.assertIn("↳ result (8000b):", rendered)
+        self.assertIn("…(+", rendered)
+        self.assertIn("✓ done · 9s · $0.0500", rendered)
+        # The token-streaming noise event is dropped entirely.
+        self.assertNotIn("stream_event", rendered)
+        # Rendered output is dramatically smaller than the raw stream.
+        self.assertLess(len(rendered), len(raw) / 10)
+        # Final answer is captured for final.md.
+        self.assertEqual(renderer.final_output(), "It has 200 lines.")
+
+    def test_claude_stream_renderer_falls_back_to_assistant_text(self) -> None:
+        # No terminal result line (process killed mid-turn): recover partial text.
+        renderer = ClaudeStreamRenderer()
+        events = [
+            {"type": "system", "subtype": "init"},
+            {"type": "assistant", "message": {"content": [{"type": "text", "text": "first"}, {"type": "text", "text": "second"}]}},
+        ]
+        for event in events:
+            renderer.render_line(json.dumps(event))
+        self.assertEqual(renderer.final_output(), "first\nsecond")
+
+    def test_claude_stream_renderer_passes_through_non_json(self) -> None:
+        # Text-output mode or an error banner: keep the line verbatim.
+        renderer = ClaudeStreamRenderer()
+        self.assertEqual(renderer.render_line("API Error: Internal server error"), "API Error: Internal server error")
+        self.assertIsNone(renderer.render_line("   "))
+        self.assertEqual(renderer.final_output(), "")
+
+    def test_claude_stream_renderer_can_drop_result_preview(self) -> None:
+        # preview_chars=0 keeps the size marker but omits the content entirely.
+        renderer = ClaudeStreamRenderer(result_preview_chars=0)
+        line = renderer.render_line(
+            json.dumps({"type": "user", "message": {"content": [{"type": "tool_result", "content": "secret payload"}]}})
+        )
+        self.assertEqual(line, "   ↳ result (14b)")
+        self.assertNotIn("secret", line)
+
+    def test_claude_adapter_makes_transform_only_when_streaming(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            streaming = runner_config(adapter="claude_code_cli", command="claude")
+            self.assertIsInstance(
+                ClaudeCodeCliAdapter().make_stdout_transform(adapter_input(root, streaming)),
+                ClaudeStreamRenderer,
+            )
+            disabled = runner_config(
+                adapter="claude_code_cli",
+                command="claude",
+                adapter_options={"claude_stream_logs": False},
+            )
+            self.assertIsNone(ClaudeCodeCliAdapter().make_stdout_transform(adapter_input(root, disabled)))
 
     def test_registry_resolves_builtin_adapters(self) -> None:
         names = available_adapter_names()

@@ -5,6 +5,7 @@ import signal
 import shlex
 import shutil
 import subprocess
+import threading
 import time
 from dataclasses import asdict
 from pathlib import Path
@@ -113,6 +114,10 @@ class ShellAdapter(AgentAdapter):
             )
 
         env = _process_env(adapter_input, paths)
+        # A stdout transform (e.g. the Claude adapter's stream-json renderer)
+        # rewrites each line before it lands in stdout.log; absent one, stdout is
+        # redirected straight to the file with zero overhead (shell/codex path).
+        stdout_transform = self.make_stdout_transform(adapter_input)
         with acquire_runner_resource_lock(adapter_input) as runner_lock:
             process: subprocess.Popen[str] | None = None
             process_result: Mapping[str, Any] = {
@@ -131,12 +136,20 @@ class ShellAdapter(AgentAdapter):
                         cwd=adapter_input.cwd,
                         env=env,
                         stdin=subprocess.PIPE if stdin_text is not None else None,
-                        stdout=stdout_file,
+                        stdout=subprocess.PIPE if stdout_transform is not None else stdout_file,
                         stderr=stderr_file,
                         text=True,
                         start_new_session=True,
                     )
                     _write_adapter_child_pid_file(env.get("LOOPPLANE_ADAPTER_CHILD_PID_FILE"), process.pid)
+                    pump_thread: threading.Thread | None = None
+                    if stdout_transform is not None and process.stdout is not None:
+                        pump_thread = threading.Thread(
+                            target=_pump_transformed_stdout,
+                            args=(process.stdout, stdout_file, stdout_transform),
+                            daemon=True,
+                        )
+                        pump_thread.start()
                     _write_process_stdin(process, stdin_text)
                     process_result = _wait_for_process(
                         process,
@@ -144,6 +157,10 @@ class ShellAdapter(AgentAdapter):
                         completion_marker_path=_completion_marker_path(adapter_input),
                         completion_marker_grace_seconds=_completion_marker_grace_seconds(adapter_input),
                     )
+                    if pump_thread is not None:
+                        # The pipe reaches EOF once the child (and its group) exit,
+                        # so the pump drains and returns; bound the wait defensively.
+                        pump_thread.join(timeout=30)
             except OSError as error:
                 if process is not None and process.poll() is None:
                     _terminate_process_group(process)
@@ -181,7 +198,7 @@ class ShellAdapter(AgentAdapter):
                 completed_stderr = _read_output_text(paths.stderr_path)
                 _write_default_final_output(
                     paths.final_output_path,
-                    stdout=completed_stdout,
+                    stdout=_final_output_text(stdout_transform, completed_stdout),
                     stderr=completed_stderr,
                     exit_code=TIMEOUT_EXIT_CODE,
                     timed_out=True,
@@ -218,7 +235,7 @@ class ShellAdapter(AgentAdapter):
             if not _has_text(paths.final_output_path):
                 _write_default_final_output(
                     paths.final_output_path,
-                    stdout=completed_stdout,
+                    stdout=_final_output_text(stdout_transform, completed_stdout),
                     stderr=completed_stderr,
                     exit_code=exit_code,
                     timed_out=False,
@@ -264,6 +281,65 @@ class ShellAdapter(AgentAdapter):
 
     def build_invocation(self, adapter_input: AdapterInput) -> tuple[list[str], str | None]:
         return build_shell_invocation(adapter_input)
+
+    def make_stdout_transform(self, adapter_input: AdapterInput) -> "StdoutTransform | None":
+        """Return a line transform for the child's stdout, or None for raw passthrough.
+
+        The base shell adapter (and the codex adapter) return None, so stdout is
+        redirected straight to stdout.log with no extra threads or copies.
+        Subclasses whose stdout is a machine format (e.g. the Claude adapter's
+        stream-json) return a transform that renders each line to a compact,
+        human-readable form before it is written, and exposes the final answer
+        for final.md via ``final_output()``.
+        """
+        return None
+
+
+class StdoutTransform:
+    """Renders a child process's stdout line-by-line as it streams.
+
+    ``render_line`` is called for each raw stdout line and returns the text to
+    write to stdout.log (without a trailing newline), or None to drop the line.
+    ``final_output`` returns the human-readable final answer accumulated across
+    the stream, used as the fallback contents of final.md.
+    """
+
+    def render_line(self, line: str) -> str | None:  # pragma: no cover - interface
+        raise NotImplementedError
+
+    def final_output(self) -> str:  # pragma: no cover - interface
+        raise NotImplementedError
+
+
+def _pump_transformed_stdout(source: Any, sink: Any, transform: StdoutTransform) -> None:
+    """Read raw stdout lines, render each via the transform, and flush to the log.
+
+    Runs on a dedicated thread so rendered lines reach stdout.log as the child
+    emits them, keeping the dashboard's live log tail current. Flushing per line
+    is what makes the output observable mid-run.
+    """
+    try:
+        for raw_line in source:
+            rendered = transform.render_line(raw_line.rstrip("\n"))
+            if rendered is None:
+                continue
+            sink.write(rendered if rendered.endswith("\n") else rendered + "\n")
+            sink.flush()
+    except (OSError, ValueError):
+        # Pipe closed underneath us (process killed / log file closed on timeout);
+        # nothing more to drain.
+        return
+    finally:
+        try:
+            source.close()
+        except OSError:
+            pass
+
+
+def _final_output_text(transform: "StdoutTransform | None", completed_stdout: str) -> str:
+    if transform is not None:
+        return transform.final_output()
+    return completed_stdout
 
 
 def build_shell_invocation(adapter_input: AdapterInput) -> tuple[list[str], str | None]:

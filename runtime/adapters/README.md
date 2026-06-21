@@ -56,6 +56,24 @@ carry stable `code` values such as `command_missing`,
 `unsupported_prompt_delivery`, `output_directory_unwritable`, and
 `policy_mismatch`; `loopplane doctor-agent` prints those codes in text output too.
 
+The `claude_code_cli` adapter injects `--print --output-format=stream-json
+--verbose` so the Claude CLI emits one JSON event per line as work happens
+(plain `--print` text output only flushes at the end of the turn, leaving
+`stdout.log` empty until completion). Raw stream-json is unreadable and large —
+echoed tool inputs and results are often >70% of its bytes — so the adapter
+pipes stdout through `ClaudeStreamRenderer`, which rewrites each event to a
+compact line as it streams: assistant text verbatim, tool calls as `🔧
+Name(arg)`, tool results as `↳ result (Nb): <preview>` (size plus a clipped
+preview), and a closing `✓ done · Ns · $cost` marker; token-streaming chunks are
+dropped. This keeps the dashboard's live log tail current while shrinking
+`stdout.log` roughly 25–35x, and the renderer captures the final answer for
+`final.md`. Lines that are not JSON (text-output mode, an error banner) pass
+through verbatim. Tuning knobs in `adapter_options`: set `claude_stream_logs:
+false` to revert to buffered plain-text output (no streaming, no renderer);
+`claude_log_result_preview_chars` to change the tool-result preview length (set
+`0` to keep only the size marker). Supplying your own `--output-format` also
+disables the injection and renderer, leaving your chosen format untouched.
+
 Authentication probes are configured under the runner's `doctor` object with
 `auth_check_command` or `auth_env_vars` because provider-specific login checks
 are intentionally outside the stable adapter protocol. `check_auth_command` is

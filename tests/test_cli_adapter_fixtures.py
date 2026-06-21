@@ -282,12 +282,30 @@ class CliAdapterFixtureIntegrationTest(unittest.TestCase):
                 "CLAUDE FINAL\nsource=file\nRun through the fake Claude fixture.\n",
             )
             self.assertEqual(record["executable"], (fixture_bin / "claude").resolve().as_posix())
-            self.assertEqual(record["argv"], ["--dangerously-skip-permissions", "--prompt-file", current_input.prompt_path.as_posix()])
+            self.assertEqual(
+                record["argv"],
+                [
+                    "--print",
+                    "--output-format=stream-json",
+                    "--verbose",
+                    "--dangerously-skip-permissions",
+                    "--prompt-file",
+                    current_input.prompt_path.as_posix(),
+                ],
+            )
             self.assertEqual(record["prompt_source"], "file")
             self.assertEqual(record["prompt"], "Run through the fake Claude fixture.\n")
             self.assertEqual(
                 list(result.adapter_metadata["argv"]),
-                ["claude", "--dangerously-skip-permissions", "--prompt-file", current_input.prompt_path.as_posix()],
+                [
+                    "claude",
+                    "--print",
+                    "--output-format=stream-json",
+                    "--verbose",
+                    "--dangerously-skip-permissions",
+                    "--prompt-file",
+                    current_input.prompt_path.as_posix(),
+                ],
             )
             self.assertEqual(result.adapter_metadata["delivery_mode"], "stdin_or_prompt_flag")
             self.assertTrue(result.adapter_metadata["external_execution"])
@@ -319,6 +337,9 @@ class CliAdapterFixtureIntegrationTest(unittest.TestCase):
                 list(result.adapter_metadata["argv"]),
                 [
                     "claude",
+                    "--print",
+                    "--output-format=stream-json",
+                    "--verbose",
                     "--model",
                     "claude-opus-test",
                     "--dangerously-skip-permissions",
@@ -353,10 +374,16 @@ class CliAdapterFixtureIntegrationTest(unittest.TestCase):
                 result.final_output_path.read_text(encoding="utf-8"),
                 "CLAUDE FINAL\nsource=stdin\nPrompt delivered to Claude on stdin.\n",
             )
-            self.assertEqual(record["argv"], ["--dangerously-skip-permissions"])
+            self.assertEqual(
+                record["argv"],
+                ["--print", "--output-format=stream-json", "--verbose", "--dangerously-skip-permissions"],
+            )
             self.assertEqual(record["prompt_source"], "stdin")
             self.assertEqual(record["prompt"], "Prompt delivered to Claude on stdin.\n")
-            self.assertEqual(list(result.adapter_metadata["argv"]), ["claude", "--dangerously-skip-permissions"])
+            self.assertEqual(
+                list(result.adapter_metadata["argv"]),
+                ["claude", "--print", "--output-format=stream-json", "--verbose", "--dangerously-skip-permissions"],
+            )
             self.assertEqual(result.adapter_metadata["delivery_mode"], "stdin")
             self.assertTrue(result.adapter_metadata["external_execution"])
             self.assert_adapter_contract(result, current_input, extra_produced={record_path.as_posix()})
@@ -383,12 +410,28 @@ class CliAdapterFixtureIntegrationTest(unittest.TestCase):
                 result.final_output_path.read_text(encoding="utf-8"),
                 "CLAUDE FINAL\nsource=file\nPrompt delivered to Claude by file.\n",
             )
-            self.assertEqual(record["argv"], ["--dangerously-skip-permissions", current_input.prompt_path.as_posix()])
+            self.assertEqual(
+                record["argv"],
+                [
+                    "--print",
+                    "--output-format=stream-json",
+                    "--verbose",
+                    "--dangerously-skip-permissions",
+                    current_input.prompt_path.as_posix(),
+                ],
+            )
             self.assertEqual(record["prompt_source"], "file")
             self.assertEqual(record["prompt"], "Prompt delivered to Claude by file.\n")
             self.assertEqual(
                 list(result.adapter_metadata["argv"]),
-                ["claude", "--dangerously-skip-permissions", current_input.prompt_path.as_posix()],
+                [
+                    "claude",
+                    "--print",
+                    "--output-format=stream-json",
+                    "--verbose",
+                    "--dangerously-skip-permissions",
+                    current_input.prompt_path.as_posix(),
+                ],
             )
             self.assertEqual(result.adapter_metadata["delivery_mode"], "file_argument")
             self.assertTrue(result.adapter_metadata["external_execution"])
@@ -595,7 +638,10 @@ class CliAdapterFixtureIntegrationTest(unittest.TestCase):
             self.assertEqual(result.stdout_path.read_text(encoding="utf-8"), "")
             self.assertEqual(result.stderr_path.read_text(encoding="utf-8"), "CLAUDE FAILURE requested\n")
             self.assertEqual(result.final_output_path.read_text(encoding="utf-8"), "CLAUDE FAILURE requested\n")
-            self.assertEqual(list(result.adapter_metadata["argv"]), ["claude", "--dangerously-skip-permissions", "--fail"])
+            self.assertEqual(
+                list(result.adapter_metadata["argv"]),
+                ["claude", "--print", "--output-format=stream-json", "--verbose", "--dangerously-skip-permissions", "--fail"],
+            )
             self.assertTrue(result.adapter_metadata["external_execution"])
             self.assert_adapter_contract(result, current_input)
 
@@ -623,7 +669,10 @@ class CliAdapterFixtureIntegrationTest(unittest.TestCase):
                 result.final_output_path.read_text(encoding="utf-8"),
                 "Shell adapter command timed out with no output.\n",
             )
-            self.assertEqual(list(result.adapter_metadata["argv"]), ["claude", "--dangerously-skip-permissions", "--sleep", "5"])
+            self.assertEqual(
+                list(result.adapter_metadata["argv"]),
+                ["claude", "--print", "--output-format=stream-json", "--verbose", "--dangerously-skip-permissions", "--sleep", "5"],
+            )
             self.assertTrue(result.adapter_metadata["external_execution"])
             self.assert_adapter_contract(result, current_input)
 
@@ -665,7 +714,16 @@ class CliAdapterFixtureIntegrationTest(unittest.TestCase):
             self.assertEqual(result.final_output_path.read_text(encoding="utf-8"), "Command blocked by permission policy.\n")
             self.assertEqual(
                 list(result.adapter_metadata["argv"]),
-                ["git", "--dangerously-skip-permissions", "commit", "-m", "blocked"],
+                [
+                    "git",
+                    "--print",
+                    "--output-format=stream-json",
+                    "--verbose",
+                    "--dangerously-skip-permissions",
+                    "commit",
+                    "-m",
+                    "blocked",
+                ],
             )
             self.assertFalse(result.adapter_metadata["external_execution"])
             self.assertEqual(result.adapter_metadata["policy_decision"]["decision"], "blocked_git_write")
