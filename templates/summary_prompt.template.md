@@ -24,8 +24,8 @@ that make the headline credible or sharpen it. This is reporting, not transcript
 you are mining signal, most of the raw material is noise, and your value is knowing
 the difference.
 
-- Lead with the result, not the activity. "The causal effect now replicates on real,
-  unedited documents across six model families" — not "ran the replication experiment."
+- Lead with the result, not the activity. State what is now true and what it enables,
+  not which steps ran.
 - Quantify the increment when the evidence supports it. A precise number, delta, or
   comparison is worth a paragraph of adjectives. Pull the actual figures from the
   evidence; never invent them.

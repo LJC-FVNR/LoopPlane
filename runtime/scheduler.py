@@ -4337,6 +4337,16 @@ def _finish_objective_verifier_execution(
     node_summary = _worker_node_summary(result)
     _write_json(prepared.role_output_dir / NODE_SUMMARY_FILENAME, node_summary)
     _write_json(prepared.scheduler_run_dir / NODE_SUMMARY_FILENAME, node_summary)
+    # Always leave a human-readable report.md so objective-verifier runs are
+    # traceable like worker runs. If the agent wrote one we keep it; otherwise we
+    # synthesize a deterministic report from the authoritative JSON verification
+    # report (or from the failure/run result when no report exists).
+    _ensure_objective_verifier_report_md(
+        prepared=prepared,
+        project=project,
+        report_path=report_path,
+        result=result,
+    )
     _update_runtime_state(
         paths,
         status="objective_verifier_run_finished" if result_ok else "objective_verifier_run_failed",
@@ -4354,6 +4364,88 @@ def _finish_objective_verifier_execution(
         },
     )
     return result
+
+
+def _ensure_objective_verifier_report_md(
+    *,
+    prepared: PreparedRun,
+    project: Path,
+    report_path: Path,
+    result: Mapping[str, Any],
+) -> None:
+    """Guarantee a human-readable report.md exists for an objective-verifier run.
+
+    The agent is asked to write one, but if it does not (or the run failed before
+    producing output), we synthesize a concise report from the authoritative JSON
+    verification report so every objective gate run is auditable from a single file.
+    Best effort: never raise into the run-completion path."""
+    try:
+        report_md_path = prepared.role_output_dir / "report.md"
+        if report_md_path.is_file() and report_md_path.read_text(encoding="utf-8").strip():
+            return
+        report_json = _read_json_object(report_path, default={})
+        lines = _render_objective_verifier_report_md(report_json, result)
+        report_md_path.parent.mkdir(parents=True, exist_ok=True)
+        report_md_path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+    except (OSError, ValueError):
+        pass
+
+
+def _render_objective_verifier_report_md(
+    report_json: Mapping[str, Any], result: Mapping[str, Any]
+) -> list[str]:
+    scope = str(result.get("objective_scope") or report_json.get("scope") or "objective").strip()
+    phase_id = result.get("objective_phase_id") or report_json.get("phase_id")
+    overall = str(report_json.get("status") or result.get("status") or "unknown").strip()
+    verified_at = str(report_json.get("verified_at") or result.get("ended_at") or "").strip()
+    scope_label = f"{scope} objective gate" + (f" ({phase_id})" if phase_id else "")
+    lines = [
+        f"# Objective verification: {scope_label}",
+        "",
+        f"- Result: **{overall}**",
+    ]
+    if verified_at:
+        lines.append(f"- Verified at: {verified_at}")
+    summary = report_json.get("summary")
+    if isinstance(summary, Mapping) and summary:
+        parts = [f"{key} {value}" for key, value in summary.items() if value is not None]
+        if parts:
+            lines.append(f"- Tally: {', '.join(parts)}")
+    if not result.get("ok", True):
+        lines.append(f"- Run status: {result.get('status')} ({result.get('classification')})")
+        if result.get("message"):
+            lines.append(f"- Note: {result.get('message')}")
+    lines.append("")
+
+    objective_results = report_json.get("objective_results")
+    if isinstance(objective_results, Sequence) and not isinstance(objective_results, (str, bytes)):
+        for entry in objective_results:
+            if not isinstance(entry, Mapping):
+                continue
+            oid = str(entry.get("objective_id") or "objective").strip()
+            ostatus = str(entry.get("status") or "unknown").strip()
+            verdict = str(entry.get("verdict") or "").strip()
+            confidence = str(entry.get("confidence") or "").strip()
+            header = f"## {oid}: {ostatus}"
+            if verdict:
+                header += f" ({verdict})"
+            lines.append(header)
+            if confidence:
+                lines.append(f"- Confidence: {confidence}")
+            rationale = str(entry.get("agent_rationale") or "").strip()
+            if rationale:
+                lines.append(f"- Judgment: {rationale}")
+            gap = str(entry.get("gap_summary") or "").strip()
+            if gap:
+                lines.append(f"- Gap: {gap}")
+            unmet_action = str(entry.get("unmet_action") or "").strip()
+            if unmet_action and ostatus != "satisfied":
+                lines.append(f"- Unmet action: {unmet_action}")
+            lines.append("")
+    else:
+        lines.append("No per-objective results were recorded in the verification report.")
+        lines.append("")
+    return lines
 
 
 def _finish_expansion_execution(

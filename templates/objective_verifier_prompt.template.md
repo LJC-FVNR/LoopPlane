@@ -82,6 +82,15 @@ Write `{{objective_verification_report_path}}` as JSON with this shape:
 }
 ```
 
+Also write `{{role_output_dir}}/report.md` as a concise, human-readable record of
+this verification so the run is traceable at a glance. Lead with the gate outcome
+(satisfied / unmet / partial), then, per objective, your verdict and the one or two
+sentences of reasoning that decided it — and, when unmet, the specific gap and the
+chosen unmet action. Keep it to the judgment and its basis; do not restate the prompt,
+the rubric, or internal run mechanics. If a report.md is not written, the runtime
+synthesizes a minimal one from the JSON report, so prefer to write the richer version
+yourself.
+
 Also write `{{role_output_dir}}/agent_status.json` with:
 
 ```json
