@@ -1661,21 +1661,23 @@ def _phase_outcome_label(*, done: int, blocked: int, skipped: int, total: int) -
 
 
 def _task_report_title(task: PlanTask, status_label: str) -> str:
+    # Plain, honest titles for the mechanical fallback (no grand "Strategic" framing
+    # the fallback cannot back up). The agent-written highlight report sets its own.
     title = _display_task_title(task)
     if status_label == "blocked":
-        return f"{title}: Leadership Constraint Reading"
+        return f"{title}: status note (blocked)"
     if status_label == "skipped":
-        return f"{title}: Scope Reading"
-    return f"{title}: Strategic Progress Update"
+        return f"{title}: status note (skipped)"
+    return f"{title}: status note"
 
 
 def _phase_report_title(phase_title: str, *, blocked: int, skipped: int) -> str:
     title = _display_phase_title(phase_title)
     if blocked:
-        return f"{title}: Phase Constraint Reading"
+        return f"{title}: phase status note (blocked)"
     if skipped:
-        return f"{title}: Phase Scope Reading"
-    return f"{title}: Phase Progress Report"
+        return f"{title}: phase status note (scope narrowed)"
+    return f"{title}: phase status note"
 
 
 def _prose_from_items(items: Sequence[str]) -> str:
@@ -1735,22 +1737,26 @@ def _task_executive_summary(
     report_text: str,
 ) -> str:
     task_title = _display_task_title(task)
+    # Honest, plain status line. This is the mechanical fallback used only when no
+    # summary agent produced the highlight report; it must NOT fabricate editorial
+    # "leadership" narrative or claim strategic impact the evidence does not show.
+    # The substantive headline comes from the worker's own reported result below,
+    # when one is available; otherwise we state the bare, accurate status.
     if status_label == "done" and validation_status in {"pass", "passed", "pass_with_warnings"}:
-        outcome = (
-            f"At the project level, {task_title} has moved from planned intent into a usable increment that can "
-            "shape the next leadership read of the work."
-        )
+        outcome = f"{task_title}: completed and validated."
     elif status_label == "blocked":
-        outcome = f"{task_title} is still limiting the project's confidence in this part of the plan."
+        outcome = f"{task_title}: blocked and unresolved."
     elif status_label == "skipped":
-        outcome = f"{task_title} has been removed from the active scope, which changes what this portion can claim."
+        outcome = f"{task_title}: skipped (removed from active scope)."
     else:
-        outcome = f"{task_title} now has a recorded outcome, but its strategic meaning remains limited."
+        outcome = f"{task_title}: recorded with no validated result yet."
 
+    # Prefer the worker's own stated result as the headline; the status line is the
+    # lead-in, not a substitute for the actual finding.
     candidates = [
-        *_report_paragraphs(report_text, limit=2),
         _first_text(agent_status.get("human_summary_seed")),
         _summary_candidate_text(agent_status),
+        *_report_paragraphs(report_text, limit=2),
         _first_text(agent_status.get("summary")),
         _first_text(run_execution.get("message")),
         _first_text(validation.get("summary")),
@@ -1758,7 +1764,7 @@ def _task_executive_summary(
     for candidate in candidates:
         clean = _leadership_text(candidate)
         if clean and not _is_low_information_text(clean):
-            return _truncate(f"{clean} {outcome}", 900)
+            return _truncate(f"{outcome} {clean}", 900)
     return outcome
 
 
@@ -1900,34 +1906,22 @@ def _phase_project_meaning(
     phase_objective_rows: Sequence[Mapping[str, str]],
     workflow_objective_rows: Sequence[Mapping[str, str]],
 ) -> str:
+    # Honest, plain phase posture for the mechanical fallback (used only when no
+    # summary agent produced the highlight report). No fabricated editorial framing.
     title = _display_phase_title(phase_title)
     if blocked:
-        posture = (
-            f"{title} has not yet become a fully reliable project increment. It has forward motion, but unresolved "
-            "constraints still limit how confidently leadership can treat this area as settled."
-        )
+        posture = f"{title}: {done}/{total} tasks done, with unresolved blockers remaining."
     elif skipped:
-        posture = (
-            f"{title} now represents a narrower but closed slice of the project. The value is clarity: leadership can "
-            "see what was advanced and what was intentionally left outside this pass."
-        )
+        posture = f"{title}: closed with some tasks intentionally left out of scope ({done}/{total} done)."
     elif total and done == total:
-        posture = (
-            f"{title} now reads as a coherent completed chapter. The project has one more stable base from which to "
-            "make broader scope, sequencing, and confidence decisions."
-        )
+        posture = f"{title}: all {total} tasks completed."
     else:
-        posture = (
-            f"{title} has a terminal record, but the available evidence supports only a cautious strategic reading."
-        )
+        posture = f"{title}: terminal record with {done}/{total} tasks done."
 
     objective_rows = [*phase_objective_rows, *workflow_objective_rows]
     if objective_rows:
         closed = sum(1 for row in objective_rows if str(row.get("Closed") or "").lower() == "yes")
-        if closed == len(objective_rows):
-            posture += " Declared objectives align with that reading, so the phase can be understood as more than task completion."
-        else:
-            posture += " Some declared objectives still temper that reading, so the phase should be presented with a clear confidence boundary."
+        posture += f" Objective gates closed: {closed}/{len(objective_rows)}."
     return posture
 
 
@@ -1940,13 +1934,15 @@ def _phase_executive_summary(
     skipped: int,
     progress_items: Sequence[str],
 ) -> str:
+    # Plain factual intro for the mechanical fallback; the substantive headline,
+    # when present, comes from the phase's own task results (first_progress).
     title = _display_phase_title(phase_title)
     if blocked:
-        intro = f"{title} has advanced, but it is not ready to be treated as fully settled."
+        intro = f"{title}: {done}/{total} tasks done, blockers unresolved."
     elif skipped:
-        intro = f"{title} closed as a deliberate scope adjustment rather than a maximal delivery claim."
+        intro = f"{title}: closed with scope intentionally narrowed ({done}/{total} done)."
     else:
-        intro = f"{title} now reads as a completed project increment."
+        intro = f"{title}: {done}/{total} tasks completed."
     first_progress = _clean_markdown_text(progress_items[0]) if progress_items else ""
     if first_progress and not _is_low_information_text(first_progress):
         return _truncate(f"{intro} {first_progress}", 900)

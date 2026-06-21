@@ -150,6 +150,15 @@ print("fake summary agent wrote markdown")
     config_path.write_text(json.dumps(config, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
+def disable_summary_agent(project: Path) -> None:
+    """Force the deterministic mechanical fallback by disabling the summary runner."""
+    paths = WorkflowPaths.from_config(project, load_workflow_config(project))
+    config_path = paths.config_file("agent_runners.json")
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config["runners"]["summary"]["enabled"] = False
+    config_path.write_text(json.dumps(config, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
 def configure_slow_summary_agent(project: Path) -> None:
     paths = WorkflowPaths.from_config(project, load_workflow_config(project))
     config_path = paths.config_file("agent_runners.json")
@@ -276,10 +285,11 @@ class HumanSummaryTest(unittest.TestCase):
             self.assertNotEqual(phase_record.get("generated_by"), "summary_agent")
             time.sleep(3.2)
 
-    def test_fallback_summary_uses_leadership_report_tone_without_traceability(self) -> None:
+    def test_fallback_summary_is_honest_and_plain_without_traceability(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             project = Path(tmp) / "project"
             init_project(project, "Human summary fallback tone.")
+            disable_summary_agent(project)
             write_plan(project, validation="file_exists: artifacts/result.txt; command_exit_code: 0")
             run_dir = write_worker_run(
                 project,
@@ -300,14 +310,16 @@ class HumanSummaryTest(unittest.TestCase):
             task_content = (paths.results_dir / "T001" / "human_summary.md").read_text(encoding="utf-8")
             phase_content = (paths.results_dir / "phases" / "P0" / "human_summary.md").read_text(encoding="utf-8")
 
-            self.assertIn("Strategic Progress Update", task_content)
-            self.assertIn("project asset", task_content)
+            # Honest, plain mechanical fallback: a status note, not fabricated
+            # "strategic" leadership prose the fallback cannot substantiate.
+            self.assertIn("status note", task_content)
+            self.assertNotIn("Strategic Progress Update", task_content)
+            self.assertNotIn("moved from planned intent", task_content)
             self.assertNotIn("\n## ", task_content)
+            # Still leaks no runtime traceability / mechanics.
             for forbidden in (
                 "Executive Brief",
                 "Traceability",
-                "What Moved Forward",
-                "Why This Matters",
                 "Validation record",
                 "Latest pointer",
                 "Run folder",
@@ -317,7 +329,8 @@ class HumanSummaryTest(unittest.TestCase):
                 "changed file",
             ):
                 self.assertNotIn(forbidden, task_content)
-            self.assertIn("Phase Progress Report", phase_content)
+            self.assertIn("phase status note", phase_content)
+            self.assertNotIn("reads as a coherent completed chapter", phase_content)
             self.assertNotIn("\n## ", phase_content)
             self.assertNotIn("| Task |", phase_content)
 

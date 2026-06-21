@@ -652,7 +652,7 @@ class LoopPlaneInitIntegrationTest(unittest.TestCase):
             self.assertEqual(runners["change_request_planner"]["role"], "change_request_planner")
             self.assertEqual(runners["summary"]["role"], "summary")
             self.assertEqual(runners["summary"]["inherits"], "worker")
-            self.assertFalse(runners["summary"]["enabled"])
+            self.assertTrue(runners["summary"]["enabled"])
             self.assertEqual(runners["summary"]["timeout_seconds"], 900)
             self.assertEqual(runners["final_reviewer"]["role"], "final_reviewer")
             self.assertEqual(runners["final_reviewer"]["timeout_seconds"], 900)

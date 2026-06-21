@@ -1655,7 +1655,7 @@ def _agent_runners_config() -> dict[str, Any]:
             "summary": {
                 "role": "summary",
                 "inherits": "worker",
-                "enabled": False,
+                "enabled": True,
                 "timeout_seconds": DEFAULT_GATE_AGENT_TIMEOUT_SECONDS,
             },
             "final_reviewer": {
