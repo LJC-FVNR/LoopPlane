@@ -612,6 +612,66 @@ class SchedulerSelectionTest(unittest.TestCase):
             self.assertEqual(action["action"], "run_worker")
             self.assertEqual(action["selected"]["task_id"], "P1.T001")
 
+    def test_stale_synthetic_background_job_reconciles_completed_source_agent_status(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "Completed source agent status should release stale synthetic background jobs.")
+            write_active_plan(project, {"P0.T001": "x", "P1.T001": " "})
+            workflow_id = json.loads((project / ".loopplane" / "config" / "workflow.json").read_text(encoding="utf-8"))[
+                "workflow_id"
+            ]
+            run_dir = project / ".loopplane" / "results" / "P0.T001" / "runs" / "run_bg_reconciled"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            status_path = run_dir / "agent_status.json"
+            write_json(
+                status_path,
+                {
+                    "schema_version": "1.5",
+                    "run_id": "run_bg_reconciled",
+                    "task_id": "P0.T001",
+                    "primary_task_id": "P0.T001",
+                    "status": "completed_with_warnings",
+                    "background_state": {
+                        "started_background_work": False,
+                        "next_prompt_ready": True,
+                    },
+                    "started_at": timestamp(timedelta(minutes=-20)),
+                    "ended_at": timestamp(timedelta(minutes=-10)),
+                },
+            )
+            registry_path = project / ".loopplane" / "runtime" / "background_jobs.json"
+            write_json(
+                registry_path,
+                {
+                    "schema_version": "1.5",
+                    "workflow_id": workflow_id,
+                    "jobs": [
+                        {
+                            "job_id": "bg_P0_T001_run_bg_reconciled",
+                            "task_id": "P0.T001",
+                            "run_id": "run_bg_reconciled",
+                            "status": "running",
+                            "next_prompt_ready": False,
+                            "heartbeat_at": timestamp(timedelta(minutes=-20)),
+                            "source_agent_status_path": status_path.relative_to(project).as_posix(),
+                        }
+                    ],
+                },
+            )
+
+            snapshot = load_scheduler_snapshot(project)
+            action = select_next_action(snapshot)
+            registry = json.loads(registry_path.read_text(encoding="utf-8"))
+            job = snapshot["background_jobs"][0]
+
+            self.assertEqual(job["status"], "completed")
+            self.assertTrue(job["next_prompt_ready"])
+            self.assertTrue(job["resolved_from_source_agent_status"])
+            self.assertEqual(registry["jobs"][0]["status"], "completed")
+            self.assertTrue(registry["jobs"][0]["next_prompt_ready"])
+            self.assertEqual(action["action"], "run_worker")
+            self.assertEqual(action["selected"]["task_id"], "P1.T001")
+
     def test_registry_background_job_id_suppresses_duplicate_inferred_status_job(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             project = Path(tmp) / "project"
@@ -663,6 +723,108 @@ class SchedulerSelectionTest(unittest.TestCase):
             self.assertEqual(jobs[0]["status"], "completed")
             self.assertEqual(action["action"], "run_worker")
             self.assertEqual(action["selected"]["task_id"], "P1.T001")
+
+    def test_background_state_active_background_jobs_are_parsed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "Background state active jobs should be authoritative.")
+            write_active_plan(project, {"P0.T001": "x", "P1.T001": " "})
+            run_dir = project / ".loopplane" / "results" / "P0.T001" / "runs" / "run_bg_state"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            write_json(
+                run_dir / "agent_status.json",
+                {
+                    "schema_version": "1.5",
+                    "run_id": "run_bg_state",
+                    "task_id": "P0.T001",
+                    "status": "running_background",
+                    "next_prompt_ready": False,
+                    "started_at": timestamp(timedelta(minutes=-2)),
+                    "background_state": {
+                        "active_background_jobs": [
+                            {
+                                "job_id": "bg_state_real",
+                                "task_id": "P0.T001",
+                                "run_id": "run_bg_state",
+                                "status": "completed",
+                            }
+                        ]
+                    },
+                },
+            )
+
+            snapshot = load_scheduler_snapshot(project)
+            job_ids = [job["job_id"] for job in snapshot["background_jobs"]]
+            action = select_next_action(snapshot)
+
+            self.assertEqual(job_ids, ["bg_state_real"])
+            self.assertEqual(snapshot["background_jobs"][0]["status"], "completed")
+            self.assertTrue(snapshot["background_jobs"][0]["next_prompt_ready"])
+            self.assertEqual(action["action"], "run_worker")
+            self.assertEqual(action["selected"]["task_id"], "P1.T001")
+
+    def test_existing_registry_job_for_run_suppresses_synthetic_background_job(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "Existing registry job should suppress synthetic background status job.")
+            write_active_plan(project, {"P0.T001": " ", "P1.T001": " "})
+            script = write_worker_script(
+                project,
+                "worker_background_registry_only.py",
+                """
+                import json
+                import os
+                from pathlib import Path
+
+                run_dir = Path(os.environ["LOOPPLANE_TASK_EVIDENCE_RUN_DIR"])
+                run_dir.mkdir(parents=True, exist_ok=True)
+                project = run_dir.parents[4]
+                workflow = json.loads((project / ".loopplane" / "config" / "workflow.json").read_text(encoding="utf-8"))
+                registry = {
+                    "schema_version": "1.5",
+                    "workflow_id": workflow["workflow_id"],
+                    "jobs": [
+                        {
+                            "job_id": "bg_registry_real",
+                            "task_id": os.environ["LOOPPLANE_TASK_ID"],
+                            "run_id": os.environ["LOOPPLANE_RUN_ID"],
+                            "status": "completed",
+                            "next_prompt_ready": True,
+                        }
+                    ],
+                }
+                (project / ".loopplane" / "runtime" / "background_jobs.json").write_text(
+                    json.dumps(registry, indent=2, sort_keys=True) + "\\n",
+                    encoding="utf-8",
+                )
+                status = {
+                    "schema_version": "1.5",
+                    "run_id": os.environ["LOOPPLANE_RUN_ID"],
+                    "task_id": os.environ["LOOPPLANE_TASK_ID"],
+                    "status": "running_background",
+                    "next_prompt_ready": False,
+                    "summary_candidate": "Background command was registered separately.",
+                    "evidence_satisfies": [],
+                }
+                (run_dir / "agent_status.json").write_text(
+                    json.dumps(status, indent=2, sort_keys=True) + "\\n",
+                    encoding="utf-8",
+                )
+                """,
+            )
+            configure_shell_worker(project, script)
+
+            result = run_scheduler(project, max_ticks=1, lease_heartbeat_interval_seconds=0.05)
+            registry = json.loads((project / ".loopplane" / "runtime" / "background_jobs.json").read_text(encoding="utf-8"))
+            job_ids = [job["job_id"] for job in registry["jobs"]]
+            next_action = select_next_action(load_scheduler_snapshot(project))
+
+            self.assertEqual(result["exit_code"], EXIT_WAITING_BACKGROUND_JOB, json.dumps(result, indent=2, sort_keys=True))
+            self.assertEqual(job_ids, ["bg_registry_real"])
+            self.assertEqual(registry["jobs"][0]["status"], "completed")
+            self.assertTrue(registry["jobs"][0]["next_prompt_ready"])
+            self.assertEqual(next_action["action"], "run_worker")
+            self.assertEqual(next_action["selected"]["task_id"], "P0.T001")
 
     def test_waiting_config_is_selected_before_recovery_or_work(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2832,6 +2994,45 @@ class FailureRegistryRecoveryTest(unittest.TestCase):
             next_action = select_next_action(load_scheduler_snapshot(project))
             self.assertNotEqual(next_action["action"], "run_recovery")
             self.assertEqual(next_action["action"], "run_expansion_planner")
+
+    def test_exhausted_failure_selects_self_expansion_before_later_executable_task(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "Exhausted failures must expand before later work.")
+            write_active_plan(project, {"P0.T001": "x", "P1.T001": " "})
+            workflow_id = json.loads((project / ".loopplane" / "config" / "workflow.json").read_text(encoding="utf-8"))[
+                "workflow_id"
+            ]
+            registry = {
+                "schema_version": "1.5",
+                "workflow_id": workflow_id,
+                "failures": [
+                    {
+                        "failure_id": "fail_exhausted",
+                        "task_id": "P0.T001",
+                        "run_id": "run_failed",
+                        "status": "exhausted",
+                        "failure_class": "validation_failed",
+                        "failure_signature": "validation:missing-required-evidence",
+                        "summary": "Required validation evidence is still missing.",
+                        "source_validation_path": ".loopplane/results/P0.T001/runs/run_failed/validation.json",
+                        "first_seen_at": "2026-06-10T00:00:00Z",
+                        "last_seen_at": "2026-06-10T00:05:00Z",
+                        "attempts": 1,
+                        "recovery_attempts": 1,
+                        "max_recovery_attempts": 1,
+                        "budget_remaining": False,
+                        "exhausted_reason": "max_recovery_attempts_exhausted",
+                    }
+                ],
+            }
+            write_json(project / ".loopplane" / "runtime" / "failure_registry.json", registry)
+
+            action = select_next_action(load_scheduler_snapshot(project))
+
+            self.assertEqual(action["action"], "run_expansion_planner")
+            self.assertEqual(action["selected"]["candidate"]["trigger"], "recovery_exhausted")
+            self.assertEqual(action["selected"]["candidate"]["target_task_ids"], ["P0.T001"])
 
 
 class SchedulerMainLoopTest(unittest.TestCase):

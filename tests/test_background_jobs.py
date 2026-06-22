@@ -644,6 +644,57 @@ class BackgroundJobRuntimeTest(unittest.TestCase):
             self.assertEqual(status["jobs"][0]["status"], "needs_recovery")
             self.assertEqual(status["jobs"][0]["status_problem"], "missing_parseable_heartbeat")
 
+    def test_status_refresh_reconciles_completed_source_agent_status(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "Background status should honor completed source agent status.")
+            workflow_config = load_workflow_config(project)
+            workflow_id = str(workflow_config["workflow_id"])
+            paths = WorkflowPaths.from_config(project, workflow_config)
+            run_dir = project / ".loopplane" / "results" / "P0.T001" / "runs" / "run_bg_reconciled"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            status_path = run_dir / "agent_status.json"
+            status_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "1.5",
+                        "run_id": "run_bg_reconciled",
+                        "task_id": "P0.T001",
+                        "status": "completed_with_warnings",
+                        "background_state": {
+                            "started_background_work": False,
+                            "next_prompt_ready": True,
+                        },
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            self._write_background_registry(
+                paths,
+                workflow_id,
+                [
+                    {
+                        "job_id": "bg_P0_T001_run_bg_reconciled",
+                        "workflow_id": workflow_id,
+                        "task_id": "P0.T001",
+                        "run_id": "run_bg_reconciled",
+                        "status": "stale",
+                        "next_prompt_ready": False,
+                        "source_agent_status_path": status_path.relative_to(project).as_posix(),
+                    }
+                ],
+            )
+
+            status = list_background_jobs(project, job_id="bg_P0_T001_run_bg_reconciled")
+
+            self.assertEqual(status["status"], "ready")
+            self.assertEqual(status["jobs"][0]["status"], "completed")
+            self.assertTrue(status["jobs"][0]["next_prompt_ready"])
+            self.assertTrue(status["jobs"][0]["resolved_from_source_agent_status"])
+
     def test_manual_resolution_is_not_overwritten_by_supervisor_heartbeat(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             project = Path(tmp) / "project"

@@ -1283,6 +1283,18 @@ def select_next_action(snapshot: Mapping[str, Any]) -> dict[str, Any]:
         )
     considered.append({"candidate": "self_expansion_resolution", "result": "none"})
 
+    recovery_expansion = expansion_candidate(snapshot, mode="no_executable")
+    if recovery_expansion is not None and str(recovery_expansion.get("trigger") or "") == "recovery_exhausted":
+        expansion_action = _self_expansion_selected_action(
+            snapshot,
+            recovery_expansion,
+            reason="Recovery budget is exhausted for an unresolved failure; self-expansion planner selected before later work.",
+            considered=considered,
+        )
+        if expansion_action is not None:
+            return expansion_action
+    considered.append({"candidate": "self_expansion_recovery_exhausted", "result": "none"})
+
     phase_objective_gate = _phase_objective_gate_candidate(snapshot)
     if phase_objective_gate is not None:
         gate_action = _objective_gate_scheduler_action(
@@ -2852,6 +2864,7 @@ _CANDIDATE_SKIP_REASONS = {
     "config_wait": "No configuration wait condition was selected.",
     "recoverable_failure": "No recoverable failure within retry budget was selected.",
     "self_expansion_resolution": "No applied expansion proposal is ready to reopen a target failure.",
+    "self_expansion_recovery_exhausted": "No exhausted recoverable failure required self-expansion before later work.",
     "worker_task": "No executable worker task was selected.",
     "runner_availability": "No active runner availability hold blocked execution.",
     "completion_marker": "No fresh completion marker was available.",
@@ -5115,7 +5128,19 @@ def _agent_next_prompt_ready(agent_status_record: Mapping[str, Any] | None) -> b
     if not isinstance(agent_status_record, Mapping):
         return None
     value = agent_status_record.get("next_prompt_ready")
-    return value if isinstance(value, bool) else None
+    if isinstance(value, bool):
+        return value
+    background = agent_status_record.get("background")
+    if isinstance(background, Mapping):
+        nested = background.get("next_prompt_ready")
+        if isinstance(nested, bool):
+            return nested
+    background_state = agent_status_record.get("background_state")
+    if isinstance(background_state, Mapping):
+        nested = background_state.get("next_prompt_ready")
+        if isinstance(nested, bool):
+            return nested
+    return None
 
 
 def _background_record_next_prompt_ready(
@@ -5150,6 +5175,11 @@ def _agent_wake_next_agent_when(agent_status_record: Mapping[str, Any] | None) -
         nested = background.get("wake_next_agent_when")
         if isinstance(nested, str) and nested.strip():
             return nested.strip()
+    background_state = agent_status_record.get("background_state")
+    if isinstance(background_state, Mapping):
+        nested = background_state.get("wake_next_agent_when")
+        if isinstance(nested, str) and nested.strip():
+            return nested.strip()
     return None
 
 
@@ -5167,13 +5197,15 @@ def _sync_background_jobs_from_agent_status(
     if not raw_records and not blocks_next and not _agent_status_has_background_metadata(agent_status_record):
         return None
     if not raw_records:
-        raw_records = [
-            _synthetic_background_job_record(
-                prepared=prepared,
-                agent_status_record=agent_status_record,
-                worker_status=worker_status,
-            )
-        ]
+        raw_records = _background_job_records_for_run(paths, workflow_id=prepared.workflow_id, run_id=prepared.run_id)
+        if not raw_records:
+            raw_records = [
+                _synthetic_background_job_record(
+                    prepared=prepared,
+                    agent_status_record=agent_status_record,
+                    worker_status=worker_status,
+                )
+            ]
 
     source_agent_status_path = prepared.role_output_dir / "agent_status.json"
     records = [
@@ -5220,6 +5252,22 @@ def _sync_background_jobs_from_agent_status(
     }
 
 
+def _background_job_records_for_run(paths: WorkflowPaths, *, workflow_id: str, run_id: str | None) -> list[Mapping[str, Any]]:
+    run_id_text = _non_empty_text(run_id)
+    if run_id_text is None:
+        return []
+    registry, error = _read_background_job_registry(paths.runtime_dir / BACKGROUND_JOBS_FILENAME, workflow_id=workflow_id)
+    if error:
+        return []
+    records: list[Mapping[str, Any]] = []
+    for job in registry.get("jobs", []):
+        if not isinstance(job, Mapping):
+            continue
+        if str(job.get("run_id") or "") == run_id_text:
+            records.append(dict(job))
+    return records
+
+
 def _agent_status_background_job_records(agent_status_record: Mapping[str, Any]) -> list[Mapping[str, Any]]:
     for field in ("background_jobs", "background_job_records"):
         value = agent_status_record.get(field)
@@ -5234,6 +5282,14 @@ def _agent_status_background_job_records(agent_status_record: Mapping[str, Any])
             records = [item for item in value if isinstance(item, Mapping)]
             if records:
                 return records
+    background_state = agent_status_record.get("background_state")
+    if isinstance(background_state, Mapping):
+        for field in ("active_background_jobs", "background_jobs", "jobs"):
+            value = background_state.get(field)
+            if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+                records = [item for item in value if isinstance(item, Mapping)]
+                if records:
+                    return records
     return []
 
 
@@ -5242,6 +5298,11 @@ def _agent_status_has_background_metadata(agent_status_record: Mapping[str, Any]
     if isinstance(background, Mapping):
         for field in ("pids", "commands", "logs", "wake_next_agent_when"):
             if background.get(field):
+                return True
+    background_state = agent_status_record.get("background_state")
+    if isinstance(background_state, Mapping):
+        for field in ("active_background_jobs", "background_jobs", "jobs", "wake_next_agent_when"):
+            if background_state.get(field):
                 return True
     for field in ("background_pids", "background_commands", "background_logs", "wake_next_agent_when"):
         if agent_status_record.get(field):
@@ -5438,6 +5499,10 @@ def _evaluate_background_job_record(
         job["next_prompt_ready"] = False
         return job
 
+    source_status = _background_status_from_source_agent_status(paths, job)
+    if source_status is not None:
+        return source_status
+
     if status in BACKGROUND_JOB_SAFE_STATUSES:
         job["next_prompt_ready"] = job.get("next_prompt_ready") is not False
         return job
@@ -5496,6 +5561,40 @@ def _evaluate_background_job_record(
     elif status in {"failed", "timed_out", "stale", "needs_recovery"}:
         job["next_prompt_ready"] = False
     return job
+
+
+def _background_status_from_source_agent_status(paths: WorkflowPaths, job: Mapping[str, Any]) -> dict[str, Any] | None:
+    if job.get("manual_resolution") is True:
+        return None
+    if str(job.get("source") or "") == "loopplane_background_start":
+        return None
+    status_path = _resolve_job_path(paths, job.get("source_agent_status_path"))
+    if status_path is None or not status_path.is_file():
+        return None
+    status_record = _read_json_object(status_path, default={})
+    if not isinstance(status_record, Mapping):
+        return None
+    run_id = _non_empty_text(job.get("run_id"))
+    source_run_id = _non_empty_text(status_record.get("run_id"))
+    if run_id is not None and source_run_id is not None and run_id != source_run_id:
+        return None
+    task_id = _non_empty_text(job.get("task_id"))
+    source_task_id = _non_empty_text(status_record.get("task_id") or status_record.get("primary_task_id"))
+    if task_id is not None and source_task_id is not None and task_id != source_task_id:
+        return None
+    worker_status = normalize_worker_status(status_record.get("status")) or str(status_record.get("status") or "").strip().lower()
+    if _agent_status_blocks_next_prompt(worker_status, status_record):
+        return None
+    if _agent_next_prompt_ready(status_record) is True or is_success_worker_status(worker_status):
+        updated = dict(job)
+        updated["status"] = "completed"
+        updated["next_prompt_ready"] = True
+        updated["ended_at"] = _non_empty_text(status_record.get("ended_at")) or updated.get("ended_at") or utc_timestamp()
+        updated["updated_at"] = utc_timestamp()
+        updated["resolved_from_source_agent_status"] = True
+        updated.pop("status_problem", None)
+        return updated
+    return None
 
 
 def _status_from_exit_code_file(paths: WorkflowPaths, job: Mapping[str, Any]) -> str | None:
@@ -6738,6 +6837,7 @@ def _read_background_jobs(paths: WorkflowPaths, *, workflow_id: str, now: dateti
             }
         ]
     jobs: list[dict[str, Any]] = []
+    persistent_change = False
     for index, raw_job in enumerate(registry.get("jobs", [])):
         if not isinstance(raw_job, Mapping):
             continue
@@ -6750,8 +6850,36 @@ def _read_background_jobs(paths: WorkflowPaths, *, workflow_id: str, now: dateti
             job["next_prompt_ready"] = False
         else:
             job["status"] = status
-        jobs.append(_evaluate_background_job_record(job, paths=paths, now=now))
+        evaluated = _evaluate_background_job_record(job, paths=paths, now=now)
+        if _background_job_persistent_fields_changed(job, evaluated):
+            persistent_change = True
+        jobs.append(evaluated)
+    if persistent_change:
+        _write_background_job_registry(
+            paths,
+            {
+                "schema_version": SCHEMA_VERSION,
+                "workflow_id": workflow_id,
+                "updated_at": utc_timestamp(),
+                "jobs": [dict(job) for job in jobs],
+            },
+        )
     return jobs
+
+
+def _background_job_persistent_fields_changed(before: Mapping[str, Any], after: Mapping[str, Any]) -> bool:
+    for field in (
+        "status",
+        "next_prompt_ready",
+        "status_problem",
+        "ended_at",
+        "updated_at",
+        "resolved_from_source_agent_status",
+        "exit_code",
+    ):
+        if before.get(field) != after.get(field):
+            return True
+    return False
 
 
 def _background_jobs_from_recent_agent_statuses(

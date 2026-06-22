@@ -242,6 +242,15 @@ def apply_objective_verification_report(
         errors.append("objective_results must be an array.")
         report_results = []
     objective_by_id = {objective.objective_id: objective for objective in objectives}
+    if isinstance(report, Mapping) and isinstance(report_results, Sequence) and not isinstance(report_results, (str, bytes)):
+        report = _normalize_report_for_objective_policy(
+            report,
+            objective_by_id=objective_by_id,
+            paths=paths,
+        )
+        report_results = report.get("objective_results")
+        if not isinstance(report_results, Sequence) or isinstance(report_results, (str, bytes)):
+            report_results = []
     status_updates: dict[str, str] = {}
     selected_objectives: list[ObjectiveRecord] = []
     for result in report_results:
@@ -579,6 +588,226 @@ def objective_result_is_expandable(result: Mapping[str, Any]) -> bool:
     verdict = str(result.get("verdict") or "").lower()
     status = str(result.get("status") or "").lower()
     return bool(result.get("expandable")) or verdict == "unmet_expandable" or status == "unmet"
+
+
+def _normalize_report_for_objective_policy(
+    report: Mapping[str, Any],
+    *,
+    objective_by_id: Mapping[str, ObjectiveRecord],
+    paths: WorkflowPaths,
+) -> dict[str, Any]:
+    results = report.get("objective_results")
+    if not isinstance(results, Sequence) or isinstance(results, (str, bytes)):
+        return dict(report)
+    expansion_counts = _objective_expansion_counts(paths)
+    normalized_results: list[Any] = []
+    changed = False
+    for result in results:
+        if not isinstance(result, Mapping):
+            normalized_results.append(result)
+            continue
+        objective = objective_by_id.get(str(result.get("objective_id") or ""))
+        if objective is not None and _closed_negative_or_claim_demotion_needs_expansion(
+            result,
+            objective=objective,
+            expansion_counts=expansion_counts,
+        ):
+            normalized = dict(result)
+            normalized["status"] = "unmet"
+            normalized["verdict"] = "unmet_expandable"
+            normalized["expandable"] = True
+            normalized["unmet_action"] = "self_expand"
+            normalized["policy_reason"] = "closed_negative_or_claim_demotion_requires_self_expansion"
+            gap = str(normalized.get("gap_summary") or "").strip()
+            policy_gap = (
+                "Closed negative or claim-demotion judgments cannot satisfy this objective while "
+                "`unmet_action: self_expand` is active and objective expansion budget remains."
+            )
+            normalized["gap_summary"] = f"{gap} {policy_gap}".strip() if gap else policy_gap
+            warnings = normalized.get("warnings")
+            if not isinstance(warnings, list):
+                warnings = []
+            warnings.append(policy_gap)
+            normalized["warnings"] = warnings
+            normalized_results.append(normalized)
+            changed = True
+            continue
+        normalized_results.append(dict(result))
+    if not changed:
+        return dict(report)
+    normalized_report = dict(report)
+    normalized_report["objective_results"] = normalized_results
+    normalized_report["summary"] = _objective_report_summary_from_results(normalized_results)
+    normalized_report["status"] = _objective_report_status_from_results(normalized_results)
+    warnings = normalized_report.get("warnings")
+    if not isinstance(warnings, list):
+        warnings = []
+    warnings.append("One or more closed objective results were downgraded by objective policy normalization.")
+    normalized_report["warnings"] = warnings
+    return normalized_report
+
+
+def _closed_negative_or_claim_demotion_needs_expansion(
+    result: Mapping[str, Any],
+    *,
+    objective: ObjectiveRecord,
+    expansion_counts: Mapping[str, int],
+) -> bool:
+    if not objective_result_is_closed(result):
+        return False
+    if _objective_unmet_action(objective) != "self_expand":
+        return False
+    if not _objective_expansion_budget_remaining(objective, expansion_counts=expansion_counts):
+        return False
+    if _objective_allows_negative_closure(objective):
+        return False
+    result_text = _result_policy_text(result)
+    if _contains_any(
+        result_text,
+        (
+            "claim-demotion",
+            "claim demotion",
+            "negative adjudication",
+            "negative result",
+            "negative closure",
+            "not as positive support",
+            "reject dynamic-mlp superiority",
+            "rejects dynamic-mlp superiority",
+            "does not support the headline",
+            "no positive superiority",
+            "baseline win",
+        ),
+    ):
+        return True
+    objective_text = _objective_policy_text(objective)
+    return "expansion path" in objective_text and _contains_any(
+        result_text,
+        ("expansion path", "follow-up remains", "needs follow-up", "needs further expansion"),
+    )
+
+
+def _objective_allows_negative_closure(objective: ObjectiveRecord) -> bool:
+    text = _objective_policy_text(objective)
+    return _contains_any(
+        text,
+        (
+            "principled negative",
+            "negative result is the objective",
+            "negative result as the objective",
+            "negative closure allowed",
+            "publication-quality negative",
+            "formal publication-quality negative",
+            "claim demotion allowed",
+            "claim-demotion allowed",
+        ),
+    )
+
+
+def _objective_unmet_action(objective: ObjectiveRecord) -> str:
+    values = objective.fields.get("unmet_action") or ()
+    for value in values:
+        clean = str(value).strip().lower()
+        if clean:
+            return clean
+    return ""
+
+
+def _objective_expansion_budget_remaining(
+    objective: ObjectiveRecord,
+    *,
+    expansion_counts: Mapping[str, int],
+) -> bool:
+    return int(expansion_counts.get(objective.objective_id, 0)) < _objective_max_expansions(objective)
+
+
+def _objective_max_expansions(objective: ObjectiveRecord) -> int:
+    values = objective.fields.get("max_expansions") or ()
+    for value in values:
+        try:
+            return max(0, int(str(value).strip()))
+        except ValueError:
+            continue
+    return 25
+
+
+def _objective_expansion_counts(paths: WorkflowPaths) -> dict[str, int]:
+    registry = _read_json_object(paths.runtime_dir / "expansion_registry.json")
+    proposals = registry.get("proposals") if isinstance(registry, Mapping) else []
+    counts: dict[str, int] = {}
+    if not isinstance(proposals, Sequence) or isinstance(proposals, (str, bytes)):
+        return counts
+    for proposal in proposals:
+        if not isinstance(proposal, Mapping):
+            continue
+        if str(proposal.get("expansion_type") or "") != "objective_gap":
+            continue
+        if str(proposal.get("status") or "") not in {"applied", "applied_with_warnings"}:
+            continue
+        target_ids = proposal.get("target_objective_ids")
+        if not isinstance(target_ids, Sequence) or isinstance(target_ids, (str, bytes)):
+            continue
+        for objective_id in target_ids:
+            clean = str(objective_id).strip()
+            if clean:
+                counts[clean] = counts.get(clean, 0) + 1
+    return counts
+
+
+def _objective_report_summary_from_results(results: Sequence[Any]) -> dict[str, int]:
+    summary = {"total": 0, "passed": 0, "unmet": 0, "blocked": 0, "waived": 0}
+    for result in results:
+        if not isinstance(result, Mapping):
+            continue
+        summary["total"] += 1
+        status = str(result.get("status") or "").lower()
+        verdict = str(result.get("verdict") or "").lower()
+        if status == "waived" or verdict == "waived_by_policy":
+            summary["waived"] += 1
+        elif status == "blocked" or verdict == "blocked_external":
+            summary["blocked"] += 1
+        elif objective_result_is_closed(result):
+            summary["passed"] += 1
+        else:
+            summary["unmet"] += 1
+    return summary
+
+
+def _objective_report_status_from_results(results: Sequence[Any]) -> str:
+    summary = _objective_report_summary_from_results(results)
+    if summary["total"] == 0:
+        return "unmet"
+    if summary["unmet"]:
+        return "unmet"
+    if summary["blocked"]:
+        return "blocked"
+    if summary["passed"] and summary["passed"] + summary["waived"] == summary["total"]:
+        return "satisfied"
+    if summary["waived"] == summary["total"]:
+        return "waived"
+    return "partial"
+
+
+def _result_policy_text(result: Mapping[str, Any]) -> str:
+    parts: list[str] = []
+    for field in ("agent_rationale", "gap_summary", "policy_reason", "suggested_followup", "unmet_action"):
+        value = result.get(field)
+        if isinstance(value, str):
+            parts.append(value)
+    warnings = result.get("warnings")
+    if isinstance(warnings, Sequence) and not isinstance(warnings, (str, bytes)):
+        parts.extend(str(item) for item in warnings)
+    return "\n".join(parts).lower()
+
+
+def _objective_policy_text(objective: ObjectiveRecord) -> str:
+    parts = [objective.text, objective.block]
+    for values in objective.fields.values():
+        parts.extend(str(value) for value in values)
+    return "\n".join(parts).lower()
+
+
+def _contains_any(text: str, needles: Sequence[str]) -> bool:
+    return any(needle in text for needle in needles)
 
 
 def _objectives_for_scope(objectives: Sequence[ObjectiveRecord], *, scope: str, phase_id: str | None) -> list[ObjectiveRecord]:

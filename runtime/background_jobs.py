@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from runtime.adapters.base import utc_timestamp
+from runtime.agent_status import is_success_worker_status, normalize_worker_status
 from runtime.exit_codes import EXIT_GENERIC_FAILURE, EXIT_INVALID_CONFIG
 from runtime.path_resolution import WorkflowPathError
 from runtime.scheduler import (
@@ -1265,6 +1266,9 @@ def _refresh_job(project: Path, paths: Any, job: Mapping[str, Any]) -> dict[str,
         refreshed["next_prompt_ready"] = False
         refreshed["status_problem"] = f"invalid_status:{status or '<missing>'}"
         return refreshed
+    source_status = _refresh_from_source_agent_status(project, refreshed)
+    if source_status is not None:
+        return source_status
     if status == "needs_recovery":
         refreshed["next_prompt_ready"] = False
         return refreshed
@@ -1319,6 +1323,60 @@ def _refresh_job(project: Path, paths: Any, job: Mapping[str, Any]) -> dict[str,
             return refreshed
         refreshed["next_prompt_ready"] = False
     return refreshed
+
+
+def _refresh_from_source_agent_status(project: Path, job: Mapping[str, Any]) -> dict[str, Any] | None:
+    if job.get("manual_resolution") is True:
+        return None
+    if str(job.get("source") or "") == "loopplane_background_start":
+        return None
+    status_path = _resolve_job_path(project, job.get("source_agent_status_path"))
+    if status_path is None or not status_path.is_file():
+        return None
+    try:
+        status_record = json.loads(status_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(status_record, Mapping):
+        return None
+    run_id = _non_empty_text(job.get("run_id"))
+    source_run_id = _non_empty_text(status_record.get("run_id"))
+    if run_id is not None and source_run_id is not None and run_id != source_run_id:
+        return None
+    task_id = _non_empty_text(job.get("task_id"))
+    source_task_id = _non_empty_text(status_record.get("task_id") or status_record.get("primary_task_id"))
+    if task_id is not None and source_task_id is not None and task_id != source_task_id:
+        return None
+    worker_status = normalize_worker_status(status_record.get("status")) or str(status_record.get("status") or "").strip().lower()
+    if worker_status == "running_background":
+        return None
+    if _agent_next_prompt_ready(status_record) is True or is_success_worker_status(worker_status):
+        refreshed = dict(job)
+        refreshed["status"] = "completed"
+        refreshed["next_prompt_ready"] = True
+        refreshed["ended_at"] = _non_empty_text(status_record.get("ended_at")) or refreshed.get("ended_at") or utc_timestamp()
+        refreshed["updated_at"] = utc_timestamp()
+        refreshed["resolved_from_source_agent_status"] = True
+        refreshed.pop("status_problem", None)
+        return refreshed
+    return None
+
+
+def _agent_next_prompt_ready(agent_status_record: Mapping[str, Any]) -> bool | None:
+    value = agent_status_record.get("next_prompt_ready")
+    if isinstance(value, bool):
+        return value
+    background = agent_status_record.get("background")
+    if isinstance(background, Mapping):
+        nested = background.get("next_prompt_ready")
+        if isinstance(nested, bool):
+            return nested
+    background_state = agent_status_record.get("background_state")
+    if isinstance(background_state, Mapping):
+        nested = background_state.get("next_prompt_ready")
+        if isinstance(nested, bool):
+            return nested
+    return None
 
 
 def _agent_status_job_fragment(job: Mapping[str, Any]) -> dict[str, Any]:

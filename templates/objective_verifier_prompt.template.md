@@ -105,6 +105,14 @@ Use agent judgment. Deterministic facts are evidence, not the final authority.
 If task validations passed but a high-level objective is still not reviewable or
 not decision-useful, mark the objective unmet and explain the gap.
 
+Do not close an objective merely because the evidence supports a conservative
+negative result, claim demotion, or "decision-useful" non-result. When the
+objective declares `unmet_action: self_expand` and expansion budget remains,
+negative or mixed evidence must be returned as `unmet_expandable` unless the
+objective text explicitly permits a principled negative closure and the evidence
+meets that stated closure standard. A clearly justified expansion path is a
+reason to keep the objective expandable, not a reason to mark it satisfied.
+
 Respect objective self-expansion policy. If an objective declares
 `unmet_action: self_expand` and its configured expansion budget is not
 exhausted, do not use `unmet_repeated` with `escalate_unresolved` merely because
