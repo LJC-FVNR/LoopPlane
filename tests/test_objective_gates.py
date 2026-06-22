@@ -500,6 +500,28 @@ class ObjectiveGateTest(unittest.TestCase):
             self.assertEqual(result["action_history"][0]["action"], "run_phase_objective_verifier")
             self.assertNotEqual(result["stopped_reason"], "selected_action_terminal")
 
+    def test_objective_verifier_run_leaves_human_readable_report_md(self) -> None:
+        # The fake verifier writes only the JSON report + agent_status (no report.md),
+        # so a report.md present in the run dir proves the deterministic backstop runs
+        # and makes objective-gate runs traceable like worker runs.
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp)
+            init_project(project, "Objective verifier report.md fixture")
+            configure_fake_objective_verifier(project)
+            write_objective_plan(project, second_status="x")
+
+            run_scheduler(project, max_ticks=2)
+
+            objectives_dir = project / ".loopplane" / "runtime" / "objectives"
+            report_mds = list(objectives_dir.glob("*/report.md"))
+            self.assertTrue(report_mds, f"no objective-verifier report.md under {objectives_dir}")
+            content = report_mds[0].read_text(encoding="utf-8")
+            self.assertIn("# Objective verification", content)
+            self.assertIn("satisfied", content)
+            # Reports the per-objective verdict from the JSON report, not run mechanics.
+            self.assertIn("PO1", content)
+            self.assertNotIn("objective_selection.json", content)
+
     def test_fresh_closed_objective_report_skips_redundant_objective_verifier(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             project = Path(tmp)
