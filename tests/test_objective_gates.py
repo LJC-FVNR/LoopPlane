@@ -445,6 +445,61 @@ class ObjectiveGateTest(unittest.TestCase):
             self.assertTrue(gate["fresh"], json.dumps(gate, indent=2, sort_keys=True))
             self.assertEqual(gate["status"], "closed")
 
+    def test_negative_claim_demotion_closure_is_downgraded_when_expansion_budget_remains(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp)
+            init_project(project, "Negative claim demotion closure guard fixture")
+            write_objective_plan(project, max_expansions=50)
+            wid = workflow_id(project)
+            initial_plan_sha = "sha256:" + sha256((project / "PLAN.md").read_bytes()).hexdigest()
+            report_path = project / ".loopplane" / "runtime" / "objectives" / "phases" / "P0" / "objective_verification.json"
+            write_json(
+                report_path,
+                {
+                    "schema_version": "1.5",
+                    "workflow_id": wid,
+                    "scope": "phase",
+                    "phase_id": "P0",
+                    "phase_title": "Phase P0: Produce Baseline",
+                    "status": "satisfied",
+                    "verified_at": "2026-01-01T00:00:00Z",
+                    "plan_sha256": initial_plan_sha,
+                    "objective_results": [
+                        {
+                            "objective_id": "PO1",
+                            "status": "satisfied",
+                            "verdict": "satisfied_with_notes",
+                            "confidence": "high",
+                            "evidence_reviewed": [".loopplane/results/T001/latest.json"],
+                            "agent_rationale": (
+                                "The result is satisfied as a claim-demotion result, not as positive support; "
+                                "a baseline win rejects dynamic-MLP superiority."
+                            ),
+                            "expandable": False,
+                        }
+                    ],
+                    "summary": {"total": 1, "passed": 1, "unmet": 0, "blocked": 0, "waived": 0},
+                },
+            )
+
+            result = apply_objective_verification_report(project, report_path)
+
+            self.assertTrue(result["ok"], json.dumps(result, indent=2, sort_keys=True))
+            plan_text = (project / "PLAN.md").read_text(encoding="utf-8")
+            self.assertIn("- [ ] `PO1` Baseline table is sufficient", plan_text)
+            applied_report = json.loads(report_path.read_text(encoding="utf-8"))
+            objective_result = applied_report["objective_results"][0]
+            self.assertEqual(applied_report["status"], "unmet")
+            self.assertEqual(objective_result["status"], "unmet")
+            self.assertEqual(objective_result["verdict"], "unmet_expandable")
+            self.assertTrue(objective_result["expandable"])
+
+            snapshot = load_scheduler_snapshot(project)
+            gate = snapshot["objective_reports"]["by_key"]["phase:P0"]
+            self.assertEqual(gate["status"], "needs_expansion")
+            selected = select_next_action(snapshot)
+            self.assertEqual(selected["action"], "run_expansion_planner")
+
     def test_objective_apply_refreshes_phase_human_summary_after_gate_closes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             project = Path(tmp)
