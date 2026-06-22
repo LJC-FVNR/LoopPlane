@@ -108,6 +108,16 @@ DEFAULT_OBJECTIVE_MAX_EXPANSIONS = 2
 RUNNER_HEALTH_EVENT_LIMIT = 200
 FAILURE_TERMINAL_STATUSES = frozenset({"recovered", "waived", "exhausted", "needs_human"})
 DEFAULT_MAX_RECOVERY_ATTEMPTS = 1
+# Failure classes for non-task-keyed scheduler "action" runs (objective verifier
+# and self-expansion planner). These are recorded in the same failure_registry as
+# worker failures so they get the same bounded auto-retry, but they are keyed by
+# the action/run scope (not a task_id) and are re-selected as the SAME action
+# rather than as a task-keyed recovery_worker.
+ACTION_FAILURE_CLASSES = frozenset({"objective_verifier_failed", "expansion_planner_failed"})
+# Run statuses that mean the run failed to EXECUTE (the agent crashed / hit an API
+# error / produced no usable result) as opposed to a successful run that returned a
+# normal "unmet" verdict. Only these are auto-retried for action runs.
+TRANSIENT_RUN_FAILURE_STATUSES = frozenset({"failed_agent", "failed_system"})
 BACKGROUND_JOBS_FILENAME = "background_jobs.json"
 BACKGROUND_JOB_HEARTBEAT_TTL_SECONDS = 600
 BACKGROUND_JOB_PID_STARTUP_GRACE_SECONDS = 15
@@ -620,6 +630,22 @@ def run_scheduler(
     }
 
 
+def _action_failure_has_budget_for_retry(action: str, execution: Mapping[str, Any]) -> bool:
+    """True when a verifier/planner RUN failed transiently but was registered as a
+    recoverable action failure that still has recovery budget left. Such a tick must
+    keep the loop running so the same action is immediately re-selected and retried."""
+    if action not in {"run_phase_objective_verifier", "run_final_objective_verifier", "run_expansion_planner"}:
+        return False
+    update = execution.get("failure_registry_update")
+    if not isinstance(update, Mapping):
+        return False
+    if str(update.get("failure_class") or "") not in ACTION_FAILURE_CLASSES:
+        return False
+    if str(update.get("status") or "") in FAILURE_TERMINAL_STATUSES:
+        return False
+    return bool(update.get("budget_remaining"))
+
+
 def _scheduler_should_continue_after_tick(
     selected: Mapping[str, Any],
     *,
@@ -646,9 +672,18 @@ def _scheduler_should_continue_after_tick(
         return False
     if selected.get("would_wait"):
         return False
+    execution = selected.get("execution_result")
+    # A transient objective-verifier / expansion-planner RUN failure that was
+    # registered as a recoverable action failure with budget remaining should let
+    # the loop CONTINUE so the same action is immediately re-selected and retried.
+    # This is checked before the generic ok/status terminal handling below so a
+    # failed-but-recoverable action run does not stop the loop. When the budget is
+    # exhausted the helper returns False and we fall through to stopping the loop so
+    # a genuinely broken run still surfaces to the human.
+    if isinstance(execution, Mapping) and _action_failure_has_budget_for_retry(action, execution):
+        return True
     if selected.get("ok") is False:
         return False
-    execution = selected.get("execution_result")
     if isinstance(execution, Mapping):
         if execution.get("ok") is False:
             return False
@@ -3160,6 +3195,11 @@ def _oldest_recoverable_failure(snapshot: Mapping[str, Any]) -> Mapping[str, Any
     for index, failure in enumerate(failures):
         if not isinstance(failure, Mapping):
             continue
+        # Non-task action failures (objective verifier / expansion planner) are
+        # retried by re-selecting their own action, not by the task-keyed
+        # recovery_worker path, so they must not be selected here.
+        if str(failure.get("failure_class") or "") in ACTION_FAILURE_CLASSES:
+            continue
         status = str(failure.get("status", "unrecovered")).lower()
         if status != "unrecovered":
             continue
@@ -4324,6 +4364,38 @@ def _finish_objective_verifier_execution(
     runner_availability = _adapter_runner_availability(adapter_output)
     if runner_availability is not None:
         result["runner_availability"] = runner_availability
+    # Bounded auto-retry for transient objective-verifier RUN failures. A failed run
+    # (agent crashed / API error / no usable report) is registered as a recoverable
+    # failure so the loop re-selects the verifier action within budget. A successful
+    # run that returns an "unmet" verdict has result_ok=True and is NOT retried here;
+    # it flows to self-expansion as normal. On success we resolve any open entry.
+    scope_key = _action_failure_scope_key("objective_verifier_failed", result)
+    if (
+        not result_ok
+        and runner_availability is None
+        and str(result.get("status") or "") in TRANSIENT_RUN_FAILURE_STATUSES
+    ):
+        failure_registry_update = _record_action_failure(
+            paths=paths,
+            workflow_id=prepared.workflow_id,
+            project=project,
+            result=result,
+            failure_class="objective_verifier_failed",
+        )
+        result["failure_id"] = failure_registry_update["failure_id"]
+        result["failure_registry_update"] = dict(failure_registry_update)
+        result["failure_registry_path"] = _path_for_record(project, paths.runtime_dir / FAILURE_REGISTRY_FILENAME)
+    elif result_ok:
+        resolved = _resolve_action_failure(
+            paths=paths,
+            workflow_id=prepared.workflow_id,
+            failure_class="objective_verifier_failed",
+            scope_key=scope_key,
+            result=result,
+        )
+        if resolved is not None:
+            result["failure_registry_update"] = dict(resolved)
+            result["failure_registry_path"] = _path_for_record(project, paths.runtime_dir / FAILURE_REGISTRY_FILENAME)
     runner_health_update = _record_runner_health_event(
         paths=paths,
         workflow_id=prepared.workflow_id,
@@ -4533,6 +4605,36 @@ def _finish_expansion_execution(
     runner_availability = _adapter_runner_availability(adapter_output)
     if runner_availability is not None:
         result["runner_availability"] = runner_availability
+    # Bounded auto-retry for transient expansion-planner RUN failures, mirroring the
+    # objective-verifier path. Only a failed RUN (agent crashed / no usable proposal)
+    # is registered; a successful planner run resolves any open entry.
+    scope_key = _action_failure_scope_key("expansion_planner_failed", result)
+    if (
+        not result_ok
+        and runner_availability is None
+        and str(result.get("status") or "") in TRANSIENT_RUN_FAILURE_STATUSES
+    ):
+        failure_registry_update = _record_action_failure(
+            paths=paths,
+            workflow_id=prepared.workflow_id,
+            project=project,
+            result=result,
+            failure_class="expansion_planner_failed",
+        )
+        result["failure_id"] = failure_registry_update["failure_id"]
+        result["failure_registry_update"] = dict(failure_registry_update)
+        result["failure_registry_path"] = _path_for_record(project, paths.runtime_dir / FAILURE_REGISTRY_FILENAME)
+    elif result_ok:
+        resolved = _resolve_action_failure(
+            paths=paths,
+            workflow_id=prepared.workflow_id,
+            failure_class="expansion_planner_failed",
+            scope_key=scope_key,
+            result=result,
+        )
+        if resolved is not None:
+            result["failure_registry_update"] = dict(resolved)
+            result["failure_registry_path"] = _path_for_record(project, paths.runtime_dir / FAILURE_REGISTRY_FILENAME)
     runner_health_update = _record_runner_health_event(
         paths=paths,
         workflow_id=prepared.workflow_id,
@@ -6092,6 +6194,173 @@ def _record_worker_failure(
         registry = _read_failure_registry(paths, workflow_id=workflow_id)
         changed = _matching_failure(registry.get("failures", []), candidate) or candidate
     return dict(changed)
+
+
+def _action_failure_scope_key(failure_class: str, result: Mapping[str, Any]) -> str:
+    """Stable identity for a non-task action failure (objective verifier / planner).
+
+    There is no task_id, so we key by the failure class plus the run scope so that
+    repeated transient failures of the same gate dedupe/increment one entry."""
+    if failure_class == "objective_verifier_failed":
+        scope = str(result.get("objective_scope") or "")
+        phase_id = str(result.get("objective_phase_id") or "")
+        return f"objective_verifier:{scope}:{phase_id}"
+    return "expansion_planner"
+
+
+def _action_failure_signature(failure_class: str, result: Mapping[str, Any]) -> str:
+    parts = [
+        failure_class,
+        str(result.get("classification") or "action_failed"),
+        str(result.get("status") or "failed"),
+        f"exit_{result.get('adapter_exit_code')}",
+        f"timed_out_{str(bool(result.get('adapter_timed_out'))).lower()}",
+    ]
+    return ":".join(parts)
+
+
+def _record_action_failure(
+    *,
+    paths: WorkflowPaths,
+    workflow_id: str,
+    project: Path,
+    result: Mapping[str, Any],
+    failure_class: str,
+) -> dict[str, Any]:
+    """Record a transient objective-verifier / expansion-planner run failure as a
+    recoverable failure_registry entry, mirroring `_record_worker_failure` but keyed
+    by the action scope (task_id is empty) so the SAME action is re-selected on the
+    next tick within a bounded recovery budget."""
+    seen_at = str(result.get("ended_at") or utc_timestamp())
+    run_id = str(result.get("run_id") or "")
+    scope_key = _action_failure_scope_key(failure_class, result)
+    signature = _action_failure_signature(failure_class, result)
+    changed: dict[str, Any] | None = None
+
+    def update(registry: dict[str, Any]) -> None:
+        nonlocal changed
+        failures = registry.setdefault("failures", [])
+        if not isinstance(failures, list):
+            failures = []
+            registry["failures"] = failures
+        existing: dict[str, Any] | None = None
+        for failure in failures:
+            if not isinstance(failure, dict):
+                continue
+            if str(failure.get("failure_class") or "") != failure_class:
+                continue
+            if str(failure.get("action_scope_key") or "") != scope_key:
+                continue
+            if str(failure.get("status") or "") in FAILURE_TERMINAL_STATUSES:
+                continue
+            existing = failure
+            break
+        if existing is None:
+            record = {
+                "failure_id": _new_failure_id(),
+                "task_id": "",
+                "action_scope_key": scope_key,
+                "run_id": run_id,
+                "status": "unrecovered",
+                "failure_class": failure_class,
+                "failure_signature": signature,
+                "summary": str(result.get("message") or "Scheduler action run failed."),
+                "first_seen_at": seen_at,
+                "last_seen_at": seen_at,
+                "attempts": 1,
+                # First failure has not consumed a recovery attempt yet, so the
+                # immediate re-run below is the first retry within budget.
+                "recovery_attempts": 0,
+                "max_recovery_attempts": DEFAULT_MAX_RECOVERY_ATTEMPTS,
+                "budget_remaining": True,
+                "recoverable": True,
+                "run_ids": [run_id] if run_id else [],
+                "agent_status_path": result.get("agent_status_path"),
+                "adapter_result_path": result.get("adapter_result_path"),
+                "scheduler_run_dir": result.get("scheduler_run_dir"),
+                "role_output_dir": result.get("role_output_dir"),
+            }
+            _refresh_failure_budget(record)
+            failures.append(record)
+            changed = dict(record)
+            return
+        # A repeat failure of the same action scope: a retry just ran and failed
+        # again, so consume one recovery attempt. _refresh_failure_budget will flip
+        # the entry to "exhausted" once the budget is spent.
+        existing["recovery_attempts"] = _int_value(existing.get("recovery_attempts"), default=0) + 1
+        existing["attempts"] = _int_value(existing.get("attempts"), default=0) + 1
+        existing["last_seen_at"] = seen_at
+        existing["run_id"] = run_id or existing.get("run_id")
+        existing["summary"] = str(result.get("message") or existing.get("summary") or "Scheduler action run failed.")
+        existing["failure_signature"] = signature or existing.get("failure_signature")
+        existing["run_ids"] = _append_unique_string(existing.get("run_ids"), run_id)
+        for path_field in ("agent_status_path", "adapter_result_path", "scheduler_run_dir", "role_output_dir"):
+            if result.get(path_field):
+                existing[path_field] = result[path_field]
+        _refresh_failure_budget(existing)
+        changed = dict(existing)
+
+    _update_failure_registry_locked(paths, workflow_id=workflow_id, update=update)
+    return dict(changed or {})
+
+
+def _resolve_action_failure(
+    *,
+    paths: WorkflowPaths,
+    workflow_id: str,
+    failure_class: str,
+    scope_key: str,
+    result: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    """Mark any open action-failure entry for this scope as recovered after a
+    successful re-run (mirrors how recovery_worker success resolves its failure)."""
+    ended_at = str(result.get("ended_at") or utc_timestamp())
+    changed: dict[str, Any] | None = None
+
+    def update(registry: dict[str, Any]) -> None:
+        nonlocal changed
+        failures = registry.get("failures", [])
+        if not isinstance(failures, list):
+            return
+        for failure in failures:
+            if not isinstance(failure, dict):
+                continue
+            if str(failure.get("failure_class") or "") != failure_class:
+                continue
+            if str(failure.get("action_scope_key") or "") != scope_key:
+                continue
+            if str(failure.get("status") or "") in FAILURE_TERMINAL_STATUSES:
+                continue
+            failure["status"] = "recovered"
+            failure["last_seen_at"] = ended_at
+            failure["last_recovery_ended_at"] = ended_at
+            failure["last_recovery_status"] = result.get("status")
+            failure["last_recovery_run_id"] = result.get("run_id")
+            failure.pop("active_recovery_run_id", None)
+            _refresh_failure_budget(failure)
+            changed = dict(failure)
+
+    _update_failure_registry_locked(paths, workflow_id=workflow_id, update=update)
+    return changed
+
+
+def _open_action_failure(
+    snapshot: Mapping[str, Any], *, failure_class: str, scope_key: str
+) -> Mapping[str, Any] | None:
+    """Return the open (non-terminal) action-failure entry for a scope, if any."""
+    registry = snapshot.get("failure_registry")
+    failures = registry.get("failures", []) if isinstance(registry, Mapping) else []
+    for failure in failures:
+        if not isinstance(failure, Mapping):
+            continue
+        if str(failure.get("failure_class") or "") != failure_class:
+            continue
+        if str(failure.get("action_scope_key") or "") != scope_key:
+            continue
+        if str(failure.get("status") or "unrecovered") in FAILURE_TERMINAL_STATUSES:
+            continue
+        return failure
+    return None
 
 
 def _mark_failure_recovering(

@@ -138,6 +138,131 @@ print("fake objective verifier wrote report")
     config_path.write_text(json.dumps(config, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
+def configure_recovering_objective_verifier(project: Path, *, fail_runs: int) -> None:
+    """Configure an objective_verifier runner that fails (exit 1, no usable report)
+    for the first ``fail_runs`` invocations, then succeeds. A counter file persisted
+    in the runtime dir tracks invocations across scheduler runs so we can exercise the
+    bounded auto-retry behavior deterministically. Set ``fail_runs`` very high to make
+    the verifier always fail (e.g. to exhaust the recovery budget)."""
+    paths = WorkflowPaths.from_config(project, load_workflow_config(project))
+    script = paths.config_file("recovering_objective_verifier.py")
+    counter_path = paths.runtime_dir / "fake_verifier_invocations.json"
+    script.write_text(
+        r'''
+import hashlib
+import json
+import os
+import pathlib
+import sys
+
+
+project = pathlib.Path(os.environ["LOOPPLANE_PROJECT_ROOT"])
+role_output_dir = pathlib.Path(os.environ["LOOPPLANE_ROLE_OUTPUT_DIR"])
+selection = json.loads((role_output_dir / "objective_selection.json").read_text(encoding="utf-8"))
+fail_runs = ''' + str(int(fail_runs)) + r'''
+counter_path = pathlib.Path(''' + repr(str(counter_path)) + r''')
+counter = 0
+if counter_path.exists():
+    counter = int(json.loads(counter_path.read_text(encoding="utf-8")).get("count", 0))
+counter += 1
+counter_path.parent.mkdir(parents=True, exist_ok=True)
+counter_path.write_text(json.dumps({"count": counter}) + "\n", encoding="utf-8")
+
+if counter <= fail_runs:
+    # Simulate a transient API/system failure: write nothing usable and exit nonzero.
+    print("API Error: The system encountered an unexpected error during processing", file=sys.stderr)
+    sys.exit(1)
+
+report_path = pathlib.Path(selection["objective_verification_report"])
+if not report_path.is_absolute():
+    report_path = project / report_path
+plan_path_value = os.environ.get("LOOPPLANE_PLAN_FILE")
+plan_path = pathlib.Path(plan_path_value) if plan_path_value else project / "PLAN.md"
+if not plan_path.is_absolute():
+    plan_path = project / plan_path
+plan_text = plan_path.read_text(encoding="utf-8")
+plan_sha = "sha256:" + hashlib.sha256(plan_text.encode("utf-8")).hexdigest()
+objective_results = []
+for objective_id in selection.get("target_objective_ids", []):
+    objective_results.append(
+        {
+            "objective_id": objective_id,
+            "status": "satisfied",
+            "verdict": "satisfied",
+            "confidence": "high",
+            "evidence_reviewed": [".loopplane/results"],
+            "agent_rationale": "Recovering verifier accepted the objective after a transient failure.",
+            "expandable": False,
+        }
+    )
+report_path.parent.mkdir(parents=True, exist_ok=True)
+report_path.write_text(
+    json.dumps(
+        {
+            "schema_version": "1.5",
+            "workflow_id": selection["workflow_id"],
+            "scope": selection["scope"],
+            "phase_id": selection.get("phase_id"),
+            "phase_title": selection.get("phase_title"),
+            "status": "satisfied",
+            "verified_at": "2026-01-01T00:00:00Z",
+            "plan_sha256": plan_sha,
+            "objective_results": objective_results,
+            "summary": {
+                "total": len(objective_results),
+                "passed": len(objective_results),
+                "unmet": 0,
+                "blocked": 0,
+                "waived": 0,
+            },
+        },
+        indent=2,
+        sort_keys=True,
+    )
+    + "\n",
+    encoding="utf-8",
+)
+(role_output_dir / "agent_status.json").write_text(
+    json.dumps(
+        {
+            "schema_version": "1.5",
+            "run_id": selection["run_id"],
+            "role": "objective_verifier",
+            "status": "completed",
+            "objective_verification_report": str(report_path),
+            "summary_candidate": {"one_line": "Recovering objective verifier completed."},
+        },
+        indent=2,
+        sort_keys=True,
+    )
+    + "\n",
+    encoding="utf-8",
+)
+print("recovering objective verifier wrote report")
+''',
+        encoding="utf-8",
+    )
+    config_path = paths.config_file("agent_runners.json")
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config["runners"]["objective_verifier"].update(
+        {
+            "adapter": "shell",
+            "command": sys.executable,
+            "args": [script.as_posix()],
+            "cwd": "{{project_root}}",
+            "prompt_delivery": {"mode": "stdin"},
+            "permission_policy": {
+                "allow_project_file_edit": True,
+                "allow_command_execution": True,
+                "require_approval_for_risky_commands": False,
+                "read_only": False,
+            },
+            "enabled": True,
+        }
+    )
+    config_path.write_text(json.dumps(config, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
 def set_runner_enabled(project: Path, runner_id: str, enabled: bool) -> None:
     config_path = project / ".loopplane" / "config" / "agent_runners.json"
     config = json.loads(config_path.read_text(encoding="utf-8"))
@@ -706,6 +831,111 @@ class ObjectiveGateTest(unittest.TestCase):
             registry = json.loads((project / ".loopplane" / "workflow_registry.json").read_text(encoding="utf-8"))
             current = [record for record in registry["workflows"] if record["workflow_id"] == wid][0]
             self.assertEqual(current["status"], "objective_unresolved")
+
+
+    def _failure_registry(self, project: Path) -> dict[str, object]:
+        path = project / ".loopplane" / "runtime" / "failure_registry.json"
+        if not path.exists():
+            return {"failures": []}
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    def test_transient_objective_verifier_failure_registers_and_auto_retries(self) -> None:
+        # First verifier run hits a transient API error; the second succeeds. The loop
+        # must register a recoverable objective_verifier_failed entry, keep going within
+        # budget, re-select the verifier action, and close the gate on the retry.
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp)
+            init_project(project, "Objective verifier transient retry fixture")
+            configure_recovering_objective_verifier(project, fail_runs=1)
+            write_objective_plan(project, second_status="x")
+
+            result = run_scheduler(project, max_ticks=3)
+
+            actions = [entry["action"] for entry in result["action_history"]]
+            self.assertGreaterEqual(actions.count("run_phase_objective_verifier"), 2, json.dumps(result, indent=2, sort_keys=True))
+            registry = self._failure_registry(project)
+            verifier_failures = [
+                failure
+                for failure in registry.get("failures", [])
+                if failure.get("failure_class") == "objective_verifier_failed"
+            ]
+            self.assertEqual(len(verifier_failures), 1, json.dumps(registry, indent=2, sort_keys=True))
+            # The retry succeeded, so the entry must be resolved (recovered), not lingering.
+            self.assertEqual(verifier_failures[0]["status"], "recovered", json.dumps(verifier_failures[0], indent=2, sort_keys=True))
+            gate = load_scheduler_snapshot(project)["objective_reports"]["by_key"]["phase:P0"]
+            self.assertEqual(gate["status"], "closed", json.dumps(gate, indent=2, sort_keys=True))
+
+    def test_unmet_objective_verdict_is_not_treated_as_retryable_failure(self) -> None:
+        # A successful verifier run that returns an UNMET verdict must NOT be recorded
+        # as a retryable failure; it must flow to self-expansion as a normal result.
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp)
+            init_project(project, "Objective verifier unmet verdict fixture")
+            write_objective_plan(project)
+            wid = workflow_id(project)
+            plan_sha = "sha256:" + sha256((project / "PLAN.md").read_bytes()).hexdigest()
+            report_path = project / ".loopplane" / "runtime" / "objectives" / "phases" / "P0" / "objective_verification.json"
+            write_json(
+                report_path,
+                {
+                    "schema_version": "1.5",
+                    "workflow_id": wid,
+                    "scope": "phase",
+                    "phase_id": "P0",
+                    "phase_title": "Phase P0: Produce Baseline",
+                    "status": "unmet",
+                    "verified_at": "2026-01-01T00:00:00Z",
+                    "plan_sha256": plan_sha,
+                    "objective_results": [
+                        {
+                            "objective_id": "PO1",
+                            "status": "unmet",
+                            "verdict": "unmet_expandable",
+                            "confidence": "high",
+                            "evidence_reviewed": [".loopplane/results/T001/latest.json"],
+                            "agent_rationale": "Baseline table lacks downstream-ready checks.",
+                            "expandable": True,
+                        }
+                    ],
+                    "summary": {"total": 1, "passed": 0, "unmet": 1, "blocked": 0, "waived": 0},
+                },
+            )
+
+            snapshot = load_scheduler_snapshot(project)
+            selected = select_next_action(snapshot)
+
+            # No objective_verifier_failed entry was created by an applied unmet report.
+            registry = self._failure_registry(project)
+            self.assertFalse(
+                [f for f in registry.get("failures", []) if f.get("failure_class") == "objective_verifier_failed"],
+                json.dumps(registry, indent=2, sort_keys=True),
+            )
+            self.assertEqual(selected["action"], "run_expansion_planner", json.dumps(selected, indent=2, sort_keys=True))
+
+    def test_objective_verifier_retry_budget_exhaustion_stops_loop(self) -> None:
+        # When the verifier keeps failing transiently, the bounded budget must be
+        # consumed and the loop must stop (rather than retry forever).
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp)
+            init_project(project, "Objective verifier budget exhaustion fixture")
+            configure_recovering_objective_verifier(project, fail_runs=99)
+            write_objective_plan(project, second_status="x")
+
+            result = run_scheduler(project, max_ticks=10)
+
+            # Default budget is 1 recovery attempt: one initial run + one retry, then stop.
+            actions = [entry["action"] for entry in result["action_history"]]
+            self.assertEqual(actions.count("run_phase_objective_verifier"), 2, json.dumps(result, indent=2, sort_keys=True))
+            self.assertFalse(result["ok"], json.dumps(result, indent=2, sort_keys=True))
+            registry = self._failure_registry(project)
+            verifier_failures = [
+                failure
+                for failure in registry.get("failures", [])
+                if failure.get("failure_class") == "objective_verifier_failed"
+            ]
+            self.assertEqual(len(verifier_failures), 1, json.dumps(registry, indent=2, sort_keys=True))
+            self.assertEqual(verifier_failures[0]["status"], "exhausted", json.dumps(verifier_failures[0], indent=2, sort_keys=True))
+            self.assertFalse(verifier_failures[0]["budget_remaining"])
 
 
 if __name__ == "__main__":
