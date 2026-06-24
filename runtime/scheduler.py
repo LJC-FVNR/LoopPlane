@@ -85,6 +85,9 @@ ACTIVE_RUN_LEASE_HEARTBEAT_INTERVAL_SECONDS = 30.0
 DEFAULT_RUN_GIT_METADATA_DETAIL_LEVEL = "status"
 EMIT_ADAPTER_COMPLETED_EVENTS = False
 EVENTS_SEGMENT = "events_000001.jsonl"
+EVENTS_MANIFEST_FILENAME = "manifest.json"
+EVENT_PAYLOAD_SIDECAR_DIR = "event_payloads"
+EVENT_PAYLOAD_SIDECAR_THRESHOLD_BYTES = 8192
 EVENT_SNAPSHOT_INTERVAL = 100
 COLLAPSIBLE_SCHEDULER_WAIT_ACTIONS = frozenset(
     {
@@ -137,6 +140,7 @@ BACKGROUND_JOB_SAFE_STATUSES = frozenset({"completed", "cancelled"})
 BACKGROUND_JOB_TERMINAL_STATUSES = frozenset({"completed", "failed", "timed_out", "cancelled"})
 ACTIVE_RUN_LEASE_ACTIVE_STATUSES = frozenset({"starting", "running", "pending", "waiting"})
 ACTIVE_RUN_LEASE_INACTIVE_STATUSES = frozenset({"completed", "succeeded", "failed", "cancelled", "aborted", "released"})
+ACTIVE_RUN_LEASE_FINGERPRINT_FILENAME = "active_run_leases_fingerprint.json"
 
 
 class SchedulerError(RuntimeError):
@@ -376,7 +380,7 @@ def prepare_run(
         "adapter_child_pid": None,
         "lease_ttl_seconds": lease_ttl_seconds,
     }
-    _write_json(active_run_lease_path, lease_record)
+    _write_active_run_lease(active_run_lease_path, lease_record)
     if updates_runtime_state:
         _update_runtime_state(
             paths,
@@ -1170,7 +1174,7 @@ def _release_stale_dead_run_lease(lease_file: Path, lease: Mapping[str, Any]) ->
         record["status_problem"] = "stale_heartbeat_process_dead_reclaimed"
         record["released_at"] = utc_timestamp()
         record["released_reason"] = "runner_process_dead_and_heartbeat_stale"
-        _write_json(lease_file, record)
+        _write_active_run_lease(lease_file, record)
     except OSError:
         pass
 
@@ -5067,7 +5071,7 @@ def _refresh_active_run_lease(
             "heartbeat_count": heartbeat_count,
         }
     )
-    _write_json(prepared.active_run_lease_path, lease)
+    _write_active_run_lease(prepared.active_run_lease_path, lease)
     return lease
 
 
@@ -7336,6 +7340,26 @@ def _write_json(path: Path, data: Mapping[str, Any]) -> None:
     temp_path.replace(path)
 
 
+def _write_active_run_lease(path: Path, data: Mapping[str, Any]) -> None:
+    _write_json(path, data)
+    stamp_path = path.parent.parent / ACTIVE_RUN_LEASE_FINGERPRINT_FILENAME
+    try:
+        stat_result = path.stat()
+        _write_json(
+            stamp_path,
+            {
+                "schema_version": SCHEMA_VERSION,
+                "updated_at": utc_timestamp(),
+                "lease_file": path.name,
+                "lease_size_bytes": stat_result.st_size,
+                "lease_mtime_ns": stat_result.st_mtime_ns,
+                "update_id": uuid.uuid4().hex,
+            },
+        )
+    except OSError:
+        pass
+
+
 def _append_event_unlocked(
     paths: WorkflowPaths,
     *,
@@ -7350,12 +7374,23 @@ def _append_event_unlocked(
     tail = _event_log_tail(event_path.parent)
     sequence = int(tail.get("sequence", 0)) + 1
     timestamp = utc_timestamp()
-    payload = dict(data)
+    payload = _json_safe_object(dict(data))
+    event_id = _event_id_for_sequence(sequence)
+    payload_record = _event_payload_for_log(
+        paths,
+        event_id=event_id,
+        event_type=event_type,
+        workflow_id=workflow_id,
+        run_id=run_id,
+        sequence=sequence,
+        payload=payload,
+    )
+    compact_payload = payload_record["payload"]
     record = {
         "schema_version": SCHEMA_VERSION,
         "seq": sequence,
         "sequence": sequence,
-        "event_id": _event_id_for_sequence(sequence),
+        "event_id": event_id,
         "prev_event_id": tail.get("event_id"),
         "prev_event_hash": tail.get("event_hash"),
         "ts": timestamp,
@@ -7363,14 +7398,28 @@ def _append_event_unlocked(
         "workflow_id": workflow_id,
         "run_id": run_id,
         "event_type": event_type,
-        "subject": _event_subject(payload, run_id=run_id),
+        "subject": _event_subject(payload if isinstance(payload, Mapping) else {}, run_id=run_id),
         "ui": {"title": event_type, "summary": "", "severity": "info", "visible": True},
         "refs": {},
-        "payload": payload,
-        "data": payload,
+        "payload": compact_payload,
+        "data": compact_payload,
     }
+    if payload_record.get("compacted"):
+        record.update(
+            {
+                "payload_compacted": True,
+                "payload_ref": payload_record["payload_ref"],
+                "payload_sha256": payload_record["payload_sha256"],
+                "payload_size_bytes": payload_record["payload_size_bytes"],
+                "payload_summary": payload_record["payload_summary"],
+            }
+        )
     record["event_hash"] = _event_hash(record)
     _append_jsonl_fsynced(event_path, record)
+    try:
+        _update_event_segment_manifest_after_append(paths.runtime_dir / "events", event_path=event_path, record=record)
+    except OSError:
+        pass
     if snapshot_interval is not None and snapshot_interval > 0 and sequence % snapshot_interval == 0:
         _write_event_snapshot_unlocked(paths, workflow_id=workflow_id, through_sequence=sequence)
     return record
@@ -7389,6 +7438,137 @@ def _event_subject(data: Mapping[str, Any], *, run_id: str | None) -> dict[str, 
         if value is not None:
             subject[key] = value
     return subject
+
+
+def _event_payload_for_log(
+    paths: WorkflowPaths,
+    *,
+    event_id: str,
+    event_type: str,
+    workflow_id: str,
+    run_id: str | None,
+    sequence: int,
+    payload: Any,
+) -> dict[str, Any]:
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    size_bytes = len(encoded)
+    if size_bytes <= EVENT_PAYLOAD_SIDECAR_THRESHOLD_BYTES:
+        return {"payload": payload, "compacted": False}
+    digest = "sha256:" + sha256(encoded).hexdigest()
+    ref = f"{paths.value('runtime_dir').rstrip('/')}/{EVENT_PAYLOAD_SIDECAR_DIR}/{event_id}.json"
+    sidecar = {
+        "schema_version": SCHEMA_VERSION,
+        "event_id": event_id,
+        "event_type": event_type,
+        "workflow_id": workflow_id,
+        "run_id": run_id,
+        "sequence": sequence,
+        "payload_sha256": digest,
+        "payload_size_bytes": size_bytes,
+        "payload": payload,
+    }
+    _write_json_atomic_fsynced(paths.runtime_dir / EVENT_PAYLOAD_SIDECAR_DIR / f"{event_id}.json", sidecar)
+    return {
+        "payload": _compact_event_payload(event_type, payload),
+        "compacted": True,
+        "payload_ref": ref,
+        "payload_sha256": digest,
+        "payload_size_bytes": size_bytes,
+        "payload_summary": _event_payload_summary(payload),
+    }
+
+
+def _compact_event_payload(event_type: str, payload: Any) -> dict[str, Any]:
+    source = payload if isinstance(payload, Mapping) else {}
+    compact: dict[str, Any] = {"event_payload_compacted": True}
+    for key in (
+        "task_id",
+        "run_id",
+        "role",
+        "runner_id",
+        "status",
+        "message",
+        "severity",
+        "phase_id",
+        "objective_id",
+        "objective_phase_id",
+        "failure_id",
+        "proposal_id",
+        "expansion_type",
+        "proposal_path",
+        "resolution_strategy",
+        "risk",
+        "failure_resolution_status",
+        "approval",
+        "started_at",
+        "ended_at",
+        "adapter_result_path",
+        "agent_status_path",
+        "context_manifest_path",
+        "prompt_path",
+        "stdout_path",
+        "stderr_path",
+        "final_output_path",
+    ):
+        if key in source:
+            compact[key] = _compact_payload_value(source.get(key), depth=1)
+    for key in ("target_task_ids", "target_failure_ids", "added_task_ids", "errors", "warnings"):
+        if key in source:
+            compact[key] = _compact_payload_value(source.get(key), depth=1)
+    for key in ("selected_candidate", "proposal_apply", "agent_status", "selected_objective_gate"):
+        value = source.get(key)
+        if isinstance(value, Mapping):
+            compact[f"{key}_summary"] = _event_payload_summary(value)
+    compact["payload_summary"] = _event_payload_summary(source)
+    compact["compacted_event_type"] = event_type
+    return compact
+
+
+def _event_payload_summary(value: Any) -> dict[str, Any]:
+    if isinstance(value, Mapping):
+        summary: dict[str, Any] = {"type": "object", "keys": len(value)}
+        for key in (
+            "status",
+            "message",
+            "task_id",
+            "run_id",
+            "proposal_id",
+            "expansion_type",
+            "resolution_strategy",
+            "risk",
+            "failure_resolution_status",
+            "selected_failure_id",
+        ):
+            if key in value:
+                summary[key] = _compact_payload_value(value.get(key), depth=0)
+        for key in ("errors", "warnings", "added_task_ids", "target_task_ids", "target_failure_ids"):
+            child = value.get(key)
+            if isinstance(child, Sequence) and not isinstance(child, (str, bytes, bytearray)):
+                summary[f"{key}_count"] = len(child)
+        return summary
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return {"type": "array", "items": len(value)}
+    return {"type": type(value).__name__}
+
+
+def _compact_payload_value(value: Any, *, depth: int) -> Any:
+    if isinstance(value, Mapping):
+        if depth <= 0:
+            return _event_payload_summary(value)
+        return {
+            str(key): _compact_payload_value(item, depth=depth - 1)
+            for key, item in list(value.items())[:12]
+        }
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        items = [_compact_payload_value(item, depth=depth - 1) for item in list(value)[:20]]
+        if len(value) > len(items):
+            items.append({"truncated": True, "total_items": len(value)})
+        return items
+    if isinstance(value, str):
+        return value if len(value) <= 500 else value[:500] + " [truncated]"
+    if isinstance(value, (int, float, bool)) or value is None:
+        return value
+    return str(value)
 
 
 def _event_hash(record: Mapping[str, Any]) -> str:
@@ -7410,7 +7590,644 @@ def _append_jsonl_fsynced(path: Path, record: Mapping[str, Any]) -> None:
     _fsync_directory(path.parent)
 
 
+def load_event_segment_manifest(events_dir: Path) -> dict[str, Any] | None:
+    manifest = _read_event_segment_manifest(events_dir)
+    if not manifest:
+        return None
+    segments = manifest.get("segments")
+    if not isinstance(segments, list):
+        return None
+    entries = {
+        str(entry.get("path") or ""): entry
+        for entry in segments
+        if isinstance(entry, Mapping) and str(entry.get("path") or "")
+    }
+    event_paths = sorted(path for path in events_dir.glob("*.jsonl") if path.is_file())
+    if set(entries) != {path.name for path in event_paths}:
+        return None
+    for path in event_paths:
+        entry = entries.get(path.name)
+        if not isinstance(entry, Mapping):
+            return None
+        try:
+            stat_result = path.stat()
+        except OSError:
+            return None
+        if int(entry.get("size_bytes") or -1) != int(stat_result.st_size):
+            return None
+        if int(entry.get("mtime_ns") or -1) != int(stat_result.st_mtime_ns):
+            return None
+    return dict(manifest)
+
+
+def repair_event_segment_manifest(
+    project_root: Path | str,
+    *,
+    workflow_id: str | None = None,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    project = Path(project_root).expanduser().resolve()
+    started_at = utc_timestamp()
+    try:
+        workflow_config = load_workflow_config(project, workflow_id=workflow_id)
+        paths = WorkflowPaths.from_config(project, workflow_config)
+    except (OSError, json.JSONDecodeError, WorkflowPathError) as error:
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "ok": False,
+            "status": "failed",
+            "project_root": project.as_posix(),
+            "workflow_id": workflow_id,
+            "started_at": started_at,
+            "ended_at": utc_timestamp(),
+            "manifest_path": None,
+            "modified_files": [],
+            "errors": [str(error)],
+            "warnings": [],
+        }
+    events_dir = paths.runtime_dir / "events"
+    manifest_path = events_dir / EVENTS_MANIFEST_FILENAME
+    try:
+        event_paths = sorted(path for path in events_dir.glob("*.jsonl") if path.is_file())
+    except OSError as error:
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "ok": False,
+            "status": "failed",
+            "project_root": project.as_posix(),
+            "workflow_id": paths.workflow_id,
+            "started_at": started_at,
+            "ended_at": utc_timestamp(),
+            "manifest_path": _path_for_record(project, manifest_path),
+            "modified_files": [],
+            "errors": [str(error)],
+            "warnings": [],
+        }
+    if not event_paths:
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "ok": True,
+            "status": "no_events",
+            "project_root": project.as_posix(),
+            "workflow_id": paths.workflow_id,
+            "started_at": started_at,
+            "ended_at": utc_timestamp(),
+            "manifest_path": _path_for_record(project, manifest_path),
+            "event_count": 0,
+            "segment_count": 0,
+            "modified_files": [],
+            "errors": [],
+            "warnings": [],
+        }
+    segments = [
+        entry
+        for entry in (_event_segment_entry_from_scan(path) for path in event_paths)
+        if entry is not None
+    ]
+    event_count = sum(int(entry.get("record_count") or 0) for entry in segments)
+    latest_segment = max(segments, key=lambda entry: int(entry.get("last_sequence") or 0), default=None)
+    manifest = {
+        "schema_version": SCHEMA_VERSION,
+        "generated_at": started_at,
+        "events_dir": events_dir.name,
+        "event_count": event_count,
+        "latest_event": _manifest_event_head(latest_segment, prefix="last") if latest_segment else None,
+        "segments": segments,
+    }
+    existing = _read_event_segment_manifest(events_dir)
+    changed = _event_segment_manifest_semantic(existing) != _event_segment_manifest_semantic(manifest)
+    modified_files: list[str] = []
+    if changed and not dry_run:
+        _write_json_atomic_fsynced(manifest_path, manifest)
+        modified_files.append(_path_for_record(project, manifest_path))
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "ok": True,
+        "status": "planned" if changed and dry_run else "repaired" if changed else "current",
+        "project_root": project.as_posix(),
+        "workflow_id": paths.workflow_id,
+        "started_at": started_at,
+        "ended_at": utc_timestamp(),
+        "manifest_path": _path_for_record(project, manifest_path),
+        "event_count": event_count,
+        "segment_count": len(segments),
+        "latest_event": manifest["latest_event"],
+        "modified_files": modified_files,
+        "errors": [],
+        "warnings": [],
+    }
+
+
+def compact_historical_event_payloads(
+    project_root: Path | str,
+    *,
+    workflow_id: str | None = None,
+    dry_run: bool = False,
+    threshold_bytes: int | None = None,
+    compact_all_events: bool = False,
+) -> dict[str, Any]:
+    project = Path(project_root).expanduser().resolve()
+    started_at = utc_timestamp()
+    threshold = EVENT_PAYLOAD_SIDECAR_THRESHOLD_BYTES if threshold_bytes is None else max(0, int(threshold_bytes))
+    try:
+        workflow_config = load_workflow_config(project, workflow_id=workflow_id)
+        paths = WorkflowPaths.from_config(project, workflow_config)
+    except (OSError, json.JSONDecodeError, WorkflowPathError) as error:
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "ok": False,
+            "status": "failed",
+            "project_root": project.as_posix(),
+            "workflow_id": workflow_id,
+            "started_at": started_at,
+            "ended_at": utc_timestamp(),
+            "modified_files": [],
+            "errors": [str(error)],
+            "warnings": [],
+        }
+
+    snapshot = load_latest_event_snapshot(paths)
+    after_sequence = 0 if compact_all_events else _snapshot_sequence(snapshot)
+    events_dir = paths.runtime_dir / "events"
+    try:
+        segment_paths = sorted(path for path in events_dir.glob("*.jsonl") if path.is_file())
+    except OSError as error:
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "ok": False,
+            "status": "failed",
+            "project_root": project.as_posix(),
+            "workflow_id": paths.workflow_id,
+            "started_at": started_at,
+            "ended_at": utc_timestamp(),
+            "modified_files": [],
+            "errors": [str(error)],
+            "warnings": [],
+        }
+    if not segment_paths:
+        return _event_payload_compaction_result(
+            project=project,
+            paths=paths,
+            started_at=started_at,
+            status="no_events",
+            dry_run=dry_run,
+            threshold=threshold,
+            after_sequence=after_sequence,
+            compact_all_events=compact_all_events,
+        )
+
+    rewritten_segments: dict[Path, list[dict[str, Any]]] = {}
+    previous_hash: str | None = None
+    previous_event_id: str | None = None
+    compressed_records = 0
+    candidate_records = 0
+    bytes_before = 0
+    bytes_after = 0
+    for path in segment_paths:
+        records = _read_jsonl(path)
+        rewritten: list[dict[str, Any]] = []
+        segment_changed = False
+        for record in records:
+            next_record = dict(record)
+            sequence = _event_sequence_value(next_record)
+            should_consider = sequence is not None and sequence > after_sequence
+            if should_consider:
+                payload = _historical_event_payload(next_record)
+                encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+                bytes_before += len(encoded)
+                if next_record.get("payload_compacted") is not True and len(encoded) > threshold:
+                    candidate_records += 1
+                    payload_record = _event_payload_for_compaction(
+                        paths,
+                        event_id=str(next_record.get("event_id") or _event_id_for_sequence(sequence)),
+                        event_type=str(next_record.get("event_type") or "event"),
+                        workflow_id=str(next_record.get("workflow_id") or paths.workflow_id),
+                        run_id=str(next_record.get("run_id")) if next_record.get("run_id") is not None else None,
+                        sequence=sequence,
+                        payload=payload,
+                        write_sidecar=not dry_run,
+                    )
+                    next_record["payload"] = payload_record["payload"]
+                    next_record["data"] = payload_record["payload"]
+                    next_record["payload_compacted"] = True
+                    next_record["payload_ref"] = payload_record["payload_ref"]
+                    next_record["payload_sha256"] = payload_record["payload_sha256"]
+                    next_record["payload_size_bytes"] = payload_record["payload_size_bytes"]
+                    next_record["payload_summary"] = payload_record["payload_summary"]
+                    compressed_records += 1
+                    segment_changed = True
+                    bytes_after += len(json.dumps(payload_record["payload"], sort_keys=True, separators=(",", ":")).encode("utf-8"))
+                else:
+                    bytes_after += len(encoded)
+                if next_record.get("prev_event_hash") != previous_hash or next_record.get("prev_event_id") != previous_event_id:
+                    next_record["prev_event_hash"] = previous_hash
+                    next_record["prev_event_id"] = previous_event_id
+                    segment_changed = True
+                new_hash = _event_hash(next_record)
+                if next_record.get("event_hash") != new_hash:
+                    next_record["event_hash"] = new_hash
+                    segment_changed = True
+            rewritten.append(next_record)
+            previous_hash = str(next_record.get("event_hash")) if isinstance(next_record.get("event_hash"), str) else None
+            previous_event_id = str(next_record.get("event_id")) if isinstance(next_record.get("event_id"), str) else None
+        if segment_changed:
+            rewritten_segments[path] = rewritten
+
+    if not rewritten_segments:
+        return _event_payload_compaction_result(
+            project=project,
+            paths=paths,
+            started_at=started_at,
+            status="current",
+            dry_run=dry_run,
+            threshold=threshold,
+            after_sequence=after_sequence,
+            compact_all_events=compact_all_events,
+            event_count=sum(len(_read_jsonl(path)) for path in segment_paths),
+            segment_count=len(segment_paths),
+            candidate_records=candidate_records,
+            compressed_records=0,
+            bytes_before=bytes_before,
+            bytes_after=bytes_after,
+        )
+
+    validation_errors = _event_chain_validation_errors(
+        [record for path in segment_paths for record in rewritten_segments.get(path, _read_jsonl(path))]
+    )
+    if validation_errors:
+        return _event_payload_compaction_result(
+            project=project,
+            paths=paths,
+            started_at=started_at,
+            status="validation_failed",
+            dry_run=dry_run,
+            threshold=threshold,
+            after_sequence=after_sequence,
+            compact_all_events=compact_all_events,
+            event_count=sum(len(_read_jsonl(path)) for path in segment_paths),
+            segment_count=len(segment_paths),
+            candidate_records=candidate_records,
+            compressed_records=compressed_records,
+            bytes_before=bytes_before,
+            bytes_after=bytes_after,
+            errors=validation_errors[:10],
+        )
+
+    modified_files: list[str] = []
+    backup_dir: Path | None = None
+    if not dry_run:
+        backup_dir = events_dir / "backups" / f"event_payload_compaction_{started_at.replace('-', '').replace(':', '').rstrip('Z')}"
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        for path, records in rewritten_segments.items():
+            shutil.copy2(path, backup_dir / path.name)
+            _write_jsonl_atomic_fsynced(path, records)
+            modified = _path_for_record(project, path)
+            if modified is not None:
+                modified_files.append(modified)
+        repair = repair_event_segment_manifest(project, workflow_id=paths.workflow_id, dry_run=False)
+        for modified in repair.get("modified_files") or []:
+            if isinstance(modified, str) and modified not in modified_files:
+                modified_files.append(modified)
+
+    return _event_payload_compaction_result(
+        project=project,
+        paths=paths,
+        started_at=started_at,
+        status="planned" if dry_run else "compacted",
+        dry_run=dry_run,
+        threshold=threshold,
+        after_sequence=after_sequence,
+        compact_all_events=compact_all_events,
+        event_count=sum(len(_read_jsonl(path)) for path in segment_paths),
+        segment_count=len(segment_paths),
+        candidate_records=candidate_records,
+        compressed_records=compressed_records,
+        bytes_before=bytes_before,
+        bytes_after=bytes_after,
+        modified_files=modified_files,
+        backup_dir=_path_for_record(project, backup_dir) if backup_dir is not None else None,
+    )
+
+
+def _event_payload_compaction_result(
+    *,
+    project: Path,
+    paths: WorkflowPaths,
+    started_at: str,
+    status: str,
+    dry_run: bool,
+    threshold: int,
+    after_sequence: int,
+    compact_all_events: bool,
+    event_count: int = 0,
+    segment_count: int = 0,
+    candidate_records: int = 0,
+    compressed_records: int = 0,
+    bytes_before: int = 0,
+    bytes_after: int = 0,
+    modified_files: Sequence[str] | None = None,
+    backup_dir: str | None = None,
+    errors: Sequence[str] | None = None,
+) -> dict[str, Any]:
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "ok": not errors,
+        "status": status,
+        "project_root": project.as_posix(),
+        "workflow_id": paths.workflow_id,
+        "started_at": started_at,
+        "ended_at": utc_timestamp(),
+        "dry_run": dry_run,
+        "threshold_bytes": threshold,
+        "after_sequence": after_sequence,
+        "compact_all_events": compact_all_events,
+        "event_count": event_count,
+        "segment_count": segment_count,
+        "candidate_records": candidate_records,
+        "compressed_records": compressed_records,
+        "payload_bytes_before": bytes_before,
+        "payload_bytes_after": bytes_after,
+        "payload_bytes_saved": max(0, bytes_before - bytes_after),
+        "backup_dir": backup_dir,
+        "modified_files": list(modified_files or []),
+        "errors": list(errors or []),
+        "warnings": [],
+    }
+
+
+def _historical_event_payload(record: Mapping[str, Any]) -> Any:
+    payload = record.get("payload")
+    if payload is not None:
+        return payload
+    return record.get("data") if record.get("data") is not None else {}
+
+
+def _event_payload_for_compaction(
+    paths: WorkflowPaths,
+    *,
+    event_id: str,
+    event_type: str,
+    workflow_id: str,
+    run_id: str | None,
+    sequence: int,
+    payload: Any,
+    write_sidecar: bool,
+) -> dict[str, Any]:
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    digest = "sha256:" + sha256(encoded).hexdigest()
+    ref = f"{paths.value('runtime_dir').rstrip('/')}/{EVENT_PAYLOAD_SIDECAR_DIR}/{event_id}.json"
+    sidecar = {
+        "schema_version": SCHEMA_VERSION,
+        "event_id": event_id,
+        "event_type": event_type,
+        "workflow_id": workflow_id,
+        "run_id": run_id,
+        "sequence": sequence,
+        "payload_sha256": digest,
+        "payload_size_bytes": len(encoded),
+        "payload": payload,
+    }
+    if write_sidecar:
+        _write_json_atomic_fsynced(paths.runtime_dir / EVENT_PAYLOAD_SIDECAR_DIR / f"{event_id}.json", sidecar)
+    return {
+        "payload": _compact_event_payload(event_type, payload),
+        "payload_ref": ref,
+        "payload_sha256": digest,
+        "payload_size_bytes": len(encoded),
+        "payload_summary": _event_payload_summary(payload),
+    }
+
+
+def _event_chain_validation_errors(records: Sequence[Mapping[str, Any]]) -> list[str]:
+    errors: list[str] = []
+    previous_hash: str | None = None
+    previous_event_id: str | None = None
+    previous_sequence: int | None = None
+    for record in records:
+        sequence = _event_sequence_value(record)
+        event_id = str(record.get("event_id") or "")
+        if previous_sequence is not None and sequence is not None and sequence != previous_sequence + 1:
+            errors.append(f"{event_id or sequence}: expected sequence {previous_sequence + 1}, found {sequence}")
+        if record.get("prev_event_hash") != previous_hash:
+            errors.append(f"{event_id or sequence}: prev_event_hash mismatch")
+        if record.get("prev_event_id") != previous_event_id:
+            errors.append(f"{event_id or sequence}: prev_event_id mismatch")
+        if record.get("event_hash") != _event_hash(record):
+            errors.append(f"{event_id or sequence}: event_hash mismatch")
+        if len(errors) >= 20:
+            break
+        previous_hash = str(record.get("event_hash")) if isinstance(record.get("event_hash"), str) else None
+        previous_event_id = str(record.get("event_id")) if isinstance(record.get("event_id"), str) else None
+        previous_sequence = sequence if sequence is not None else previous_sequence
+    return errors
+
+
+def _write_jsonl_atomic_fsynced(path: Path, records: Sequence[Mapping[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    encoded = "".join(json.dumps(dict(record), sort_keys=True, separators=(",", ":")) + "\n" for record in records).encode("utf-8")
+    fd = os.open(temp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        _write_all(fd, encoded)
+        os.fsync(fd)
+    except BaseException:
+        os.close(fd)
+        try:
+            temp_path.unlink()
+        except OSError:
+            pass
+        raise
+    else:
+        os.close(fd)
+    temp_path.replace(path)
+    _fsync_directory(path.parent)
+
+
+def _event_segment_manifest_semantic(value: Mapping[str, Any] | None) -> Any:
+    if not isinstance(value, Mapping):
+        return None
+    return {
+        str(key): item
+        for key, item in value.items()
+        if str(key) != "generated_at"
+    }
+
+
+def _read_event_segment_manifest(events_dir: Path) -> dict[str, Any] | None:
+    try:
+        payload = json.loads((events_dir / EVENTS_MANIFEST_FILENAME).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return dict(payload) if isinstance(payload, Mapping) else None
+
+
+def _update_event_segment_manifest_after_append(
+    events_dir: Path,
+    *,
+    event_path: Path,
+    record: Mapping[str, Any],
+) -> None:
+    previous = _read_event_segment_manifest(events_dir) or {}
+    previous_entries = {
+        str(entry.get("path") or ""): entry
+        for entry in previous.get("segments", [])
+        if isinstance(entry, Mapping) and str(entry.get("path") or "")
+    }
+    segments = []
+    for path in sorted(path for path in events_dir.glob("*.jsonl") if path.is_file()):
+        previous_entry = previous_entries.get(path.name)
+        if path == event_path:
+            entry = _event_segment_entry_after_append(path, previous_entry=previous_entry, record=record)
+        elif isinstance(previous_entry, Mapping) and _event_segment_entry_stat_matches(path, previous_entry):
+            entry = dict(previous_entry)
+        else:
+            entry = _event_segment_entry_from_scan(path)
+        if entry is not None:
+            segments.append(entry)
+    event_count = sum(int(entry.get("record_count") or 0) for entry in segments)
+    latest_segment = max(
+        segments,
+        key=lambda entry: int(entry.get("last_sequence") or 0),
+        default=None,
+    )
+    latest_event = _manifest_event_head(latest_segment, prefix="last") if latest_segment else None
+    manifest = {
+        "schema_version": SCHEMA_VERSION,
+        "generated_at": utc_timestamp(),
+        "events_dir": events_dir.name,
+        "event_count": event_count,
+        "latest_event": latest_event,
+        "segments": segments,
+    }
+    _write_json_atomic_fsynced(events_dir / EVENTS_MANIFEST_FILENAME, manifest)
+
+
+def _event_segment_entry_after_append(
+    path: Path,
+    *,
+    previous_entry: Mapping[str, Any] | None,
+    record: Mapping[str, Any],
+) -> dict[str, Any]:
+    if isinstance(previous_entry, Mapping) and int(previous_entry.get("last_sequence") or 0) == (_event_sequence_value(record) or 0) - 1:
+        try:
+            stat_result = path.stat()
+        except OSError:
+            stat_result = None
+        entry = dict(previous_entry)
+        if stat_result is not None:
+            entry["size_bytes"] = int(stat_result.st_size)
+            entry["mtime_ns"] = int(stat_result.st_mtime_ns)
+        entry["last_sequence"] = _event_sequence_value(record)
+        entry["last_event_id"] = record.get("event_id")
+        entry["last_event_hash"] = record.get("event_hash")
+        entry["last_event_type"] = record.get("event_type")
+        entry["last_timestamp"] = record.get("ts") or record.get("timestamp")
+        entry["record_count"] = int(entry.get("record_count") or 0) + 1
+        entry["contains_payload_refs"] = bool(entry.get("contains_payload_refs")) or record.get("payload_compacted") is True
+        return entry
+    scanned = _event_segment_entry_from_scan(path)
+    if scanned is not None:
+        return scanned
+    try:
+        stat_result = path.stat()
+    except OSError:
+        size_bytes = 0
+        mtime_ns = 0
+    else:
+        size_bytes = int(stat_result.st_size)
+        mtime_ns = int(stat_result.st_mtime_ns)
+    return {
+        "path": path.name,
+        "size_bytes": size_bytes,
+        "mtime_ns": mtime_ns,
+        "first_sequence": _event_sequence_value(record),
+        "last_sequence": _event_sequence_value(record),
+        "first_event_id": record.get("event_id"),
+        "last_event_id": record.get("event_id"),
+        "first_event_hash": record.get("event_hash"),
+        "last_event_hash": record.get("event_hash"),
+        "first_event_type": record.get("event_type"),
+        "last_event_type": record.get("event_type"),
+        "first_timestamp": record.get("ts") or record.get("timestamp"),
+        "last_timestamp": record.get("ts") or record.get("timestamp"),
+        "record_count": 1,
+        "contains_payload_refs": record.get("payload_compacted") is True,
+    }
+
+
+def _event_segment_entry_stat_matches(path: Path, entry: Mapping[str, Any]) -> bool:
+    try:
+        stat_result = path.stat()
+    except OSError:
+        return False
+    return (
+        int(entry.get("size_bytes") or -1) == int(stat_result.st_size)
+        and int(entry.get("mtime_ns") or -1) == int(stat_result.st_mtime_ns)
+    )
+
+
+def _event_segment_entry_from_scan(path: Path) -> dict[str, Any] | None:
+    records = _read_jsonl(path)
+    if not records:
+        return None
+    try:
+        stat_result = path.stat()
+    except OSError:
+        size_bytes = 0
+        mtime_ns = 0
+    else:
+        size_bytes = int(stat_result.st_size)
+        mtime_ns = int(stat_result.st_mtime_ns)
+    first = records[0]
+    last = records[-1]
+    return {
+        "path": path.name,
+        "size_bytes": size_bytes,
+        "mtime_ns": mtime_ns,
+        "first_sequence": _event_sequence_value(first),
+        "last_sequence": _event_sequence_value(last),
+        "first_event_id": first.get("event_id"),
+        "last_event_id": last.get("event_id"),
+        "first_event_hash": first.get("event_hash"),
+        "last_event_hash": last.get("event_hash"),
+        "first_event_type": first.get("event_type"),
+        "last_event_type": last.get("event_type"),
+        "first_timestamp": first.get("ts") or first.get("timestamp"),
+        "last_timestamp": last.get("ts") or last.get("timestamp"),
+        "record_count": len(records),
+        "contains_payload_refs": any(record.get("payload_compacted") is True for record in records),
+    }
+
+
+def _manifest_event_head(segment: Mapping[str, Any] | None, *, prefix: str) -> dict[str, Any] | None:
+    if not isinstance(segment, Mapping):
+        return None
+    sequence = segment.get(f"{prefix}_sequence")
+    event_id = segment.get(f"{prefix}_event_id")
+    event_hash = segment.get(f"{prefix}_event_hash")
+    if sequence is None and event_id is None and event_hash is None:
+        return None
+    return {
+        "seq": sequence,
+        "sequence": sequence,
+        "event_id": event_id,
+        "event_hash": event_hash,
+        "event_type": segment.get(f"{prefix}_event_type"),
+        "ts": segment.get(f"{prefix}_timestamp"),
+    }
+
+
 def _event_log_tail(events_dir: Path) -> dict[str, Any]:
+    manifest = load_event_segment_manifest(events_dir)
+    latest_event = manifest.get("latest_event") if isinstance(manifest, Mapping) else None
+    if isinstance(latest_event, Mapping):
+        sequence = _event_sequence_value(latest_event)
+        if sequence is not None:
+            return {
+                "sequence": sequence,
+                "event_id": latest_event.get("event_id"),
+                "event_hash": latest_event.get("event_hash"),
+            }
     tail: dict[str, Any] = {"sequence": 0, "event_id": None, "event_hash": None}
     for record in _iter_event_records(events_dir):
         sequence = _event_sequence_value(record)

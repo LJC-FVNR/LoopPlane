@@ -13,6 +13,7 @@ from hashlib import sha256
 from pathlib import Path
 from unittest.mock import patch
 
+import runtime.scheduler as scheduler_module
 from runtime.exit_codes import (
     EXIT_GENERIC_FAILURE,
     EXIT_PLAN_MALFORMED,
@@ -1435,6 +1436,14 @@ class PrepareRunTest(unittest.TestCase):
             self.assertTrue(lease["lease_expires_at"])
             self.assertEqual(lease["prompt_path"], ".loopplane/runtime/runs/" + run.run_id + "/prompt.md")
             self.assertEqual(lease["adapter_result_path"], ".loopplane/runtime/runs/" + run.run_id + "/adapter_result.json")
+            lease_fingerprint = json.loads(
+                (project / ".loopplane" / "runtime" / scheduler_module.ACTIVE_RUN_LEASE_FINGERPRINT_FILENAME).read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(lease_fingerprint["schema_version"], "1.5")
+            self.assertEqual(lease_fingerprint["lease_file"], f"{run.run_id}.json")
+            self.assertTrue(lease_fingerprint["update_id"])
 
             metadata = json.loads((run.scheduler_run_dir / "run_metadata.json").read_text(encoding="utf-8"))
             self.assertEqual(metadata["run_id"], run.run_id)
@@ -3073,6 +3082,247 @@ class SchedulerMainLoopTest(unittest.TestCase):
             self.assertEqual(events[1]["event_hash"], event_hash(events[1]))
             self.assertEqual(events[1]["payload"]["task_id"], "T002")
             self.assertEqual(events[1]["subject"]["run_id"], "run_002")
+            manifest = scheduler_module.load_event_segment_manifest(project / ".loopplane" / "runtime" / "events")
+            self.assertIsNotNone(manifest)
+            self.assertEqual(manifest["event_count"], 2)
+            self.assertEqual(manifest["latest_event"]["event_id"], events[1]["event_id"])
+            self.assertEqual(manifest["segments"][0]["path"], "events_000001.jsonl")
+            self.assertEqual(manifest["segments"][0]["first_sequence"], 1)
+            self.assertEqual(manifest["segments"][0]["last_sequence"], 2)
+
+    def test_migrate_repair_event_manifest_rebuilds_missing_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "Repair event manifest smoke.")
+            context_result = load_scheduler_context(project)
+            self.assertTrue(context_result["ok"], context_result)
+            context = context_result["context"]
+            append_event(
+                context.paths,
+                workflow_id=context.workflow_id,
+                event_type="first_event",
+                data={"task_id": "T001"},
+                snapshot_interval=None,
+            )
+            append_event(
+                context.paths,
+                workflow_id=context.workflow_id,
+                event_type="second_event",
+                data={"task_id": "T002"},
+                snapshot_interval=None,
+            )
+            manifest_path = project / ".loopplane" / "runtime" / "events" / "manifest.json"
+            self.assertTrue(manifest_path.is_file())
+            manifest_path.unlink()
+
+            dry_run = subprocess.run(
+                [
+                    sys.executable,
+                    str(LoopPlane),
+                    "migrate",
+                    "--project",
+                    str(project),
+                    "--repair-event-manifest",
+                    "--dry-run",
+                    "--json",
+                ],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+            self.assertEqual(dry_run.returncode, 0, dry_run.stderr + dry_run.stdout)
+            dry_payload = json.loads(dry_run.stdout)
+            self.assertEqual(dry_payload["status"], "planned", json.dumps(dry_payload, indent=2, sort_keys=True))
+            self.assertEqual(dry_payload["event_count"], 2)
+            self.assertFalse(manifest_path.exists())
+
+            repaired = subprocess.run(
+                [
+                    sys.executable,
+                    str(LoopPlane),
+                    "migrate",
+                    "--project",
+                    str(project),
+                    "--repair-event-manifest",
+                    "--json",
+                ],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+            self.assertEqual(repaired.returncode, 0, repaired.stderr + repaired.stdout)
+            payload = json.loads(repaired.stdout)
+            self.assertEqual(payload["status"], "repaired", json.dumps(payload, indent=2, sort_keys=True))
+            self.assertEqual(payload["modified_files"], [".loopplane/runtime/events/manifest.json"])
+            manifest = scheduler_module.load_event_segment_manifest(project / ".loopplane" / "runtime" / "events")
+            self.assertIsNotNone(manifest)
+            self.assertEqual(manifest["event_count"], 2)
+            self.assertEqual(manifest["latest_event"]["event_id"], "evt_000000000002")
+
+            current = scheduler_module.repair_event_segment_manifest(project)
+            self.assertTrue(current["ok"], json.dumps(current, indent=2, sort_keys=True))
+            self.assertEqual(current["status"], "current")
+            self.assertEqual(current["modified_files"], [])
+
+    def test_large_event_payload_is_compacted_to_sidecar_without_breaking_event_chain(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "Large event sidecar smoke.")
+            context_result = load_scheduler_context(project)
+            self.assertTrue(context_result["ok"], context_result)
+            context = context_result["context"]
+
+            original_threshold = scheduler_module.EVENT_PAYLOAD_SIDECAR_THRESHOLD_BYTES
+            scheduler_module.EVENT_PAYLOAD_SIDECAR_THRESHOLD_BYTES = 256
+            try:
+                append_event(
+                    context.paths,
+                    workflow_id=context.workflow_id,
+                    event_type="expansion_planner_run_classified",
+                    run_id="run_expansion",
+                    data={
+                        "status": "applied",
+                        "proposal_id": "exp_large",
+                        "expansion_type": "objective_gap",
+                        "resolution_strategy": "reopen_failure_after_new_evidence",
+                        "risk": "medium",
+                        "added_task_ids": ["SE001"],
+                        "proposal_apply": {"patch": "x" * 4096, "status": "applied"},
+                        "selected_candidate": {"rationale": "y" * 4096, "proposal_id": "exp_large"},
+                    },
+                    snapshot_interval=1,
+                )
+            finally:
+                scheduler_module.EVENT_PAYLOAD_SIDECAR_THRESHOLD_BYTES = original_threshold
+
+            events = read_jsonl(project / ".loopplane" / "runtime" / "events" / "events_000001.jsonl")
+            self.assertEqual(len(events), 1)
+            event = events[0]
+            self.assertTrue(event["payload_compacted"])
+            self.assertEqual(event["payload"]["proposal_id"], "exp_large")
+            self.assertEqual(event["payload"]["expansion_type"], "objective_gap")
+            self.assertEqual(event["payload"]["risk"], "medium")
+            self.assertEqual(event["payload"]["payload_summary"]["expansion_type"], "objective_gap")
+            self.assertNotIn("proposal_apply", event["payload"])
+            self.assertIn("proposal_apply_summary", event["payload"])
+            self.assertLess(len(json.dumps(event, sort_keys=True)), 4096)
+            sidecar_path = project / event["payload_ref"]
+            self.assertTrue(sidecar_path.is_file())
+            sidecar = json.loads(sidecar_path.read_text(encoding="utf-8"))
+            self.assertEqual(sidecar["payload"]["proposal_apply"]["patch"], "x" * 4096)
+            self.assertEqual(event["payload_sha256"], sidecar["payload_sha256"])
+            self.assertEqual(event["payload_size_bytes"], sidecar["payload_size_bytes"])
+            self.assertEqual(event["event_hash"], event_hash(event))
+            manifest = scheduler_module.load_event_segment_manifest(project / ".loopplane" / "runtime" / "events")
+            self.assertIsNotNone(manifest)
+            self.assertTrue(manifest["segments"][0]["contains_payload_refs"])
+
+            projection = load_event_log_projection(context.paths)
+            self.assertEqual(projection["state"]["event_count"], 1)
+            self.assertEqual(projection["state"]["latest_event"]["event_id"], event["event_id"])
+
+    def test_migrate_compact_event_payloads_rewrites_only_events_after_latest_snapshot_by_default(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "Historical event compaction smoke.")
+            context_result = load_scheduler_context(project)
+            self.assertTrue(context_result["ok"], context_result)
+            context = context_result["context"]
+            large_payload = {"task_id": "T001", "message": "x" * 512}
+            append_event(
+                context.paths,
+                workflow_id=context.workflow_id,
+                event_type="large_before_snapshot",
+                data=large_payload,
+                snapshot_interval=2,
+            )
+            append_event(
+                context.paths,
+                workflow_id=context.workflow_id,
+                event_type="snapshot_boundary",
+                data={"task_id": "T002"},
+                snapshot_interval=2,
+            )
+            append_event(
+                context.paths,
+                workflow_id=context.workflow_id,
+                event_type="large_after_snapshot",
+                data={"task_id": "T003", "message": "y" * 512},
+                snapshot_interval=2,
+            )
+            event_path = project / ".loopplane" / "runtime" / "events" / "events_000001.jsonl"
+            before_events = read_jsonl(event_path)
+            self.assertFalse(any(event.get("payload_compacted") for event in before_events))
+
+            dry_run = subprocess.run(
+                [
+                    sys.executable,
+                    str(LoopPlane),
+                    "migrate",
+                    "--project",
+                    str(project),
+                    "--compact-event-payloads",
+                    "--payload-threshold-bytes",
+                    "128",
+                    "--dry-run",
+                    "--json",
+                ],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+            self.assertEqual(dry_run.returncode, 0, dry_run.stderr + dry_run.stdout)
+            dry_payload = json.loads(dry_run.stdout)
+            self.assertEqual(dry_payload["status"], "planned", json.dumps(dry_payload, indent=2, sort_keys=True))
+            self.assertEqual(dry_payload["after_sequence"], 2)
+            self.assertEqual(dry_payload["candidate_records"], 1)
+            self.assertEqual(dry_payload["compressed_records"], 1)
+            self.assertFalse((project / ".loopplane" / "runtime" / "event_payloads").exists())
+
+            compacted = subprocess.run(
+                [
+                    sys.executable,
+                    str(LoopPlane),
+                    "migrate",
+                    "--project",
+                    str(project),
+                    "--compact-event-payloads",
+                    "--payload-threshold-bytes",
+                    "128",
+                    "--json",
+                ],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+            self.assertEqual(compacted.returncode, 0, compacted.stderr + compacted.stdout)
+            payload = json.loads(compacted.stdout)
+            self.assertEqual(payload["status"], "compacted", json.dumps(payload, indent=2, sort_keys=True))
+            self.assertEqual(payload["candidate_records"], 1)
+            self.assertEqual(payload["compressed_records"], 1)
+            self.assertTrue(payload["backup_dir"])
+            self.assertTrue((project / payload["backup_dir"] / "events_000001.jsonl").is_file())
+
+            events = read_jsonl(event_path)
+            self.assertFalse(events[0].get("payload_compacted"))
+            self.assertFalse(events[1].get("payload_compacted"))
+            self.assertTrue(events[2].get("payload_compacted"))
+            self.assertEqual(events[2]["prev_event_hash"], events[1]["event_hash"])
+            self.assertEqual(events[2]["event_hash"], event_hash(events[2]))
+            sidecar_path = project / events[2]["payload_ref"]
+            self.assertTrue(sidecar_path.is_file())
+            sidecar = json.loads(sidecar_path.read_text(encoding="utf-8"))
+            self.assertEqual(sidecar["payload"]["message"], "y" * 512)
+            self.assertEqual(sidecar["payload_sha256"], events[2]["payload_sha256"])
+            manifest = scheduler_module.load_event_segment_manifest(project / ".loopplane" / "runtime" / "events")
+            self.assertIsNotNone(manifest)
+            self.assertTrue(manifest["segments"][0]["contains_payload_refs"])
+            projection = load_event_log_projection(context.paths)
+            self.assertEqual(projection["state"]["event_count"], 3)
 
     def test_event_append_requires_event_append_lock(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

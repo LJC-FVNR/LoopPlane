@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "LoopPlane run details manifest read model",
+  "type": "object",
+  "required": ["schema_version", "workflow_id", "generated_at", "source_hashes", "detail_dir", "run_count", "runs"],
+  "properties": {
+    "schema_version": {"const": "1.5"},
+    "workflow_id": {"type": "string"},
+    "generated_at": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"},
+    "source_hashes": {"type": "object"},
+    "last_event_seq": {"type": ["integer", "null"]},
+    "source_event_id": {"type": ["string", "null"]},
+    "detail_dir": {"type": "string", "minLength": 1},
+    "run_count": {"type": "integer", "minimum": 0},
+    "runs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["run_id", "path"],
+        "properties": {
+          "run_id": {"type": "string", "minLength": 1},
+          "node_id": {"type": ["string", "null"]},
+          "task_id": {"type": ["string", "null"]},
+          "role": {"type": ["string", "null"]},
+          "status": {"type": ["string", "null"]},
+          "path": {"type": "string", "minLength": 1},
+          "available_sections": {"type": "array", "items": {"type": "string"}},
+          "missing_sections": {"type": "array", "items": {"type": "string"}}
+        }
+      }
+    }
+  }
+}

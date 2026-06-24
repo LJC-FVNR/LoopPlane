@@ -4,6 +4,8 @@
   var REFRESH_INTERVAL_MS = 30000;
   var FILE_PREVIEW_MAX_LINES = 500;
   var activePayload = null;
+  var dashboardPayloadCache = {};
+  var dashboardEtagCache = {};
   var refreshTimer = null;
   var refreshInFlight = false;
   var initialLiveRefreshStarted = false;
@@ -658,6 +660,7 @@
       sha256: true,
       event_hash: true,
       events_sha256: true,
+      events_segment_manifest: true,
       content_sha256: true,
       source_hashes: true,
       token: true,
@@ -1426,6 +1429,11 @@
       positiveInteger(workflowGraph && workflowGraph.source_hashes && workflowGraph.source_hashes.events_count);
     var eventLabel = totalEvents && totalEvents > eventCount ? "recent events" : "events";
     var eventSuffix = totalEvents && totalEvents > eventCount ? '<small>of ' + escapeHtml(totalEvents) + "</small>" : "";
+    var aggregation = workflowGraph && workflowGraph.self_expansion_aggregation && typeof workflowGraph.self_expansion_aggregation === "object" ? workflowGraph.self_expansion_aggregation : {};
+    var aggregatedCount = positiveInteger(aggregation.aggregated_node_count) || 0;
+    var aggregationHtml = aggregatedCount ?
+      "<span><strong>" + escapeHtml(aggregatedCount) + "</strong> self-expansion aggregated</span>" :
+      "";
     var checkCount = nodes.filter(isGraphCheckNode).length;
     var attentionCount = nodes.filter(function (node) {
       var tier = statusTier(node.status);
@@ -1436,6 +1444,7 @@
       "<span><strong>" + escapeHtml(taskCount) + "</strong> tasks</span>" +
       "<span><strong>" + escapeHtml(agentCount) + "</strong> agents</span>" +
       "<span><strong>" + escapeHtml(eventCount) + "</strong> " + escapeHtml(eventLabel) + eventSuffix + "</span>" +
+      aggregationHtml +
       "<span><strong>" + escapeHtml(checkCount) + "</strong> checks</span>" +
       '<span data-status-tier="' + escapeHtml(attentionCount ? "warning" : "muted") + '"><strong>' + escapeHtml(attentionCount) + "</strong> attention</span>" +
       "</div>";
@@ -3108,7 +3117,24 @@
     normalized.inspector_console = payload.inspector_console || base.inspector_console || {};
     normalized.read_model_rebuild = payload.read_model_rebuild || base.read_model_rebuild || {};
     normalized.node_details = payload.node_details || base.node_details || {};
+    normalized.initial_dashboard_load = payload.initial_dashboard_load === true;
     return normalized;
+  }
+
+  function dashboardCacheKey(workflowId) {
+    return String(workflowId || "").trim();
+  }
+
+  function rememberDashboardPayload(payload, etag) {
+    var workflowId = dashboardCacheKey(payload && payload.workflow_id);
+    if (!workflowId) {
+      return;
+    }
+    dashboardPayloadCache[workflowId] = payload;
+    var nextEtag = etag || (payload && payload.dashboard_etag) || "";
+    if (nextEtag) {
+      dashboardEtagCache[workflowId] = nextEtag;
+    }
   }
 
   function captureDashboardState() {
@@ -3187,6 +3213,7 @@
     var feed = jsonlModel(payload, "dashboard_feed.jsonl");
     var approvalControls = payload.approval_controls && typeof payload.approval_controls === "object" ? payload.approval_controls : {};
     activePayload = payload;
+    rememberDashboardPayload(payload);
     var title = document.getElementById("dashboard-workflow-title");
     if (title) {
       title.textContent = workflowDisplayTitle(payload);
@@ -3308,13 +3335,17 @@
       return;
     }
     var rebuild = payload && payload.read_model_rebuild && typeof payload.read_model_rebuild === "object" ? payload.read_model_rebuild : {};
+    var needsInitialDashboardLoad = payload && payload.initial_dashboard_load === true;
     var needsLiveRefresh = readModelLiveRefreshExpected(payload, rebuild);
-    setRefreshStatus(needsLiveRefresh ? "Refreshing read models now..." : "Auto-refresh every 30s.", needsLiveRefresh ? "active" : "success");
+    setRefreshStatus(
+      needsInitialDashboardLoad ? "Loading workflow data..." : (needsLiveRefresh ? "Refreshing read models now..." : "Auto-refresh every 30s."),
+      (needsInitialDashboardLoad || needsLiveRefresh) ? "active" : "success"
+    );
     updateRefreshDisplay(payload, "");
     startAutoRefresh();
-    if (needsLiveRefresh && !initialLiveRefreshStarted) {
+    if ((needsInitialDashboardLoad || needsLiveRefresh) && !initialLiveRefreshStarted) {
       initialLiveRefreshStarted = true;
-      refreshDashboard("initial");
+      refreshDashboard(needsInitialDashboardLoad ? "initial-load" : "initial");
     }
   }
 
@@ -3342,10 +3373,14 @@
       return;
     }
     refreshInFlight = true;
-    setRefreshStatus(source === "manual" ? "Refreshing now..." : (source === "initial" ? "Refreshing read models now..." : "Auto-refreshing..."), "active");
+    setRefreshStatus(source === "manual" ? "Refreshing now..." : (source === "initial-load" ? "Loading workflow data..." : (source === "initial" ? "Refreshing read models now..." : "Auto-refreshing...")), "active");
     fetchDashboardData(payload.workflow_id).then(function (nextPayload) {
       refreshInFlight = false;
-      applyPayload(nextPayload, source === "manual" ? "Manual refresh complete." : (source === "initial" ? "Live read-model refresh complete." : "Auto refresh complete."));
+      if (nextPayload.dashboard_not_modified) {
+        setRefreshStatus(source === "manual" ? "No dashboard changes." : "Dashboard unchanged. Auto-refresh every 30s.", "success");
+        return;
+      }
+      applyPayload(nextPayload, source === "manual" ? "Manual refresh complete." : (source === "initial-load" ? "Workflow data loaded." : (source === "initial" ? "Live read-model refresh complete." : "Auto refresh complete.")));
     }).catch(function (error) {
       refreshInFlight = false;
       setRefreshStatus("Refresh failed: " + error.message, "danger");
@@ -3675,15 +3710,35 @@
 
   function fetchDashboardData(workflowId) {
     var url = "/api/workflows/" + encodeURIComponent(workflowId) + "/dashboard-data" + tokenQuery();
+    var cacheKey = dashboardCacheKey(workflowId);
+    var headers = {"Accept": "application/json"};
+    if (cacheKey && dashboardPayloadCache[cacheKey] && dashboardEtagCache[cacheKey]) {
+      headers["If-None-Match"] = dashboardEtagCache[cacheKey];
+    }
     return window.fetch(url, {
       credentials: "same-origin",
-      headers: {"Accept": "application/json"}
+      headers: headers
     }).then(function (response) {
+      if (response.status === 304) {
+        var cached = dashboardPayloadCache[cacheKey];
+        if (!cached) {
+          throw new Error("dashboard data unchanged but no cached payload is available");
+        }
+        var unchanged = normalizePayload(cached, workflowId);
+        unchanged.dashboard_not_modified = true;
+        return unchanged;
+      }
       return response.json().then(function (payload) {
         if (!response.ok || !payload.ok) {
           throw new Error((payload.errors && payload.errors.join("; ")) || payload.status || "dashboard data unavailable");
         }
-        return normalizePayload(payload, workflowId);
+        var etag = response.headers && response.headers.get ? response.headers.get("ETag") : "";
+        if (etag) {
+          payload.dashboard_etag = etag;
+        }
+        var normalized = normalizePayload(payload, workflowId);
+        rememberDashboardPayload(normalized, etag);
+        return normalized;
       });
     });
   }

@@ -70,6 +70,7 @@ class SchemaTarget:
     relative_path: str
     schema_file: str
     required: bool = True
+    kind: str = "json"
 
     @property
     def path_key(self) -> str:
@@ -109,6 +110,12 @@ READ_MODEL_JSON_TARGETS = (
     ("workflow_graph.json", "read_model_workflow_graph.schema.json"),
     ("metrics.json", "read_model_metrics.schema.json"),
     ("version_control_status.json", "read_model_version_control_status.schema.json"),
+    ("run_details_manifest.json", "read_model_run_details_manifest.schema.json"),
+    ("build_manifest.json", "read_model_build_manifest.schema.json"),
+)
+
+READ_MODEL_JSONL_TARGETS = (
+    ("run_index.jsonl", "read_model_run_index.schema.json"),
 )
 
 OPTIONAL_JSON_TARGETS = (
@@ -167,6 +174,12 @@ def schema_targets(project_root: Path | str, workflow_config: Mapping[str, Any] 
         targets.append(SchemaTarget(dashboard_server_target, "dashboard_server.schema.json", required=False))
     for relative, schema_file in READ_MODEL_JSON_TARGETS:
         targets.append(SchemaTarget(f"{read_models_dir}/{relative}", schema_file, required=False))
+    for relative, schema_file in READ_MODEL_JSONL_TARGETS:
+        targets.append(SchemaTarget(f"{read_models_dir}/{relative}", schema_file, required=False, kind="jsonl"))
+    run_details_dir = paths.read_models_dir / "run_details"
+    if run_details_dir.exists():
+        for detail_path in sorted(run_details_dir.glob("*.json")):
+            targets.append(SchemaTarget(_path_for_record(project, detail_path), "read_model_run_detail.schema.json", required=False))
     for relative, schema_file in OPTIONAL_JSON_TARGETS:
         targets.append(SchemaTarget(f"{runtime_dir}/{relative}", schema_file, required=False))
     return tuple(_dedupe_targets(targets))
@@ -211,6 +224,26 @@ def validate_loopplane_home_schemas(home: Path | str) -> dict[str, Any]:
         checked_files.append(target.relative_path)
         schema = _load_schema(target.schema_file)
         schemas_used.append(target.schema_file)
+        if target.kind == "jsonl":
+            records, read_error = _read_jsonl_values(path)
+            if read_error:
+                errors.append(f"{target.relative_path}: {read_error}")
+                continue
+            for line_number, record in records:
+                location = f"{target.relative_path}:{line_number}"
+                errors.extend(_validate_against_schema(record, schema, location))
+                if isinstance(record, Mapping):
+                    errors.extend(
+                        _custom_json_checks(
+                            location,
+                            record,
+                            workflow_id=workflow_id,
+                            workspace_id=workspace_id,
+                            registry_workflow_ids=registry_workflow_ids,
+                            current_workflow_id=current_workflow_id,
+                        )
+                    )
+            continue
         data, read_error = _read_json_value(path)
         if read_error:
             errors.append(f"{target.relative_path}: {read_error}")
@@ -580,6 +613,23 @@ def _read_json_value(path: Path) -> tuple[Any, str | None]:
         return None, f"invalid JSON: {error.msg}"
     except OSError as error:
         return None, f"read error: {type(error).__name__}: {error}"
+
+
+def _read_jsonl_values(path: Path) -> tuple[list[tuple[int, Any]], str | None]:
+    records: list[tuple[int, Any]] = []
+    try:
+        for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+            if not line.strip():
+                continue
+            try:
+                records.append((line_number, json.loads(line)))
+            except json.JSONDecodeError as error:
+                return [], f"invalid JSONL on line {line_number}: {error.msg}"
+    except FileNotFoundError:
+        return [], "missing"
+    except OSError as error:
+        return [], f"read error: {type(error).__name__}: {error}"
+    return records, None
 
 
 def _validate_against_schema(instance: Any, schema: Mapping[str, Any], location: str) -> list[str]:

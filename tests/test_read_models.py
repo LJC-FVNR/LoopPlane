@@ -8,6 +8,8 @@ import unittest
 from hashlib import sha256
 from pathlib import Path
 
+import runtime.read_models as read_models_module
+import runtime.scheduler as scheduler_module
 from runtime.exit_codes import EXIT_SECURITY_POLICY_VIOLATION
 from runtime.init_workflow import LAYOUT_CANONICAL_V16, init_project
 from runtime.path_resolution import WorkflowPaths, load_workflow_config
@@ -27,6 +29,12 @@ LoopPlane = REPO_ROOT / "scripts" / "loopplane"
 
 def read_jsonl(path: Path) -> list[dict[str, object]]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+def read_run_detail(paths: WorkflowPaths, run_id: str) -> dict[str, object]:
+    manifest = json.loads((paths.read_models_dir / "run_details_manifest.json").read_text(encoding="utf-8"))
+    entry = next(record for record in manifest["runs"] if record["run_id"] == run_id)
+    return json.loads((paths.project_root / entry["path"]).read_text(encoding="utf-8"))
 
 
 def file_hashes(project: Path, paths: list[Path]) -> dict[str, str]:
@@ -423,13 +431,401 @@ class ReadModelBuilderIntegrationTest(unittest.TestCase):
             self.assertEqual(len(active_runs), 1)
             self.assertTrue(active_runs[0]["active"])
             self.assertEqual(active_runs[0]["status"], "running")
-            sections = {section["key"]: section for section in active_runs[0]["details"]["sections"]}
+            self.assertNotIn("details", active_runs[0])
+            run_detail = read_run_detail(paths, "run_active")
+            sections = {section["key"]: section for section in run_detail["details"]["sections"]}
             self.assertTrue(sections["logs"]["available"])
             log_paths = [item["path"] for item in sections["logs"]["items"]]
             self.assertIn(".loopplane/runtime/runs/run_active/stdout.log", log_paths)
             stdout_log = next(item for item in sections["logs"]["items"] if item["path"].endswith("stdout.log"))
             self.assertTrue(stdout_log["pending"])
             self.assertEqual(stdout_log["size_bytes"], 0)
+
+    def test_rebuild_bounds_large_log_and_artifact_previews(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "Bound large dashboard previews.")
+            configure_fake_summary_agent(project)
+            write_plan(project, validation="file_exists: artifacts/result.txt")
+            run_dir = write_worker_run(project, create_artifact=True)
+            large_text = "large-preview-line\n" * 2048
+            (run_dir / "logs" / "stdout.log").write_text(large_text, encoding="utf-8")
+            (run_dir / "artifacts" / "large.txt").write_text(large_text, encoding="utf-8")
+
+            result = rebuild_read_models(project)
+
+            self.assertTrue(result["ok"], json.dumps(result, indent=2, sort_keys=True))
+            paths = WorkflowPaths.from_config(project, load_workflow_config(project))
+            run_summaries = read_jsonl(paths.read_models_dir / "run_summaries.jsonl")
+            run_summary = next(record for record in run_summaries if record.get("run_id") == run_dir.name)
+            self.assertNotIn("details", run_summary)
+            self.assertTrue(run_summary["details_externalized"])
+            run_detail = read_run_detail(paths, run_dir.name)
+            sections = {section["key"]: section for section in run_detail["details"]["sections"]}
+
+            stdout_log = next(item for item in sections["logs"]["items"] if item["path"].endswith("stdout.log"))
+            self.assertEqual(stdout_log["size_bytes"], len(large_text.encode("utf-8")))
+            self.assertTrue(stdout_log["truncated"])
+            self.assertFalse(stdout_log["full_sha256_available"])
+            self.assertIn("preview_sha256", stdout_log)
+            self.assertNotIn("sha256", stdout_log)
+
+            large_artifact = next(item for item in sections["artifacts"]["items"] if item["path"].endswith("large.txt"))
+            self.assertEqual(large_artifact["size_bytes"], len(large_text.encode("utf-8")))
+            self.assertTrue(large_artifact["truncated"])
+            self.assertFalse(large_artifact["full_sha256_available"])
+            self.assertIn("preview_sha256", large_artifact)
+            self.assertNotIn("sha256", large_artifact)
+
+    def test_rebuild_limits_persisted_run_details_but_keeps_full_run_index(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "Limit persisted run details.")
+            configure_fake_summary_agent(project)
+            write_plan(project, validation="file_exists: artifacts/result.txt")
+            for run_id in ("run_a", "run_b", "run_c"):
+                write_worker_run(project, run_id=run_id, create_artifact=True)
+
+            original_limit = read_models_module.RUN_DETAIL_BUILD_LIMIT
+            read_models_module.RUN_DETAIL_BUILD_LIMIT = 1
+            try:
+                result = rebuild_read_models(project)
+            finally:
+                read_models_module.RUN_DETAIL_BUILD_LIMIT = original_limit
+
+            self.assertTrue(result["ok"], json.dumps(result, indent=2, sort_keys=True))
+            paths = WorkflowPaths.from_config(project, load_workflow_config(project))
+            run_index = read_jsonl(paths.read_models_dir / "run_index.jsonl")
+            self.assertEqual({record["run_id"] for record in run_index}, {"run_a", "run_b", "run_c"})
+            self.assertEqual(sum(1 for record in run_index if record.get("detail_status") == "available"), 1)
+            manifest = json.loads((paths.read_models_dir / "run_details_manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(manifest["run_count"], 1)
+            detail_files = sorted((paths.read_models_dir / "run_details").glob("*.json"))
+            self.assertEqual(len(detail_files), 1)
+
+    def test_rebuild_uses_fast_event_source_refs_without_full_event_hash(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "Fast event source references.")
+            configure_fake_summary_agent(project)
+            write_plan(project, validation="file_exists: artifacts/result.txt")
+            write_worker_run(project, run_id="run_fast_events", create_artifact=True)
+            paths = WorkflowPaths.from_config(project, load_workflow_config(project))
+            append_event(
+                paths,
+                workflow_id=paths.workflow_id,
+                event_type="fast_event_source_marker",
+                data={"task_id": "T001"},
+                snapshot_interval=None,
+            )
+
+            original = read_models_module._events_sha256
+            original_read_jsonl = read_models_module._read_jsonl
+
+            def fail_full_event_hash(*args: object, **kwargs: object) -> str:
+                raise AssertionError("read-model rebuild should use fast event source refs")
+
+            def fail_full_event_jsonl(path: Path, *args: object, **kwargs: object) -> list[dict[str, object]]:
+                if path.name.startswith("events_") and path.suffix == ".jsonl":
+                    raise AssertionError("read-model rebuild should read bounded event tails")
+                return original_read_jsonl(path, *args, **kwargs)
+
+            read_models_module._events_sha256 = fail_full_event_hash
+            read_models_module._read_jsonl = fail_full_event_jsonl
+            try:
+                result = rebuild_read_models(project)
+            finally:
+                read_models_module._events_sha256 = original
+                read_models_module._read_jsonl = original_read_jsonl
+
+            self.assertTrue(result["ok"], json.dumps(result, indent=2, sort_keys=True))
+            workflow_status = json.loads((paths.read_models_dir / "workflow_status.json").read_text(encoding="utf-8"))
+            source_hashes = workflow_status["source_hashes"]
+            self.assertEqual(source_hashes["events_source_mode"], "event_manifest")
+            self.assertIn("events_segment_manifest", source_hashes)
+            self.assertNotIn("events_sha256", source_hashes)
+
+    def test_strict_read_model_diagnostics_hashes_events_and_verifies_payload_sidecars(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "Strict read-model diagnostics.")
+            configure_fake_summary_agent(project)
+            write_plan(project, validation="file_exists: artifacts/result.txt")
+            write_worker_run(project, run_id="run_strict", create_artifact=True)
+            paths = WorkflowPaths.from_config(project, load_workflow_config(project))
+            original_threshold = scheduler_module.EVENT_PAYLOAD_SIDECAR_THRESHOLD_BYTES
+            scheduler_module.EVENT_PAYLOAD_SIDECAR_THRESHOLD_BYTES = 128
+            try:
+                append_event(
+                    paths,
+                    workflow_id=paths.workflow_id,
+                    event_type="strict_diagnostics_large_payload",
+                    data={"task_id": "T001", "notes": "x" * 512},
+                    snapshot_interval=None,
+                )
+            finally:
+                scheduler_module.EVENT_PAYLOAD_SIDECAR_THRESHOLD_BYTES = original_threshold
+            rebuild = rebuild_read_models(project)
+            self.assertTrue(rebuild["ok"], json.dumps(rebuild, indent=2, sort_keys=True))
+
+            diagnostics = read_models_module.strict_read_model_diagnostics(project)
+
+            self.assertTrue(diagnostics["ok"], json.dumps(diagnostics, indent=2, sort_keys=True))
+            self.assertEqual(diagnostics["checks"]["events"]["chain"]["status"], "pass")
+            self.assertTrue(str(diagnostics["checks"]["events"]["events_sha256"]).startswith("sha256:"))
+            self.assertEqual(diagnostics["checks"]["payload_sidecars"]["referenced"], 1)
+            self.assertEqual(diagnostics["checks"]["payload_sidecars"]["checked"], 1)
+            self.assertEqual(diagnostics["checks"]["payload_sidecars"]["mismatch"], 0)
+
+            sidecar_path = next((paths.runtime_dir / scheduler_module.EVENT_PAYLOAD_SIDECAR_DIR).glob("*.json"))
+            sidecar = json.loads(sidecar_path.read_text(encoding="utf-8"))
+            sidecar["payload"]["notes"] = "tampered"
+            sidecar_path.write_text(json.dumps(sidecar, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+            broken = read_models_module.strict_read_model_diagnostics(project)
+
+            self.assertFalse(broken["ok"])
+            self.assertEqual(broken["checks"]["payload_sidecars"]["status"], "fail")
+            self.assertEqual(broken["checks"]["payload_sidecars"]["mismatch"], 1)
+            self.assertIn("event payload sidecar integrity check failed", broken["errors"])
+
+    def test_strict_read_model_diagnostics_detects_missing_split_run_detail(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "Strict split run detail diagnostics.")
+            configure_fake_summary_agent(project)
+            write_plan(project, validation="file_exists: artifacts/result.txt")
+            write_worker_run(project, run_id="run_detail_missing", create_artifact=True)
+            rebuild = rebuild_read_models(project)
+            self.assertTrue(rebuild["ok"], json.dumps(rebuild, indent=2, sort_keys=True))
+            paths = WorkflowPaths.from_config(project, load_workflow_config(project))
+            manifest = json.loads((paths.read_models_dir / "run_details_manifest.json").read_text(encoding="utf-8"))
+            detail_path = project / manifest["runs"][0]["path"]
+            detail_path.unlink()
+
+            diagnostics = read_models_module.strict_read_model_diagnostics(project)
+
+            self.assertFalse(diagnostics["ok"])
+            self.assertEqual(diagnostics["checks"]["run_details"]["status"], "fail")
+            self.assertEqual(diagnostics["checks"]["run_details"]["missing"], 1)
+            self.assertIn("run detail manifest integrity check failed", diagnostics["errors"])
+
+    def test_no_write_rebuild_comparison_detects_changed_read_model_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "No-write rebuild comparison.")
+            configure_fake_summary_agent(project)
+            write_plan(project, validation="file_exists: artifacts/result.txt")
+            write_worker_run(project, run_id="run_compare", create_artifact=True)
+            rebuild = rebuild_read_models(project)
+            self.assertTrue(rebuild["ok"], json.dumps(rebuild, indent=2, sort_keys=True))
+            paths = WorkflowPaths.from_config(project, load_workflow_config(project))
+            workflow_status_path = paths.read_models_dir / "workflow_status.json"
+            workflow_status = json.loads(workflow_status_path.read_text(encoding="utf-8"))
+            workflow_status["status"] = "tampered"
+            workflow_status_path.write_text(json.dumps(workflow_status, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+            compared = rebuild_read_models(project, write=False)
+
+            self.assertTrue(compared["ok"], json.dumps(compared, indent=2, sort_keys=True))
+            comparison = compared["no_write_comparison"]
+            self.assertEqual(comparison["status"], "fail")
+            self.assertIn("workflow_status.json", comparison["changed_files"])
+            self.assertEqual(compared["written_files"], [])
+
+    def test_rebuild_reuses_unchanged_run_details_from_build_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "Reuse run detail build manifest.")
+            configure_fake_summary_agent(project)
+            write_plan(project, validation="file_exists: artifacts/result.txt")
+            run_dir = write_worker_run(project, run_id="run_reuse", create_artifact=True)
+            first = rebuild_read_models(project)
+            self.assertTrue(first["ok"], json.dumps(first, indent=2, sort_keys=True))
+            paths = WorkflowPaths.from_config(project, load_workflow_config(project))
+            detail_path = next((paths.read_models_dir / "run_details").glob("*.json"))
+            detail_mtime_ns = detail_path.stat().st_mtime_ns
+            stale_detail_path = paths.read_models_dir / "run_details" / "stale_orphan.json"
+            stale_detail_path.write_text('{"schema_version": "1.5", "run_id": "stale"}\n', encoding="utf-8")
+
+            original = read_models_module._run_detail_sections
+
+            def fail_if_rebuilt(*args: object, **kwargs: object) -> dict[str, object]:
+                raise AssertionError("unchanged run detail should be reused")
+
+            read_models_module._run_detail_sections = fail_if_rebuilt
+            try:
+                second = rebuild_read_models(project)
+            finally:
+                read_models_module._run_detail_sections = original
+
+            self.assertTrue(second["ok"], json.dumps(second, indent=2, sort_keys=True))
+            self.assertEqual(second["diagnostics"]["counts"]["run_detail_records_reused"], 1)
+            self.assertEqual(second["diagnostics"]["counts"]["run_detail_files_reused_on_disk"], 1)
+            self.assertEqual(second["diagnostics"]["counts"]["run_detail_files_written"], 0)
+            self.assertEqual(second["diagnostics"]["counts"]["run_detail_files_removed"], 1)
+            self.assertEqual(detail_path.stat().st_mtime_ns, detail_mtime_ns)
+            self.assertFalse(any(str(item).endswith(detail_path.name) for item in second["written_files"]))
+            self.assertFalse(stale_detail_path.exists())
+            build_manifest = json.loads((paths.read_models_dir / "build_manifest.json").read_text(encoding="utf-8"))
+            detail_entry = next(record for record in build_manifest["run_details"] if record["run_id"] == "run_reuse")
+            self.assertTrue(detail_entry["detail_reused"])
+            workflow_status_path = paths.read_models_dir / "workflow_status.json"
+            workflow_status_mtime_ns = workflow_status_path.stat().st_mtime_ns
+            stable = rebuild_read_models(project)
+            self.assertTrue(stable["ok"], json.dumps(stable, indent=2, sort_keys=True))
+            self.assertEqual(stable["written_files"], [])
+            self.assertEqual(stable["diagnostics"]["counts"]["written_files"], 0)
+            self.assertEqual(stable["diagnostics"]["counts"]["read_model_files_written"], 0)
+            self.assertEqual(stable["diagnostics"]["counts"]["read_model_files_unchanged"], len(read_models_module.READ_MODEL_FILES))
+            self.assertEqual(stable["diagnostics"]["counts"]["run_detail_files_reused_on_disk"], 1)
+            self.assertEqual(workflow_status_path.stat().st_mtime_ns, workflow_status_mtime_ns)
+
+            (run_dir / "prompt.md").write_text("# Updated Prompt\n\nThis should invalidate the detail source.\n", encoding="utf-8")
+            calls = {"count": 0}
+
+            def count_rebuild(*args: object, **kwargs: object) -> dict[str, object]:
+                calls["count"] += 1
+                return original(*args, **kwargs)
+
+            read_models_module._run_detail_sections = count_rebuild
+            try:
+                third = rebuild_read_models(project)
+            finally:
+                read_models_module._run_detail_sections = original
+
+            self.assertTrue(third["ok"], json.dumps(third, indent=2, sort_keys=True))
+            self.assertEqual(calls["count"], 1)
+            self.assertEqual(third["diagnostics"]["counts"]["run_detail_records_reused"], 0)
+            self.assertEqual(third["diagnostics"]["counts"]["run_detail_files_written"], 1)
+
+    def test_rebuild_write_path_uses_single_writer_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "Read-model rebuild write lock.")
+            configure_fake_summary_agent(project)
+            write_plan(project, validation="file_exists: artifacts/result.txt")
+            write_worker_run(project, run_id="run_locked", create_artifact=True)
+            first = rebuild_read_models(project)
+            self.assertTrue(first["ok"], json.dumps(first, indent=2, sort_keys=True))
+            paths = WorkflowPaths.from_config(project, load_workflow_config(project))
+            protected = [
+                *(paths.read_models_dir / filename for filename in read_models_module.READ_MODEL_FILES),
+                *sorted((paths.read_models_dir / "run_details").glob("*.json")),
+            ]
+            before = file_hashes(project, protected)
+            lock = read_models_module.AtomicOwnerLock(
+                paths.runtime_dir / "lock" / "read_model_rebuild_lock",
+                "test-read-model-lock-holder",
+                ttl_seconds=60,
+            )
+            original_wait = read_models_module.READ_MODEL_REBUILD_LOCK_WAIT_SECONDS
+            read_models_module.READ_MODEL_REBUILD_LOCK_WAIT_SECONDS = 0
+            try:
+                with lock.acquire():
+                    locked = rebuild_read_models(project)
+            finally:
+                read_models_module.READ_MODEL_REBUILD_LOCK_WAIT_SECONDS = original_wait
+
+            after = file_hashes(project, protected)
+            self.assertFalse(locked["ok"])
+            self.assertEqual(locked["status"], "read_model_rebuild_locked")
+            self.assertEqual(locked["written_files"], [])
+            self.assertEqual(after, before)
+            self.assertFalse(locked["diagnostics"]["counts"]["write_lock_acquired"])
+
+    def test_self_expansion_graph_nodes_are_aggregated_beyond_detail_limit(self) -> None:
+        nodes = [
+            {
+                "node_id": f"node_event_{index}",
+                "type": "event",
+                "status": "expansion_planner_run_classified",
+                "event_type": "expansion_planner_run_classified",
+                "event_sequence": index,
+                "started_at": f"2026-06-11T00:0{index}:00Z",
+                "run_id": f"run_expansion_{index}",
+                "summary": {"one_line": "expansion", "highlights": [], "risks": []},
+            }
+            for index in range(1, 5)
+        ]
+        nodes.append(
+            {
+                "node_id": "node_worker",
+                "type": "worker",
+                "status": "pass",
+                "started_at": "2026-06-11T00:05:00Z",
+                "run_id": "run_worker",
+                "summary": {"one_line": "worker", "highlights": [], "risks": []},
+            }
+        )
+        edges = [
+            {"edge_id": f"edge_{index}", "source": f"node_event_{index}", "target": f"node_event_{index + 1}", "type": "event_sequence"}
+            for index in range(1, 4)
+        ]
+
+        graph = read_models_module._aggregate_self_expansion_graph(nodes, edges, detail_limit=2)
+
+        aggregation = graph["aggregation"]
+        self.assertTrue(aggregation["enabled"])
+        self.assertEqual(aggregation["aggregated_node_count"], 2)
+        visible_ids = {node["node_id"] for node in graph["nodes"]}
+        self.assertIn("node_worker", visible_ids)
+        self.assertIn("node_event_3", visible_ids)
+        self.assertIn("node_event_4", visible_ids)
+        aggregate_ids = {node_id for node_id in visible_ids if node_id.startswith("aggregate_self_expansion_")}
+        self.assertEqual(len(aggregate_ids), 1)
+        aggregate_node = next(node for node in graph["nodes"] if node["node_id"] in aggregate_ids)
+        self.assertEqual(aggregate_node["aggregated_node_count"], 2)
+        self.assertEqual(aggregate_node["retention_policy"], "recent_active_detail_with_historical_buckets")
+        self.assertEqual(aggregate_node["time_bucket"], "2026-06-11")
+        self.assertEqual(aggregate_node["expansion_type"], "unknown")
+        self.assertEqual(aggregate_node["target_key"], "workflow")
+        self.assertEqual(aggregate_node["sample_run_ids"], ["run_expansion_1", "run_expansion_2"])
+        self.assertEqual(aggregation["retention_policy"]["mode"], "recent_active_detail_with_historical_buckets")
+        self.assertEqual(
+            aggregation["retention_policy"]["bucket_fields"],
+            ["time_bucket", "event_type", "expansion_type", "terminal_status", "target_key"],
+        )
+        self.assertEqual(aggregation["groups"][0]["time_bucket"], "2026-06-11")
+        self.assertEqual(aggregation["groups"][0]["target_key"], "workflow")
+        self.assertEqual(aggregation["visible_node_count"], len(graph["nodes"]))
+        self.assertTrue(any(edge.get("aggregated") for edge in graph["edges"]))
+
+    def test_self_expansion_aggregation_keeps_distinct_targets_and_types_separate(self) -> None:
+        nodes = [
+            {
+                "node_id": f"node_expansion_{index}",
+                "type": "event",
+                "status": "self_expansion_plan_patch_applied",
+                "event_type": "self_expansion_plan_patch_applied",
+                "started_at": "2026-06-11T00:00:00Z",
+                "run_id": f"run_expansion_{index}",
+                "expansion_type": expansion_type,
+                "target_failure_ids": [target_failure_id],
+                "summary": {"one_line": "expansion", "highlights": [], "risks": []},
+            }
+            for index, (expansion_type, target_failure_id) in enumerate(
+                [
+                    ("objective_gap", "failure_a"),
+                    ("objective_gap", "failure_a"),
+                    ("missing_deliverable", "failure_b"),
+                    ("missing_deliverable", "failure_b"),
+                ],
+                start=1,
+            )
+        ]
+
+        graph = read_models_module._aggregate_self_expansion_graph(nodes, [], detail_limit=0)
+
+        aggregation = graph["aggregation"]
+        self.assertTrue(aggregation["enabled"])
+        self.assertEqual(aggregation["aggregated_node_count"], 4)
+        groups = sorted(aggregation["groups"], key=lambda group: group["expansion_type"])
+        self.assertEqual(len(groups), 2)
+        self.assertEqual(groups[0]["expansion_type"], "missing_deliverable")
+        self.assertEqual(groups[0]["target_key"], "target_failure:failure_b")
+        self.assertEqual(groups[1]["expansion_type"], "objective_gap")
+        self.assertEqual(groups[1]["target_key"], "target_failure:failure_a")
 
     def test_cli_rebuilds_read_models_from_plan_latest_validations_events_and_git_status(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -484,6 +880,18 @@ class ReadModelBuilderIntegrationTest(unittest.TestCase):
             self.assertTrue(payload["ok"], json.dumps(payload, indent=2, sort_keys=True))
             self.assertEqual(payload["status"], "rebuilt")
             self.assertEqual(payload["event_replay"]["events_replayed"], 1)
+            diagnostics = payload["diagnostics"]
+            self.assertGreaterEqual(diagnostics["total_duration_ms"], 0)
+            span_names = {span["name"] for span in diagnostics["spans"]}
+            self.assertIn("plan_parsing", span_names)
+            self.assertIn("event_read", span_names)
+            self.assertIn("event_projection", span_names)
+            self.assertIn("run_summary_construction", span_names)
+            self.assertIn("workflow_graph_model", span_names)
+            self.assertIn("schema_validation", span_names)
+            self.assertIn("writes", span_names)
+            self.assertGreaterEqual(diagnostics["counts"]["events_loaded"], 1)
+            self.assertGreaterEqual(diagnostics["counts"]["event_segment_bytes"], 1)
 
             read_models_dir = project / ".loopplane" / "read_models"
             expected_files = {
@@ -491,11 +899,48 @@ class ReadModelBuilderIntegrationTest(unittest.TestCase):
                 "plan_index.json",
                 "workflow_graph.json",
                 "dashboard_feed.jsonl",
+                "run_index.jsonl",
                 "run_summaries.jsonl",
                 "metrics.json",
                 "version_control_status.json",
+                "run_details_manifest.json",
+                "build_manifest.json",
             }
             self.assertEqual(expected_files, {path.name for path in read_models_dir.iterdir() if path.is_file()})
+
+            strict_paths = [
+                *authoritative_paths,
+                *(read_models_dir / filename for filename in expected_files),
+            ]
+            strict_before = file_hashes(project, strict_paths)
+            strict_completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(LoopPlane),
+                    "rebuild-read-models",
+                    "--project",
+                    str(project),
+                    "--strict-diagnostics",
+                    "--compare-rebuild",
+                    "--json",
+                ],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+            strict_after = file_hashes(project, strict_paths)
+            self.assertEqual(strict_completed.returncode, 0, strict_completed.stderr + strict_completed.stdout)
+            self.assertEqual(strict_after, strict_before)
+            strict_payload = json.loads(strict_completed.stdout)
+            self.assertTrue(strict_payload["ok"], json.dumps(strict_payload, indent=2, sort_keys=True))
+            self.assertTrue(strict_payload["strict"])
+            self.assertEqual(strict_payload["status"], "pass")
+            self.assertTrue(str(strict_payload["checks"]["events"]["events_sha256"]).startswith("sha256:"))
+            self.assertEqual(strict_payload["checks"]["events"]["chain"]["status"], "pass")
+            self.assertEqual(strict_payload["checks"]["run_details"]["status"], "pass")
+            self.assertEqual(strict_payload["checks"]["no_write_rebuild_comparison"]["status"], "pass")
+            self.assertEqual(strict_payload["checks"]["no_write_rebuild_comparison"]["comparison"]["changed_files"], [])
 
             workflow_status = json.loads((read_models_dir / "workflow_status.json").read_text(encoding="utf-8"))
             self.assertEqual(workflow_status["workflow_id"], workflow_config["workflow_id"])
@@ -558,6 +1003,17 @@ class ReadModelBuilderIntegrationTest(unittest.TestCase):
                 self.assertIn("source_hashes", record)
                 self.assertIn("source_event_id", record)
                 self.assertIn("source_event_seq", record)
+                self.assertNotIn("details", record)
+            run_index = read_jsonl(read_models_dir / "run_index.jsonl")
+            self.assertTrue(any(record["run_id"] == run_dir.name for record in run_index))
+            self.assertTrue(all("details" not in record for record in run_index))
+            detail_manifest = json.loads((read_models_dir / "run_details_manifest.json").read_text(encoding="utf-8"))
+            detail_entry = next(record for record in detail_manifest["runs"] if record["run_id"] == run_dir.name)
+            self.assertTrue((project / detail_entry["path"]).is_file())
+            build_manifest = json.loads((read_models_dir / "build_manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(build_manifest["workflow_id"], workflow_config["workflow_id"])
+            self.assertTrue(build_manifest["builder_version"])
+            self.assertTrue(build_manifest["run_details"])
 
             metrics = json.loads((read_models_dir / "metrics.json").read_text(encoding="utf-8"))
             self.assertEqual(metrics["counts"]["tasks_done"], 1)
@@ -571,6 +1027,16 @@ class ReadModelBuilderIntegrationTest(unittest.TestCase):
 
             schema_validation = validate_project_schemas(project)
             self.assertTrue(schema_validation["ok"], json.dumps(schema_validation, indent=2, sort_keys=True))
+            self.assertIn(".loopplane/read_models/run_index.jsonl", schema_validation["checked_files"])
+            self.assertIn(".loopplane/read_models/run_details_manifest.json", schema_validation["checked_files"])
+            self.assertIn(".loopplane/read_models/build_manifest.json", schema_validation["checked_files"])
+            self.assertTrue(
+                any(path.startswith(".loopplane/read_models/run_details/") for path in schema_validation["checked_files"])
+            )
+            self.assertIn("read_model_build_manifest.schema.json", schema_validation["schemas_used"])
+            self.assertIn("read_model_run_index.schema.json", schema_validation["schemas_used"])
+            self.assertIn("read_model_run_detail.schema.json", schema_validation["schemas_used"])
+            self.assertIn("read_model_run_details_manifest.schema.json", schema_validation["schemas_used"])
 
     def test_cli_rebuild_read_models_accepts_workflow_selection(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -598,6 +1064,138 @@ class ReadModelBuilderIntegrationTest(unittest.TestCase):
             payload = json.loads(completed.stdout)
             self.assertTrue(payload["ok"], json.dumps(payload, indent=2, sort_keys=True))
             self.assertEqual(payload["workflow_id"], initialized.workflow_id)
+
+    def test_cli_migrate_splits_legacy_run_summaries_without_deleting_legacy_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            initialized = init_project(project, "Split legacy run summaries.", layout=LAYOUT_CANONICAL_V16)
+            workflow_config = load_workflow_config(project, workflow_id=initialized.workflow_id)
+            paths = WorkflowPaths.from_config(project, workflow_config)
+            paths.read_models_dir.mkdir(parents=True, exist_ok=True)
+            legacy_path = paths.read_models_dir / "run_summaries.jsonl"
+            legacy_record = {
+                "schema_version": "1.5",
+                "workflow_id": initialized.workflow_id,
+                "generated_at": "2026-06-24T00:00:00Z",
+                "source_hashes": {"legacy": "sha256:abc"},
+                "source_event_seq": 3,
+                "source_event_id": "event_legacy",
+                "run_id": "run_legacy",
+                "node_id": "node_run_legacy",
+                "task_id": "T001",
+                "role": "worker",
+                "status": "pass",
+                "summary": {"status": "pass"},
+                "details": {
+                    "schema_version": "1.5",
+                    "run_id": "run_legacy",
+                    "task_id": "T001",
+                    "sections": [{"key": "agent_status", "title": "Agent Status", "content": "ok"}],
+                    "available_sections": ["agent_status"],
+                    "missing_sections": [],
+                },
+            }
+            legacy_path.write_text(json.dumps(legacy_record, sort_keys=True) + "\n", encoding="utf-8")
+
+            dry_run = subprocess.run(
+                [
+                    sys.executable,
+                    str(LoopPlane),
+                    "migrate",
+                    "--project",
+                    str(project),
+                    "--workflow",
+                    initialized.workflow_id,
+                    "--split-run-summaries",
+                    "--dry-run",
+                    "--json",
+                ],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+
+            self.assertEqual(dry_run.returncode, 0, dry_run.stderr + dry_run.stdout)
+            dry_payload = json.loads(dry_run.stdout)
+            self.assertTrue(dry_payload["ok"], json.dumps(dry_payload, indent=2, sort_keys=True))
+            self.assertEqual(dry_payload["status"], "planned")
+            self.assertEqual(dry_payload["run_count"], 1)
+            self.assertEqual(dry_payload["detail_count"], 1)
+            run_index_record_path = paths.value("read_models_dir").rstrip("/") + "/run_index.jsonl"
+            self.assertIn(run_index_record_path, dry_payload["planned_files"])
+            self.assertFalse((paths.read_models_dir / "run_index.jsonl").exists())
+            self.assertFalse((paths.read_models_dir / "run_details_manifest.json").exists())
+
+            migrated = subprocess.run(
+                [
+                    sys.executable,
+                    str(LoopPlane),
+                    "migrate",
+                    "--project",
+                    str(project),
+                    "--workflow",
+                    initialized.workflow_id,
+                    "--split-run-summaries",
+                    "--json",
+                ],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+
+            self.assertEqual(migrated.returncode, 0, migrated.stderr + migrated.stdout)
+            payload = json.loads(migrated.stdout)
+            self.assertTrue(payload["ok"], json.dumps(payload, indent=2, sort_keys=True))
+            self.assertEqual(payload["status"], "split")
+            self.assertEqual(payload["run_count"], 1)
+            self.assertEqual(payload["detail_count"], 1)
+            self.assertTrue(legacy_path.is_file())
+            run_index = read_jsonl(paths.read_models_dir / "run_index.jsonl")
+            self.assertEqual(len(run_index), 1)
+            self.assertEqual(run_index[0]["run_id"], "run_legacy")
+            self.assertEqual(run_index[0]["detail_status"], "available")
+            self.assertNotIn("details", run_index[0])
+            self.assertIn("detail_path", run_index[0])
+            manifest = json.loads((paths.read_models_dir / "run_details_manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(manifest["run_count"], 1)
+            detail_path = project / manifest["runs"][0]["path"]
+            self.assertTrue(detail_path.is_file())
+            detail = json.loads(detail_path.read_text(encoding="utf-8"))
+            self.assertEqual(detail["run_id"], "run_legacy")
+            self.assertEqual(detail["detail_status"], "available")
+            self.assertEqual(detail["details"]["available_sections"], ["agent_status"])
+            build_manifest = json.loads((paths.read_models_dir / "build_manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(build_manifest["run_details"][0]["run_id"], "run_legacy")
+            self.assertTrue(build_manifest["run_details"][0]["detail_source"]["fingerprint"].startswith("sha256:"))
+            schema_validation = validate_project_schemas(project)
+            self.assertTrue(schema_validation["ok"], json.dumps(schema_validation, indent=2, sort_keys=True))
+            self.assertIn(run_index_record_path, schema_validation["checked_files"])
+            self.assertIn(manifest["runs"][0]["path"], schema_validation["checked_files"])
+
+            current = subprocess.run(
+                [
+                    sys.executable,
+                    str(LoopPlane),
+                    "migrate",
+                    "--project",
+                    str(project),
+                    "--workflow",
+                    initialized.workflow_id,
+                    "--split-run-summaries",
+                    "--json",
+                ],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+
+            self.assertEqual(current.returncode, 0, current.stderr + current.stdout)
+            current_payload = json.loads(current.stdout)
+            self.assertTrue(current_payload["ok"], json.dumps(current_payload, indent=2, sort_keys=True))
+            self.assertEqual(current_payload["status"], "current")
 
     def test_rebuild_surfaces_approval_disabled_attention_after_scheduler_records_it(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

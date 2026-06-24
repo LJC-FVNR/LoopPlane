@@ -309,6 +309,7 @@ def expansion_resolution_candidate(snapshot: Mapping[str, Any]) -> dict[str, Any
     workflow_id = str(snapshot.get("workflow_id") or workflow_config.get("workflow_id") or "unknown_workflow")
     registry = read_expansion_registry(paths, workflow_id=workflow_id)
     tasks = {str(task.get("task_id") or ""): str(task.get("status") or "") for task in snapshot.get("tasks", []) if isinstance(task, Mapping)}
+    deferred_failure_ids = _failures_waiting_on_expansion_evidence(snapshot, tasks)
     failures = _failure_by_id(snapshot)
     for proposal in registry.get("proposals", []):
         if not isinstance(proposal, Mapping):
@@ -327,6 +328,7 @@ def expansion_resolution_candidate(snapshot: Mapping[str, Any]) -> dict[str, Any
             failure_id
             for failure_id in target_failure_ids
             if str(failures.get(failure_id, {}).get("status") or "") == "exhausted"
+            and failure_id not in deferred_failure_ids
         ]
         if reopenable:
             return {
@@ -1488,15 +1490,44 @@ def _first_exhausted_failure(snapshot: Mapping[str, Any]) -> dict[str, Any] | No
     registry = snapshot.get("failure_registry")
     failures = registry.get("failures", []) if isinstance(registry, Mapping) else []
     tasks = {str(task.get("task_id") or ""): str(task.get("status") or "") for task in snapshot.get("tasks", []) if isinstance(task, Mapping)}
+    deferred_failure_ids = _failures_waiting_on_expansion_evidence(snapshot, tasks)
     for failure in failures:
         if not isinstance(failure, Mapping):
             continue
         if str(failure.get("status") or "") != "exhausted":
             continue
+        if str(failure.get("failure_id") or "") in deferred_failure_ids:
+            continue
         task_id = str(failure.get("task_id") or "")
         if task_id and task_id in tasks:
             return dict(failure)
     return None
+
+
+def _failures_waiting_on_expansion_evidence(snapshot: Mapping[str, Any], tasks: Mapping[str, str]) -> set[str]:
+    workflow_config = snapshot.get("workflow_config")
+    paths = snapshot.get("paths")
+    if not isinstance(workflow_config, Mapping) or not isinstance(paths, WorkflowPaths):
+        return set()
+    workflow_id = str(snapshot.get("workflow_id") or workflow_config.get("workflow_id") or "unknown_workflow")
+    registry = read_expansion_registry(paths, workflow_id=workflow_id)
+    deferred: set[str] = set()
+    for proposal in registry.get("proposals", []):
+        if not isinstance(proposal, Mapping):
+            continue
+        if proposal.get("status") != "applied":
+            continue
+        if proposal.get("resolution_strategy") != "reopen_failure_after_new_evidence":
+            continue
+        if proposal.get("failure_resolution_status") != "pending_evidence":
+            continue
+        added_task_ids = [str(item) for item in proposal.get("added_task_ids", []) if str(item)]
+        if not added_task_ids:
+            continue
+        if all(tasks.get(task_id) in {"x", "-"} for task_id in added_task_ids):
+            continue
+        deferred.update(str(item) for item in proposal.get("target_failure_ids", []) if str(item))
+    return deferred
 
 
 def _has_nonterminal_tasks(snapshot: Mapping[str, Any]) -> bool:

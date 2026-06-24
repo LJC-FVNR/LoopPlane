@@ -42,12 +42,14 @@ from runtime.planning import (
     run_planner,
 )
 from runtime.scheduler import (
+    compact_historical_event_payloads,
     format_scheduler_summary_text,
     format_preview_text,
     format_scheduler_text,
     load_scheduler_context,
     preview_exit_code,
     preview_scheduler,
+    repair_event_segment_manifest,
     run_objective_verifier_once,
     run_scheduler,
     scheduler_summary,
@@ -100,8 +102,11 @@ from runtime.human_summaries import (
 )
 from runtime.read_models import (
     format_read_model_rebuild_text,
+    format_strict_read_model_diagnostics_text,
     read_model_rebuild_exit_code,
     rebuild_read_models,
+    split_legacy_run_summaries,
+    strict_read_model_diagnostics,
 )
 from runtime.final_verifier import (
     final_verifier_exit_code,
@@ -110,10 +115,12 @@ from runtime.final_verifier import (
 )
 from runtime.dashboard import (
     DashboardServerError,
+    benchmark_dashboard_loading,
     cleanup_dashboard_servers,
     create_dashboard_server,
     dashboard_exit_code,
     dashboard_list_exit_code,
+    format_dashboard_benchmark_text,
     format_dashboard_list_text,
     format_dashboard_cleanup_text,
     format_dashboard_text,
@@ -1533,6 +1540,20 @@ def run_summarize(args: argparse.Namespace) -> int:
 
 
 def run_rebuild_read_models(args: argparse.Namespace) -> int:
+    if getattr(args, "compare_rebuild", False) and not getattr(args, "strict_diagnostics", False):
+        print("--compare-rebuild requires --strict-diagnostics", file=sys.stderr)
+        return EXIT_INVALID_CONFIG
+    if getattr(args, "strict_diagnostics", False):
+        result = strict_read_model_diagnostics(
+            Path(args.project or "."),
+            workflow_id=getattr(args, "workflow", None),
+            compare_rebuild=bool(getattr(args, "compare_rebuild", False)),
+        )
+        if args.json:
+            print(json.dumps(result, indent=2, sort_keys=True))
+        else:
+            print(format_strict_read_model_diagnostics_text(result), end="")
+        return read_model_rebuild_exit_code(result)
     result = rebuild_read_models(
         Path(args.project or "."),
         write=not args.no_write,
@@ -1647,6 +1668,41 @@ def format_self_expansion_text(result: Mapping[str, Any]) -> str:
 
 
 def run_migrate(args: argparse.Namespace) -> int:
+    if getattr(args, "split_run_summaries", False):
+        result = split_legacy_run_summaries(
+            Path(args.project or "."),
+            workflow_id=getattr(args, "workflow", None),
+            dry_run=args.dry_run,
+        )
+        if args.json:
+            print(json.dumps(result, indent=2, sort_keys=True))
+        else:
+            print(format_migration_text(result), end="")
+        return 0 if result.get("ok") else EXIT_GENERIC_FAILURE
+    if getattr(args, "compact_event_payloads", False):
+        result = compact_historical_event_payloads(
+            Path(args.project or "."),
+            workflow_id=getattr(args, "workflow", None),
+            dry_run=args.dry_run,
+            threshold_bytes=getattr(args, "payload_threshold_bytes", None),
+            compact_all_events=bool(getattr(args, "compact_all_events", False)),
+        )
+        if args.json:
+            print(json.dumps(result, indent=2, sort_keys=True))
+        else:
+            print(format_migration_text(result), end="")
+        return 0 if result.get("ok") else EXIT_GENERIC_FAILURE
+    if getattr(args, "repair_event_manifest", False):
+        result = repair_event_segment_manifest(
+            Path(args.project or "."),
+            workflow_id=getattr(args, "workflow", None),
+            dry_run=args.dry_run,
+        )
+        if args.json:
+            print(json.dumps(result, indent=2, sort_keys=True))
+        else:
+            print(format_migration_text(result), end="")
+        return 0 if result.get("ok") else EXIT_GENERIC_FAILURE
     result = migrate_project(Path(args.project or "."), dry_run=args.dry_run)
     if args.json:
         print(json.dumps(result, indent=2, sort_keys=True))
@@ -1700,6 +1756,20 @@ def run_dashboard(args: argparse.Namespace) -> int:
         else:
             print(format_dashboard_cleanup_text(result), end="")
         return dashboard_list_exit_code(result)
+    if getattr(args, "dashboard_action", None) == "benchmark":
+        result = benchmark_dashboard_loading(
+            Path(args.project or "."),
+            workflow_id=args.workflow,
+            max_dashboard_events=getattr(args, "max_dashboard_events", None),
+            iterations=getattr(args, "iterations", 3),
+            warmups=getattr(args, "warmups", 1),
+            include_no_write_rebuild=bool(getattr(args, "include_no_write_rebuild", False)),
+        )
+        if args.json:
+            print(json.dumps(result, indent=2, sort_keys=True))
+        else:
+            print(format_dashboard_benchmark_text(result), end="")
+        return 0 if result.get("ok") else EXIT_GENERIC_FAILURE
 
     if args.port is not None:
         try:
@@ -1755,6 +1825,7 @@ def run_dashboard(args: argparse.Namespace) -> int:
         rebuild_read_models_first=args.rebuild_read_models,
         workflow_id=args.workflow,
         max_dashboard_events=getattr(args, "max_dashboard_events", None),
+        embed_workflow_snapshots=bool(getattr(args, "embed_workflow_snapshots", False)),
     )
     if args.json:
         print(json.dumps(result, indent=2, sort_keys=True))
@@ -2906,6 +2977,16 @@ def add_execution_commands(subparsers: argparse._SubParsersAction[argparse.Argum
     )
     rebuild.add_argument("--json", action="store_true", help="Emit a machine-readable rebuild report.")
     rebuild.add_argument("--no-write", action="store_true", help="Validate generated read models without writing them.")
+    rebuild.add_argument(
+        "--strict-diagnostics",
+        action="store_true",
+        help="Run explicit read-only diagnostics with full event-log hashes and payload sidecar verification.",
+    )
+    rebuild.add_argument(
+        "--compare-rebuild",
+        action="store_true",
+        help="With --strict-diagnostics, also run a no-write rebuild and compare generated read models with files on disk.",
+    )
     rebuild.set_defaults(handler=run_rebuild_read_models, command_path=("rebuild-read-models",))
 
     final_verify = subparsers.add_parser(
@@ -2936,10 +3017,40 @@ def add_execution_commands(subparsers: argparse._SubParsersAction[argparse.Argum
     migrate = subparsers.add_parser(
         "migrate",
         help="Run explicit schema migrations.",
-        description="Run explicit project-local schema migrations with backups and migration records.",
+        description="Run explicit project-local schema migrations and derived-runtime repair operations.",
     )
     migrate.add_argument("--project", metavar="<path>", help="Project path. Defaults to the current directory.")
+    migrate.add_argument("--workflow", metavar="<workflow_id>", help="Target a registered workflow without changing current_workflow.json.")
     migrate.add_argument("--dry-run", action="store_true", help="Report the planned migration without modifying files.")
+    migrate.add_argument(
+        "--repair-event-manifest",
+        action="store_true",
+        help="Rebuild runtime/events/manifest.json from existing event JSONL segments without modifying event records.",
+    )
+    migrate.add_argument(
+        "--compact-event-payloads",
+        action="store_true",
+        help="Move large historical event payloads after the latest snapshot into sidecars and rewrite the affected event chain.",
+    )
+    migrate.add_argument(
+        "--compact-all-events",
+        action="store_true",
+        help="With --compact-event-payloads, allow rewriting events before the latest snapshot as well.",
+    )
+    migrate.add_argument(
+        "--payload-threshold-bytes",
+        type=int,
+        metavar="<bytes>",
+        help="Payload size threshold for --compact-event-payloads. Defaults to the scheduler sidecar threshold.",
+    )
+    migrate.add_argument(
+        "--split-run-summaries",
+        action="store_true",
+        help=(
+            "Split legacy read_models/run_summaries.jsonl into run_index.jsonl and per-run "
+            "run_details without deleting the legacy file."
+        ),
+    )
     _add_nested_workspace_options(migrate)
     migrate.add_argument("--json", action="store_true", help="Emit a machine-readable migration report.")
     migrate.set_defaults(handler=run_migrate, command_path=("migrate",))
@@ -3106,10 +3217,11 @@ def add_dashboard_and_inspection_commands(subparsers: argparse._SubParsersAction
     dashboard.add_argument(
         "dashboard_action",
         nargs="?",
-        choices=("list", "cleanup", "stop"),
+        choices=("list", "cleanup", "stop", "benchmark"),
         help=(
             "Use 'list' to inspect dashboard server records, 'cleanup' to remove stale records, "
-            "or 'stop' to terminate registered project dashboard servers."
+            "'stop' to terminate registered project dashboard servers, or 'benchmark' to measure "
+            "dashboard loading paths."
         ),
     )
     dashboard.add_argument("--project", metavar="<path>", help="Project path. Defaults to the current directory.")
@@ -3134,6 +3246,30 @@ def add_dashboard_and_inspection_commands(subparsers: argparse._SubParsersAction
         type=int,
         metavar="<count>",
         help="Maximum recent events included in dashboard graph/feed read models. Defaults to dashboard config or 200.",
+    )
+    dashboard.add_argument(
+        "--embed-workflow-snapshots",
+        action="store_true",
+        help="For static dashboard generation, embed all workflow snapshots for offline workflow switching. This can produce large bundles.",
+    )
+    dashboard.add_argument(
+        "--iterations",
+        type=int,
+        default=3,
+        metavar="<count>",
+        help="With 'benchmark', measured iterations per dashboard loading operation. Defaults to 3.",
+    )
+    dashboard.add_argument(
+        "--warmups",
+        type=int,
+        default=1,
+        metavar="<count>",
+        help="With 'benchmark', unreported warmup iterations per dashboard loading operation. Defaults to 1.",
+    )
+    dashboard.add_argument(
+        "--include-no-write-rebuild",
+        action="store_true",
+        help="With 'benchmark', also measure rebuild-read-models in no-write comparison mode.",
     )
     dashboard.add_argument(
         "--terminate-orphans",

@@ -1,24 +1,29 @@
 from __future__ import annotations
 
 import base64
+import fnmatch
 import gzip
 import html
 import json
 import mimetypes
 import os
 import re
+import resource
 import signal
 import secrets
 import shlex
 import shutil
+import threading
+import time
 import uuid
-from collections import deque
-from collections.abc import Mapping, Sequence
+from collections import OrderedDict, deque
+from collections.abc import Iterator, Mapping, Sequence
 from datetime import UTC, datetime
 from hashlib import sha256
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path, PurePosixPath
+from statistics import mean, median
 from typing import Any
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
@@ -70,8 +75,20 @@ from runtime.inspector import (
     default_allowed_paths,
 )
 from runtime.path_resolution import WorkflowPathError, WorkflowPaths, default_workflow_path_values, load_workflow_config
-from runtime.read_models import READ_MODEL_FILES, active_leases_source_hash, rebuild_read_models
-from runtime.scheduler import SCHEMA_VERSION, load_event_log_projection
+from runtime.read_models import (
+    READ_MODEL_COMPAT_OPTIONAL_FILES,
+    READ_MODEL_DETAIL_DIR,
+    READ_MODEL_FILES,
+    active_leases_source_hash,
+    rebuild_read_models,
+    strict_read_model_diagnostics,
+)
+from runtime.scheduler import (
+    ACTIVE_RUN_LEASE_FINGERPRINT_FILENAME,
+    EVENTS_MANIFEST_FILENAME,
+    SCHEMA_VERSION,
+    load_event_segment_manifest,
+)
 from runtime.workflow_lifecycle import WorkflowLifecycleError, ensure_compatibility_workflow_metadata
 from runtime.workflows import create_workflow, list_workflows
 
@@ -126,6 +143,38 @@ READ_MODEL_REBUILD_ACTIVE_STATUSES = frozenset(
         "running",
         "started",
     }
+)
+WORKFLOW_RECENCY_READ_MODEL_FILES = (
+    "workflow_status.json",
+    "metrics.json",
+    "version_control_status.json",
+)
+DASHBOARD_LIVE_READ_MODEL_FILES = (
+    "workflow_status.json",
+    "plan_index.json",
+    "workflow_graph.json",
+    "dashboard_feed.jsonl",
+    "run_index.jsonl",
+    "run_summaries.jsonl",
+    "metrics.json",
+    "version_control_status.json",
+)
+READ_MODEL_CACHE_DEFAULT_MAX_BYTES = 64 * 1024 * 1024
+READ_MODEL_CACHE_DEFAULT_MAX_ENTRIES = 64
+READ_MODEL_CACHE_DEFAULT_MAX_SCOPES = 8
+DASHBOARD_ETAG_RUNTIME_FILES = (
+    "state.json",
+    CONTROL_REQUESTS_FILENAME,
+    CONTROL_RESPONSES_FILENAME,
+    APPROVAL_REQUESTS_FILENAME,
+    APPROVAL_RESPONSES_FILENAME,
+)
+DASHBOARD_ETAG_REQUEST_FILES = (
+    CHAT_REQUESTS_FILENAME,
+    CHAT_RESPONSES_FILENAME,
+    CHANGE_REQUESTS_FILENAME,
+    CHANGE_REQUEST_RESPONSES_FILENAME,
+    "dashboard_requests.jsonl",
 )
 REDACTED = "[REDACTED]"
 SENSITIVE_KEY_NAMES = frozenset(
@@ -187,12 +236,14 @@ def render_static_dashboard(
     rebuild_read_models_first: bool = False,
     workflow_id: str | None = None,
     max_dashboard_events: int | None = None,
+    embed_workflow_snapshots: bool = False,
 ) -> dict[str, Any]:
     prepared = _prepare_dashboard_payload(
         project_root,
         rebuild_read_models_first=rebuild_read_models_first,
         workflow_id=workflow_id,
         max_dashboard_events=max_dashboard_events,
+        include_workflow_snapshots=embed_workflow_snapshots,
     )
     if not prepared.get("ok"):
         return _public_result(prepared)
@@ -217,7 +268,16 @@ def render_static_dashboard(
 
     generated_files = [_project_relative(project, index_file)]
     generated_files.extend(_project_relative(project, destination / filename) for filename in STATIC_ASSET_FILES)
-    generated_files.extend(_project_relative(project, destination / "read_models" / filename) for filename in READ_MODEL_FILES)
+    generated_files.extend(
+        _project_relative(project, destination / "read_models" / filename)
+        for filename in READ_MODEL_FILES
+        if (destination / "read_models" / filename).is_file()
+    )
+    generated_files.extend(
+        _project_relative(project, path)
+        for path in sorted((destination / "read_models" / READ_MODEL_DETAIL_DIR).glob("*.json"))
+        if path.is_file()
+    )
 
     return {
         "schema_version": SCHEMA_VERSION,
@@ -253,6 +313,7 @@ def render_static_dashboard(
         "warnings": warnings,
         "read_model_freshness": payload["read_model_freshness"],
         "rebuild_read_models": prepared.get("rebuild_read_models"),
+        "embed_workflow_snapshots": embed_workflow_snapshots,
     }
 
 
@@ -265,11 +326,15 @@ def create_dashboard_server(
     workflow_id: str | None = None,
     max_dashboard_events: int | None = None,
 ) -> tuple[ThreadingHTTPServer, dict[str, Any]]:
+    read_model_cache = _ReadModelCache()
     prepared = _prepare_dashboard_payload(
         project_root,
         rebuild_read_models_first=rebuild_read_models_first,
         workflow_id=workflow_id,
         max_dashboard_events=max_dashboard_events,
+        include_workflow_snapshots=False,
+        include_legacy_run_summaries=False,
+        read_model_cache=read_model_cache,
     )
     if not prepared.get("ok"):
         raise DashboardServerError(_server_failure_from_prepared(prepared))
@@ -306,6 +371,7 @@ def create_dashboard_server(
         "same_origin_required": dashboard_security.get("same_origin_required") is not False,
         "redaction": _dashboard_redaction_config(security),
         "max_dashboard_events": prepared.get("max_dashboard_events"),
+        "read_model_cache": read_model_cache,
         "started_at": utc_timestamp(),
         "server_state_file": _dashboard_server_state_file(project, paths, dashboard_config),
     }
@@ -828,8 +894,7 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
                 if not resolved.get("ok"):
                     self._send_json(resolved, HTTPStatus.NOT_FOUND)
                     return
-                payload = _dashboard_data_response(_workflow_context(self.context, resolved))
-                self._send_json(payload, HTTPStatus.OK if payload.get("ok") else HTTPStatus.NOT_FOUND)
+                self._send_dashboard_data(_workflow_context(self.context, resolved))
                 return
             self._send_json(_dashboard_server_status(self.context))
             return
@@ -866,8 +931,10 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
                 self._send_json(_read_model_response(workflow_context, "workflow_graph.json"))
                 return
             if len(parts) == 4 and parts[3] in {"dashboard", "dashboard-data"}:
-                payload = _dashboard_data_response(workflow_context)
-                self._send_json(payload, HTTPStatus.OK if payload.get("ok") else HTTPStatus.NOT_FOUND)
+                self._send_dashboard_data(workflow_context)
+                return
+            if len(parts) == 4 and parts[3] in {"read-model-diagnostics", "strict-diagnostics"}:
+                self._send_json(strict_read_model_diagnostics(workflow_context["project"], workflow_id=workflow_id))
                 return
             if len(parts) == 4 and parts[3] == "runners":
                 self._send_json(_runner_configuration_response(workflow_context))
@@ -968,16 +1035,16 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
     def _serve_index(self, query: Mapping[str, Sequence[str]] | None = None) -> None:
         requested_workflow = _first_query_value(query or {}, "workflow", "workflow_id")
         selected_workflow = requested_workflow or _current_workflow_id(self.context) or str(self.context.get("workflow_id") or "")
-        prepared = _prepare_dashboard_payload(
+        prepared = _prepare_dashboard_shell_payload(
             self.context["project"],
-            rebuild_read_models_first=False,
             workflow_id=selected_workflow,
             max_dashboard_events=_optional_positive_int(self.context.get("max_dashboard_events")),
         )
         if not prepared.get("ok"):
             self._send_html(_render_error_html(_public_result(prepared)), HTTPStatus.INTERNAL_SERVER_ERROR)
             return
-        self._send_html(_render_index_html(_lazy_file_content_payload(prepared["_payload"]), server_mode=True))
+        payload = dict(prepared["_payload"])
+        self._send_html(_render_index_html(payload, server_mode=True))
 
     def _serve_asset(self, filename: str) -> None:
         if filename not in STATIC_ASSET_FILES:
@@ -989,6 +1056,28 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
 
     def _serve_read_model(self, raw_filename: str) -> None:
         filename = unquote(raw_filename).strip("/")
+        if filename.startswith(f"{READ_MODEL_DETAIL_DIR}/"):
+            detail_rel = PurePosixPath(filename)
+            if ".." in detail_rel.parts or detail_rel.suffix != ".json":
+                self._send_json({"ok": False, "status": "not_found"}, HTTPStatus.NOT_FOUND)
+                return
+            path = self.context["paths"].read_models_dir / Path(*detail_rel.parts)
+            detail_root = (self.context["paths"].read_models_dir / READ_MODEL_DETAIL_DIR).resolve()
+            try:
+                resolved = path.resolve()
+            except OSError:
+                self._send_json({"ok": False, "status": "not_found", "file": filename}, HTTPStatus.NOT_FOUND)
+                return
+            if resolved != detail_root and detail_root not in resolved.parents:
+                self._send_json({"ok": False, "status": "not_found"}, HTTPStatus.NOT_FOUND)
+                return
+            if not resolved.is_file():
+                self._send_json({"ok": False, "status": "not_found", "file": filename}, HTTPStatus.NOT_FOUND)
+                return
+            payload = json.loads(resolved.read_text(encoding="utf-8"))
+            data = json.dumps(_redact_dashboard_value(self.context, payload), indent=2, sort_keys=True).encode("utf-8")
+            self._send_bytes(data, "application/json; charset=utf-8")
+            return
         if filename not in READ_MODEL_FILES or "/" in filename:
             self._send_json({"ok": False, "status": "not_found"}, HTTPStatus.NOT_FOUND)
             return
@@ -1099,15 +1188,71 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
         redacted = _redact_dashboard_value(self.context, body)
         return dict(redacted) if isinstance(redacted, Mapping) else {}
 
-    def _send_json(self, payload: Mapping[str, Any], status: HTTPStatus = HTTPStatus.OK) -> None:
+    def _send_dashboard_data(self, context: Mapping[str, Any]) -> None:
+        request_started = time.perf_counter()
+        etag_started = time.perf_counter()
+        etag = _dashboard_data_etag(context)
+        etag_ms = _dashboard_elapsed_ms(etag_started)
+        if _request_etag_matches(self.headers.get("If-None-Match"), etag):
+            self._send_not_modified(
+                etag,
+                headers={
+                    "X-LoopPlane-Dashboard-Result": "not_modified",
+                    "X-LoopPlane-Dashboard-Duration-Ms": str(_dashboard_elapsed_ms(request_started)),
+                    "X-LoopPlane-Dashboard-ETag-Ms": str(etag_ms),
+                },
+            )
+            return
+        build_started = time.perf_counter()
+        payload = _dashboard_data_response(context)
+        build_ms = _dashboard_elapsed_ms(build_started)
+        payload["dashboard_etag"] = etag
+        payload["dashboard_diagnostics"] = {
+            "response_mode": "full",
+            "etag": etag,
+            "timings": {
+                "etag_ms": etag_ms,
+                "payload_build_ms": build_ms,
+                "total_ms": _dashboard_elapsed_ms(request_started),
+            },
+        }
+        self._send_json(
+            payload,
+            HTTPStatus.OK if payload.get("ok") else HTTPStatus.NOT_FOUND,
+            headers={
+                "ETag": etag,
+                "Cache-Control": "no-cache",
+                "X-LoopPlane-Dashboard-Result": "full",
+                "X-LoopPlane-Dashboard-Duration-Ms": str(_dashboard_elapsed_ms(request_started)),
+            },
+        )
+
+    def _send_json(
+        self,
+        payload: Mapping[str, Any],
+        status: HTTPStatus = HTTPStatus.OK,
+        *,
+        headers: Mapping[str, str] | None = None,
+    ) -> None:
         data = json.dumps(_redact_dashboard_value(self.context, payload), indent=2, sort_keys=True).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(data)))
+        for name, value in (headers or {}).items():
+            self.send_header(str(name), str(value))
         if status == HTTPStatus.UNAUTHORIZED:
             self.send_header("WWW-Authenticate", "Bearer")
         self.end_headers()
         self.wfile.write(data)
+
+    def _send_not_modified(self, etag: str, *, headers: Mapping[str, str] | None = None) -> None:
+        self.send_response(HTTPStatus.NOT_MODIFIED)
+        self.send_header("ETag", etag)
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Content-Length", "0")
+        for name, value in (headers or {}).items():
+            self.send_header(str(name), str(value))
+        self.end_headers()
 
     def _send_html(self, html_text: str, status: HTTPStatus = HTTPStatus.OK) -> None:
         self._send_bytes(html_text.encode("utf-8"), "text/html; charset=utf-8", status=status)
@@ -1127,6 +1272,9 @@ def _prepare_dashboard_payload(
     rebuild_read_models_first: bool,
     workflow_id: str | None = None,
     max_dashboard_events: int | None = None,
+    include_workflow_snapshots: bool = True,
+    include_legacy_run_summaries: bool = True,
+    read_model_cache: "_ReadModelCache | None" = None,
 ) -> dict[str, Any]:
     project = Path(project_root).expanduser().resolve()
     started_at = utc_timestamp()
@@ -1163,7 +1311,12 @@ def _prepare_dashboard_payload(
                 "rebuild_read_models": dict(rebuild_result),
             }
 
-    models = _load_read_models(paths.read_models_dir)
+    models = _load_read_models(
+        paths.read_models_dir,
+        cache=read_model_cache,
+        cache_scope=_read_model_cache_scope(project, paths, workflow_id),
+        include_legacy_run_summaries=include_legacy_run_summaries,
+    )
     if models["errors"]:
         return {
             "schema_version": SCHEMA_VERSION,
@@ -1211,18 +1364,24 @@ def _prepare_dashboard_payload(
         "read_models": models["json"],
         "jsonl_models": models["jsonl"],
         "plan_markdown": _plan_markdown_payload(project, paths, models["json"].get("plan_index.json")),
-        "node_details": _node_details_payload(context, models),
+        "node_details": _node_details_payload(
+            context,
+            models,
+            include_split_run_details=include_legacy_run_summaries,
+        ),
         "read_model_freshness": freshness,
         "read_model_rebuild": _read_model_rebuild_payload(context, workflow=workflow_record, freshness=freshness),
         "workspace": _workspace_selection_metadata(context, workflows=workflows, selected_workflow_id=workflow_id),
         "workflows": workflows,
-        "workflow_snapshots": _workflow_snapshots(context, workflows),
+        "workflow_summaries": _workflow_summaries(context, workflows),
         "runner_configuration": _runner_configuration_payload(context),
         "planning_controls": _planning_controls_payload(context, workflow=workflow_record),
         "execution_controls": _execution_controls_payload(context, workflow=workflow_record),
         "approval_controls": _approval_controls_payload(context, workflow=workflow_record),
         "inspector_console": _inspector_console_payload(context, workflow=workflow_record),
     }
+    if include_workflow_snapshots:
+        payload["workflow_snapshots"] = _workflow_snapshots(context, workflows, read_model_cache=read_model_cache)
     return {
         "schema_version": SCHEMA_VERSION,
         "ok": True,
@@ -1241,6 +1400,505 @@ def _prepare_dashboard_payload(
         "_paths": paths,
         "_workflow_config": workflow_config,
     }
+
+
+def _prepare_dashboard_shell_payload(
+    project_root: Path | str,
+    *,
+    workflow_id: str | None = None,
+    max_dashboard_events: int | None = None,
+) -> dict[str, Any]:
+    project = Path(project_root).expanduser().resolve()
+    started_at = utc_timestamp()
+    try:
+        ensure_compatibility_workflow_metadata(project, updated_by="loopplane dashboard shell")
+        workflow_id = _dashboard_default_workflow_id(project, workflow_id)
+        workflow_config = load_workflow_config(project, workflow_id=workflow_id)
+        paths = WorkflowPaths.from_config(project, workflow_config)
+    except (OSError, json.JSONDecodeError, WorkflowPathError, WorkflowLifecycleError) as error:
+        return _failure(project=project, started_at=started_at, message=f"Unable to load workflow shell: {error}")
+
+    selected_workflow_id = str(workflow_config.get("workflow_id") or workflow_id or "unknown_workflow")
+    context = {
+        "project": project,
+        "paths": paths,
+        "workflow_config": workflow_config,
+        "workflow_id": selected_workflow_id,
+    }
+    workflows = _workflow_records_for_shell(project, paths=paths, workflow_id=selected_workflow_id)
+    workflow = _workflow_record_for_id(workflows, selected_workflow_id)
+    workflow_title = _workflow_display_title(selected_workflow_id, workflow=workflow, read_models={})
+    freshness = {
+        "schema_version": SCHEMA_VERSION,
+        "status": "loading",
+        "summary": "Dashboard data is loading from the selected workflow API.",
+        "checked_files": [],
+        "warnings": [],
+    }
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "server_mode": True,
+        "initial_dashboard_load": True,
+        "rendered_at": utc_timestamp(),
+        "project_root": project.as_posix(),
+        "workflow_id": selected_workflow_id,
+        "workflow_title": workflow_title,
+        "max_dashboard_events": _optional_positive_int(max_dashboard_events),
+        "read_models_dir": _project_relative(project, paths.read_models_dir),
+        "read_model_files": list(READ_MODEL_FILES),
+        "read_models": {},
+        "jsonl_models": {},
+        "plan_markdown": _loading_plan_markdown_payload(paths),
+        "node_details": {},
+        "read_model_freshness": freshness,
+        "read_model_rebuild": _loading_read_model_rebuild_payload(context, workflow=workflow),
+        "read_model_diagnostics": {
+            "read_models": {
+                "cache_enabled": False,
+                "response_mode": "shell",
+                "disk_reads": 0,
+                "disk_read_bytes": 0,
+            }
+        },
+        "rebuild_read_models": None,
+        "workspace": _workspace_selection_metadata(context, workflows=workflows, selected_workflow_id=selected_workflow_id),
+        "workflows": workflows,
+        "workflow_summaries": _workflow_summaries(context, workflows),
+        "runner_configuration": _loading_control_payload(selected_workflow_id, "runner_configuration"),
+        "planning_controls": _loading_control_payload(selected_workflow_id, "planning_controls"),
+        "execution_controls": _loading_control_payload(selected_workflow_id, "execution_controls"),
+        "approval_controls": _loading_control_payload(selected_workflow_id, "approval_controls"),
+        "inspector_console": _loading_control_payload(selected_workflow_id, "inspector_console"),
+        "errors": [],
+        "warnings": [],
+    }
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "ok": True,
+        "status": "shell",
+        "project_root": project.as_posix(),
+        "workflow_id": selected_workflow_id,
+        "started_at": started_at,
+        "ended_at": utc_timestamp(),
+        "warnings": [],
+        "_payload": payload,
+        "_paths": paths,
+        "_workflow_config": workflow_config,
+    }
+
+
+def _workflow_records_for_shell(project: Path, *, paths: WorkflowPaths, workflow_id: str) -> list[dict[str, Any]]:
+    registry_path = project / ".loopplane" / "workflow_registry.json"
+    if registry_path.is_file():
+        registry = _load_project_json(registry_path)
+        workflows = registry.get("workflows")
+        if isinstance(workflows, Sequence) and not isinstance(workflows, (str, bytes)):
+            records = [dict(record) for record in workflows if isinstance(record, Mapping)]
+            if records:
+                return records
+    return [
+        {
+            "workflow_id": workflow_id,
+            "name": "current workflow",
+            "status": "unknown",
+            "workflow_root": paths.value("workflow_root"),
+            "plan_file": paths.value("plan_file"),
+            "read_models_dir": paths.value("read_models_dir"),
+            "completion_marker": f"{paths.value('runtime_dir')}/plan_loop_complete.json",
+            "read_only": False,
+            "archived": False,
+            "summary": {"one_line": "Current LoopPlane workflow."},
+        }
+    ]
+
+
+def _loading_plan_markdown_payload(paths: WorkflowPaths) -> dict[str, Any]:
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "ok": False,
+        "status": "loading",
+        "path": paths.value("plan_file"),
+        "active_plan_file": paths.value("plan_file"),
+        "plan_source": {},
+        "content": "",
+        "size_bytes": 0,
+        "errors": [],
+    }
+
+
+def _loading_control_payload(workflow_id: str, kind: str) -> dict[str, Any]:
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "ok": True,
+        "status": "loading",
+        "workflow_id": workflow_id,
+        "mutation_allowed": False,
+        "mutation_blockers": ["dashboard_data_loading"],
+        "request_record_only": True,
+        "pending_count": 0,
+        "recent": [],
+        "warnings": ["Dashboard data is loading."],
+        "kind": kind,
+    }
+
+
+def _loading_read_model_rebuild_payload(
+    context: Mapping[str, Any],
+    *,
+    workflow: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    project = context["project"]
+    paths = context["paths"]
+    workflow_id = str(context["workflow_id"])
+    blockers = _workflow_mutation_blockers(workflow)
+    endpoint = f"/api/workflows/{workflow_id}/rebuild-read-models"
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "ok": True,
+        "status": "loading" if not blockers else "disabled",
+        "workflow_id": workflow_id,
+        "freshness_status": "loading",
+        "freshness_summary": "Dashboard data is loading from the selected workflow API.",
+        "mutation_allowed": not blockers,
+        "request_allowed": False,
+        "rebuild_in_progress": False,
+        "in_progress_summary": None,
+        "mutation_blockers": blockers,
+        "request_record_only": True,
+        "control_type": "rebuild_read_models",
+        "endpoint": endpoint,
+        "control_endpoint": f"/api/workflows/{workflow_id}/control-requests",
+        "requests_path": _project_relative(project, paths.runtime_dir / CONTROL_REQUESTS_FILENAME),
+        "responses_path": _project_relative(project, paths.runtime_dir / CONTROL_RESPONSES_FILENAME),
+        "pending_count": 0,
+        "recent": [],
+        "latest_request_id": None,
+        "latest_status": None,
+        "commands": [
+            f"loopplane rebuild-read-models --project {project.as_posix()} --workflow {workflow_id}",
+            f"loopplane dashboard --project {project.as_posix()} --workflow {workflow_id} --rebuild-read-models",
+        ],
+        "warnings": ["Dashboard data is loading."],
+    }
+
+
+def benchmark_dashboard_loading(
+    project_root: Path | str,
+    *,
+    workflow_id: str | None = None,
+    max_dashboard_events: int | None = None,
+    iterations: int = 3,
+    warmups: int = 1,
+    include_no_write_rebuild: bool = False,
+) -> dict[str, Any]:
+    project = Path(project_root).expanduser().resolve()
+    started_at = utc_timestamp()
+    iterations = max(1, int(iterations))
+    warmups = max(0, int(warmups))
+    try:
+        context = _dashboard_benchmark_context(
+            project,
+            workflow_id=workflow_id,
+            max_dashboard_events=max_dashboard_events,
+            read_model_cache=_ReadModelCache(),
+        )
+    except (OSError, json.JSONDecodeError, WorkflowPathError, WorkflowLifecycleError, ValueError) as error:
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "ok": False,
+            "status": "failed",
+            "project_root": project.as_posix(),
+            "workflow_id": workflow_id,
+            "started_at": started_at,
+            "ended_at": utc_timestamp(),
+            "iterations": iterations,
+            "warmups": warmups,
+            "operations": {},
+            "errors": [str(error)],
+            "warnings": [],
+        }
+
+    selected_workflow_id = str(context["workflow_id"])
+    operations: dict[str, Any] = {
+        "dashboard_shell": _dashboard_benchmark_operation(
+            iterations=iterations,
+            warmups=warmups,
+            build=lambda: _dashboard_benchmark_shell_payload(
+                project,
+                workflow_id=selected_workflow_id,
+                max_dashboard_events=max_dashboard_events,
+            ),
+            extract=_dashboard_benchmark_payload_stats,
+        ),
+        "dashboard_data_etag": _dashboard_benchmark_operation(
+            iterations=iterations,
+            warmups=warmups,
+            build=lambda: {"etag": _dashboard_data_etag(context)},
+            extract=_dashboard_benchmark_etag_stats,
+        ),
+        "selected_dashboard_data_cold_cache": _dashboard_benchmark_operation(
+            iterations=iterations,
+            warmups=warmups,
+            build=lambda: _dashboard_data_response(
+                _dashboard_benchmark_context(
+                    project,
+                    workflow_id=selected_workflow_id,
+                    max_dashboard_events=max_dashboard_events,
+                    read_model_cache=_ReadModelCache(),
+                )
+            ),
+            extract=_dashboard_benchmark_payload_stats,
+        ),
+    }
+    warm_cache = _ReadModelCache()
+    warm_context = _dashboard_benchmark_context(
+        project,
+        workflow_id=selected_workflow_id,
+        max_dashboard_events=max_dashboard_events,
+        read_model_cache=warm_cache,
+    )
+    operations["selected_dashboard_data_warm_cache"] = _dashboard_benchmark_operation(
+        iterations=iterations,
+        warmups=warmups,
+        build=lambda: _dashboard_data_response(warm_context),
+        extract=_dashboard_benchmark_payload_stats,
+    )
+    if include_no_write_rebuild:
+        operations["no_write_rebuild"] = _dashboard_benchmark_operation(
+            iterations=iterations,
+            warmups=warmups,
+            build=lambda: rebuild_read_models(
+                project,
+                write=False,
+                workflow_id=selected_workflow_id,
+                max_dashboard_events=max_dashboard_events,
+            ),
+            extract=_dashboard_benchmark_rebuild_stats,
+        )
+    errors = [
+        f"{name}: {sample_error}"
+        for name, operation in operations.items()
+        for sample in operation.get("samples", [])
+        for sample_error in _sequence(sample.get("errors"))
+    ]
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "ok": not errors,
+        "status": "benchmarked" if not errors else "benchmarked_with_errors",
+        "project_root": project.as_posix(),
+        "workflow_id": selected_workflow_id,
+        "started_at": started_at,
+        "ended_at": utc_timestamp(),
+        "iterations": iterations,
+        "warmups": warmups,
+        "max_dashboard_events": _optional_positive_int(max_dashboard_events),
+        "operations": operations,
+        "budgets": {
+            "dashboard_shell_ms": 1000,
+            "selected_dashboard_data_ms": 1500,
+            "selected_dashboard_data_maxrss_kb": 350 * 1024,
+            "etag_ms": 200,
+        },
+        "errors": errors,
+        "warnings": [],
+    }
+
+
+def _dashboard_benchmark_context(
+    project: Path,
+    *,
+    workflow_id: str | None,
+    max_dashboard_events: int | None,
+    read_model_cache: "_ReadModelCache | None",
+) -> dict[str, Any]:
+    ensure_compatibility_workflow_metadata(project, updated_by="loopplane dashboard benchmark")
+    selected_workflow_id = _dashboard_default_workflow_id(project, workflow_id)
+    workflow_config = load_workflow_config(project, workflow_id=selected_workflow_id)
+    paths = WorkflowPaths.from_config(project, workflow_config)
+    return {
+        "project": project,
+        "paths": paths,
+        "workflow_config": workflow_config,
+        "workflow_id": str(workflow_config.get("workflow_id") or selected_workflow_id or "unknown_workflow"),
+        "max_dashboard_events": _optional_positive_int(max_dashboard_events),
+        "read_model_cache": read_model_cache,
+    }
+
+
+def _dashboard_benchmark_shell_payload(
+    project: Path,
+    *,
+    workflow_id: str,
+    max_dashboard_events: int | None,
+) -> dict[str, Any]:
+    prepared = _prepare_dashboard_shell_payload(
+        project,
+        workflow_id=workflow_id,
+        max_dashboard_events=max_dashboard_events,
+    )
+    payload = dict(prepared.get("_payload") or {})
+    payload["_benchmark_status"] = prepared.get("status")
+    payload["_benchmark_ok"] = prepared.get("ok")
+    payload["_benchmark_errors"] = list(prepared.get("errors") or [])
+    return payload
+
+
+def _dashboard_benchmark_operation(
+    *,
+    iterations: int,
+    warmups: int,
+    build: Any,
+    extract: Any,
+) -> dict[str, Any]:
+    samples: list[dict[str, Any]] = []
+    last_stats: dict[str, Any] = {}
+    for index in range(warmups + iterations):
+        started = time.perf_counter()
+        rss_before = _dashboard_maxrss_kb()
+        errors: list[str] = []
+        try:
+            payload = build()
+            stats = extract(payload)
+        except Exception as error:  # pragma: no cover - surfaced in benchmark result for operator diagnosis.
+            stats = {}
+            errors = [str(error)]
+        stats_errors = [str(error) for error in _sequence(stats.pop("errors", []))]
+        elapsed_ms = _dashboard_elapsed_ms(started)
+        rss_after = _dashboard_maxrss_kb()
+        sample = {
+            "iteration": index + 1 - warmups,
+            "elapsed_ms": elapsed_ms,
+            "maxrss_kb": rss_after,
+            "maxrss_delta_kb": max(0, rss_after - rss_before),
+            **stats,
+            "errors": [*stats_errors, *errors],
+        }
+        last_stats = stats
+        if index >= warmups:
+            samples.append(sample)
+    return {
+        "iterations": iterations,
+        "warmups": warmups,
+        "samples": samples,
+        "summary": _dashboard_benchmark_summary(samples),
+        "last": last_stats,
+    }
+
+
+def _dashboard_benchmark_summary(samples: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    elapsed_values = [float(sample.get("elapsed_ms") or 0) for sample in samples]
+    rss_values = [int(sample.get("maxrss_kb") or 0) for sample in samples]
+    payload_values = [int(sample.get("payload_bytes") or 0) for sample in samples if sample.get("payload_bytes") is not None]
+    disk_read_values = [
+        int(sample.get("read_model_disk_read_bytes") or 0)
+        for sample in samples
+        if sample.get("read_model_disk_read_bytes") is not None
+    ]
+    return {
+        "elapsed_ms": _dashboard_benchmark_numeric_summary(elapsed_values),
+        "maxrss_kb": _dashboard_benchmark_numeric_summary(rss_values),
+        "payload_bytes": _dashboard_benchmark_numeric_summary(payload_values),
+        "read_model_disk_read_bytes": _dashboard_benchmark_numeric_summary(disk_read_values),
+        "sample_count": len(samples),
+        "error_count": sum(1 for sample in samples if sample.get("errors")),
+    }
+
+
+def _dashboard_benchmark_numeric_summary(values: Sequence[float | int]) -> dict[str, float | int | None]:
+    if not values:
+        return {"min": None, "max": None, "mean": None, "median": None}
+    return {
+        "min": min(values),
+        "max": max(values),
+        "mean": round(float(mean(values)), 3),
+        "median": round(float(median(values)), 3),
+    }
+
+
+def _dashboard_benchmark_payload_stats(payload: Mapping[str, Any]) -> dict[str, Any]:
+    diagnostics = _mapping(_mapping(payload.get("read_model_diagnostics")).get("read_models"))
+    json_models = payload.get("read_models")
+    jsonl_models = payload.get("jsonl_models")
+    return {
+        "ok": bool(payload.get("ok", payload.get("_benchmark_ok", True))),
+        "status": str(payload.get("status") or payload.get("_benchmark_status") or "unknown"),
+        "payload_bytes": _dashboard_json_size_bytes(payload),
+        "workflow_count": len(_sequence(payload.get("workflows"))),
+        "json_model_count": len(json_models) if isinstance(json_models, Mapping) else 0,
+        "jsonl_model_count": len(jsonl_models) if isinstance(jsonl_models, Mapping) else 0,
+        "read_model_disk_reads": int(diagnostics.get("disk_reads") or 0),
+        "read_model_disk_read_bytes": int(diagnostics.get("disk_read_bytes") or 0),
+        "read_model_cache_hits": int(diagnostics.get("cache_hits") or 0),
+        "skipped_legacy_run_summaries": int(diagnostics.get("skipped_legacy_run_summaries") or 0),
+        "errors": [str(error) for error in _sequence(payload.get("errors") or payload.get("_benchmark_errors"))],
+    }
+
+
+def _dashboard_benchmark_etag_stats(payload: Mapping[str, Any]) -> dict[str, Any]:
+    etag = str(payload.get("etag") or "")
+    return {
+        "ok": bool(etag),
+        "status": "ok" if etag else "missing_etag",
+        "etag": etag,
+        "payload_bytes": len(etag.encode("utf-8")),
+        "errors": [] if etag else ["etag was not generated"],
+    }
+
+
+def _dashboard_benchmark_rebuild_stats(payload: Mapping[str, Any]) -> dict[str, Any]:
+    diagnostics = _mapping(payload.get("diagnostics"))
+    counts = _mapping(diagnostics.get("counts"))
+    return {
+        "ok": bool(payload.get("ok")),
+        "status": str(payload.get("status") or "unknown"),
+        "payload_bytes": _dashboard_json_size_bytes(payload),
+        "events_loaded": counts.get("events_loaded"),
+        "run_records": counts.get("run_records"),
+        "written_files": len(_sequence(payload.get("written_files"))),
+        "errors": [str(error) for error in _sequence(payload.get("errors"))],
+    }
+
+
+def _dashboard_json_size_bytes(value: Any) -> int:
+    return len(json.dumps(value, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8"))
+
+
+def _dashboard_maxrss_kb() -> int:
+    return int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
+
+
+def format_dashboard_benchmark_text(result: Mapping[str, Any]) -> str:
+    lines = [
+        f"loopplane dashboard benchmark: {result.get('status', 'unknown')}",
+        f"workflow_id: {result.get('workflow_id') or 'unknown'}",
+        f"iterations: {result.get('iterations')}",
+        f"warmups: {result.get('warmups')}",
+    ]
+    operations = result.get("operations")
+    if isinstance(operations, Mapping):
+        lines.append("operations:")
+        for name, operation in operations.items():
+            summary = _mapping(_mapping(operation).get("summary"))
+            elapsed = _mapping(summary.get("elapsed_ms"))
+            payload_bytes = _mapping(summary.get("payload_bytes"))
+            disk_read_bytes = _mapping(summary.get("read_model_disk_read_bytes"))
+            lines.append(
+                "  - "
+                + str(name)
+                + ": elapsed_mean_ms="
+                + str(elapsed.get("mean"))
+                + " elapsed_max_ms="
+                + str(elapsed.get("max"))
+                + " payload_max_bytes="
+                + str(payload_bytes.get("max"))
+                + " disk_read_max_bytes="
+                + str(disk_read_bytes.get("max"))
+            )
+    errors = result.get("errors")
+    if isinstance(errors, Sequence) and not isinstance(errors, (str, bytes)) and errors:
+        lines.append("errors:")
+        lines.extend(f"  - {error}" for error in errors)
+    return "\n".join(lines) + "\n"
 
 
 def _public_result(result: Mapping[str, Any]) -> dict[str, Any]:
@@ -1291,7 +1949,11 @@ def _dashboard_workflow_has_read_models(project: Path, record: Mapping[str, Any]
         read_models_path = _resolve_project_relative_file(project, read_models_dir)
     except WorkflowPathError:
         return False
-    return all((read_models_path / filename).is_file() for filename in READ_MODEL_FILES)
+    return all(
+        (read_models_path / filename).is_file()
+        for filename in READ_MODEL_FILES
+        if filename not in READ_MODEL_COMPAT_OPTIONAL_FILES
+    )
 
 
 def _dashboard_workflow_recency_key(project: Path, record: Mapping[str, Any], *, fallback_index: int) -> tuple[float, int]:
@@ -1309,7 +1971,7 @@ def _dashboard_workflow_recency_key(project: Path, record: Mapping[str, Any], *,
     else:
         read_models_path = None
     if read_models_path is not None:
-        for filename in READ_MODEL_FILES:
+        for filename in WORKFLOW_RECENCY_READ_MODEL_FILES:
             model_path = read_models_path / filename
             payload = _read_optional_json(model_path)
             parsed = _parse_dashboard_timestamp(payload.get("generated_at"))
@@ -2806,6 +3468,8 @@ def _dashboard_data_response(context: Mapping[str, Any]) -> dict[str, Any]:
         workflow_id=str(context["workflow_id"]),
         allow_rebuild=not _workflow_mutation_blockers(workflow),
         max_dashboard_events=_optional_positive_int(context.get("max_dashboard_events")),
+        cache=_read_model_cache_from_context(context),
+        include_legacy_run_summaries=False,
     )
     if models["errors"]:
         return _lazy_file_content_payload({
@@ -2840,6 +3504,7 @@ def _dashboard_data_response(context: Mapping[str, Any]) -> dict[str, Any]:
             "node_details": {},
             "read_model_freshness": {},
             "read_model_rebuild": {},
+            "read_model_diagnostics": dict(models.get("diagnostics") or {}),
             "errors": models["errors"],
             "warnings": _read_model_rebuild_result_warnings(rebuild_result),
             "rebuild_read_models": dict(rebuild_result) if isinstance(rebuild_result, Mapping) else None,
@@ -2871,6 +3536,7 @@ def _dashboard_data_response(context: Mapping[str, Any]) -> dict[str, Any]:
             workflow=workflow,
             freshness=freshness,
         ),
+        "read_model_diagnostics": dict(models.get("diagnostics") or {}),
         "rebuild_read_models": dict(rebuild_result) if isinstance(rebuild_result, Mapping) else None,
         "workspace": workspace,
         "workflows": workflows,
@@ -2894,6 +3560,199 @@ def _dashboard_data_response(context: Mapping[str, Any]) -> dict[str, Any]:
         "errors": [],
         "warnings": warnings,
     })
+
+
+def _dashboard_data_etag(context: Mapping[str, Any]) -> str:
+    project = context["project"]
+    paths = context["paths"]
+    fingerprint = {
+        "schema_version": SCHEMA_VERSION,
+        "resource": "dashboard-data",
+        "workflow_id": str(context.get("workflow_id") or ""),
+        "max_dashboard_events": _optional_positive_int(context.get("max_dashboard_events")),
+        "workflow_paths": dict(paths.values),
+        "workspace": [
+            _path_stat_fingerprint(project, project / ".loopplane" / "workspace.json"),
+            _path_stat_fingerprint(project, project / ".loopplane" / "workflow_registry.json"),
+            _path_stat_fingerprint(project, project / ".loopplane" / "current_workflow.json"),
+        ],
+        "configuration": [
+            _path_stat_fingerprint(project, paths.workflow_config_file),
+            _path_stat_fingerprint(project, paths.config_file("security.json")),
+            _path_stat_fingerprint(project, paths.config_file("dashboard.json")),
+            _path_stat_fingerprint(project, paths.config_file("agent_runners.json")),
+            _path_stat_fingerprint(project, paths.version_control_config_file),
+            _path_stat_fingerprint(project, project_local_agent_runner_override_file(project)),
+            _path_stat_fingerprint(project, loopplane_home_layout().agent_runners_local_file),
+        ],
+        "read_models": [
+            _path_stat_fingerprint(project, paths.read_models_dir / filename)
+            for filename in _dashboard_data_read_model_filenames(paths)
+        ],
+        "plan_markdown": [
+            _path_stat_fingerprint(project, path)
+            for path in _dashboard_plan_markdown_fingerprint_paths(paths)
+        ],
+        "runtime": [
+            _path_stat_fingerprint(project, paths.runtime_dir / filename)
+            for filename in DASHBOARD_ETAG_RUNTIME_FILES
+        ],
+        "requests": [
+            _path_stat_fingerprint(project, paths.requests_dir / filename)
+            for filename in DASHBOARD_ETAG_REQUEST_FILES
+        ],
+        "event_log": _dashboard_event_log_fingerprint(project, paths),
+        "active_run_leases": _active_run_leases_etag_fingerprint(project, paths),
+    }
+    digest = sha256(json.dumps(fingerprint, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+    return f'"dashboard-{digest[:32]}"'
+
+
+def _dashboard_elapsed_ms(started: float) -> float:
+    return round((time.perf_counter() - started) * 1000, 3)
+
+
+def _dashboard_data_read_model_filenames(paths: WorkflowPaths) -> list[str]:
+    split_run_models_available = (paths.read_models_dir / "run_index.jsonl").is_file()
+    filenames: list[str] = []
+    for filename in DASHBOARD_LIVE_READ_MODEL_FILES:
+        if filename == "run_summaries.jsonl" and split_run_models_available:
+            continue
+        filenames.append(filename)
+    return filenames
+
+
+def _dashboard_plan_markdown_candidate_paths(project: Path, paths: WorkflowPaths) -> list[Path]:
+    candidates = [paths.plan_file]
+    plan_index = _read_optional_json(paths.read_models_dir / "plan_index.json")
+    plan_file_value = str(_mapping(plan_index).get("plan_file") or "").strip()
+    if plan_file_value:
+        candidates.append(_resolve_dashboard_record_path(project, plan_file_value))
+    unique: list[Path] = []
+    seen: set[str] = set()
+    for path in candidates:
+        key = path.as_posix()
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(path)
+    return unique
+
+
+def _dashboard_plan_markdown_fingerprint_paths(paths: WorkflowPaths) -> list[Path]:
+    return [paths.plan_file, paths.planning_dir / "PLAN_DRAFT.md"]
+
+
+def _dashboard_event_log_fingerprint(project: Path, paths: WorkflowPaths) -> dict[str, Any]:
+    events_dir = paths.runtime_dir / "events"
+    manifest_path = events_dir / EVENTS_MANIFEST_FILENAME
+    fingerprint: dict[str, Any] = {
+        "manifest": _path_stat_fingerprint(project, manifest_path),
+    }
+    if not manifest_path.is_file():
+        fingerprint["segments"] = _glob_file_stat_fingerprints(project, events_dir, "*.jsonl")
+    return fingerprint
+
+
+def _active_run_leases_etag_fingerprint(project: Path, paths: WorkflowPaths) -> dict[str, Any]:
+    lease_dir = paths.runtime_dir / "active_run_leases"
+    stamp_path = paths.runtime_dir / ACTIVE_RUN_LEASE_FINGERPRINT_FILENAME
+    directory = _path_stat_fingerprint(project, lease_dir)
+    stamp = _path_stat_fingerprint(project, stamp_path)
+    if stamp.get("exists"):
+        return {
+            "mode": "stamp",
+            "directory": directory,
+            "stamp": stamp,
+        }
+    return {
+        "mode": "bounded_legacy_directory",
+        "directory": directory,
+        "legacy_files": _bounded_directory_name_fingerprints(project, lease_dir, "*.json", limit=32),
+    }
+
+
+def _path_stat_fingerprint(project: Path, path: Path) -> dict[str, Any]:
+    relative = _project_relative(project, path)
+    try:
+        stat_result = path.stat()
+    except OSError as error:
+        return {
+            "path": relative,
+            "exists": False,
+            "error": error.__class__.__name__,
+        }
+    return {
+        "path": relative,
+        "exists": True,
+        "is_file": path.is_file(),
+        "size": stat_result.st_size,
+        "mtime_ns": stat_result.st_mtime_ns,
+    }
+
+
+def _glob_file_stat_fingerprints(project: Path, directory: Path, pattern: str) -> dict[str, Any]:
+    directory_ref = _path_stat_fingerprint(project, directory)
+    try:
+        files = sorted(path for path in directory.glob(pattern) if path.is_file())
+    except OSError as error:
+        return {
+            "directory": directory_ref,
+            "files": [],
+            "error": error.__class__.__name__,
+        }
+    return {
+        "directory": directory_ref,
+        "files": [_path_stat_fingerprint(project, path) for path in files],
+    }
+
+
+def _bounded_directory_name_fingerprints(project: Path, directory: Path, pattern: str, *, limit: int) -> dict[str, Any]:
+    directory_ref = _path_stat_fingerprint(project, directory)
+    try:
+        with os.scandir(directory) as entries:
+            names = sorted(
+                entry.name
+                for entry in entries
+                if fnmatch.fnmatch(entry.name, pattern) and entry.is_file(follow_symlinks=False)
+            )
+    except OSError as error:
+        return {
+            "directory": directory_ref,
+            "file_count": 0,
+            "sample_limit": max(0, int(limit)),
+            "sample_names": [],
+            "truncated": False,
+            "error": error.__class__.__name__,
+        }
+    sample_limit = max(0, int(limit))
+    if sample_limit and len(names) > sample_limit:
+        head_count = sample_limit // 2
+        tail_count = sample_limit - head_count
+        sample_names = [*names[:head_count], *names[-tail_count:]]
+    else:
+        sample_names = names
+    return {
+        "directory": directory_ref,
+        "file_count": len(names),
+        "sample_limit": sample_limit,
+        "sample_names": sample_names,
+        "truncated": len(names) > len(sample_names),
+    }
+
+
+def _request_etag_matches(header_value: str | None, etag: str) -> bool:
+    if not header_value:
+        return False
+    for raw_token in header_value.split(","):
+        token = raw_token.strip()
+        if token == "*":
+            return True
+        if token.startswith("W/"):
+            token = token[2:].strip()
+        if token == etag:
+            return True
+    return False
 
 
 def _runner_configuration_response(context: Mapping[str, Any]) -> dict[str, Any]:
@@ -3369,6 +4228,8 @@ def _workspace_selection_metadata(
 def _workflow_snapshots(
     context: Mapping[str, Any],
     workflows: Sequence[Mapping[str, Any]],
+    *,
+    read_model_cache: "_ReadModelCache | None" = None,
 ) -> dict[str, Any]:
     snapshots: dict[str, Any] = {}
     for record in workflows:
@@ -3388,15 +4249,24 @@ def _workflow_snapshots(
             }
             continue
         workflow_context = _workflow_context(context, resolved)
-        snapshot = _workflow_snapshot(workflow_context, workflow=dict(record))
+        snapshot = _workflow_snapshot(workflow_context, workflow=dict(record), read_model_cache=read_model_cache)
         snapshots[workflow_id] = snapshot
     return snapshots
 
 
-def _workflow_snapshot(context: Mapping[str, Any], *, workflow: Mapping[str, Any] | None = None) -> dict[str, Any]:
+def _workflow_snapshot(
+    context: Mapping[str, Any],
+    *,
+    workflow: Mapping[str, Any] | None = None,
+    read_model_cache: "_ReadModelCache | None" = None,
+) -> dict[str, Any]:
     project = context["project"]
     paths = context["paths"]
-    models = _load_read_models(paths.read_models_dir)
+    models = _load_read_models(
+        paths.read_models_dir,
+        cache=read_model_cache,
+        cache_scope=_read_model_cache_scope(project, paths, str(context["workflow_id"])),
+    )
     if models["errors"]:
         workflow_title = _workflow_display_title(str(context["workflow_id"]), workflow=workflow or {}, read_models={})
         return {
@@ -3439,12 +4309,37 @@ def _workflow_snapshot(context: Mapping[str, Any], *, workflow: Mapping[str, Any
         "read_models": models["json"],
         "jsonl_models": models["jsonl"],
         "plan_markdown": _plan_markdown_payload(project, paths, models["json"].get("plan_index.json")),
-        "node_details": _node_details_payload(context, models),
+        "node_details": _node_details_payload(context, models, include_split_run_details=True),
         "read_model_freshness": freshness,
         "read_model_rebuild": _read_model_rebuild_payload(context, workflow=workflow, freshness=freshness),
         "errors": [],
         "warnings": _freshness_warning_messages(freshness),
     }
+
+
+def _workflow_summaries(context: Mapping[str, Any], workflows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    project = context["project"]
+    summaries: dict[str, Any] = {}
+    for record in workflows:
+        workflow = _mapping(record)
+        workflow_id = str(workflow.get("workflow_id") or "").strip()
+        if not workflow_id:
+            continue
+        summary = _mapping(workflow.get("summary"))
+        summaries[workflow_id] = {
+            "schema_version": SCHEMA_VERSION,
+            "workflow_id": workflow_id,
+            "name": workflow.get("name"),
+            "status": workflow.get("status") or "unknown",
+            "archived": workflow.get("archived") is True,
+            "read_only": workflow.get("read_only") is True,
+            "created_at": workflow.get("created_at"),
+            "updated_at": workflow.get("updated_at"),
+            "last_seen_at": workflow.get("last_seen_at"),
+            "read_models_available": _dashboard_workflow_has_read_models(project, workflow),
+            "summary": dict(summary) if summary else {},
+        }
+    return summaries
 
 
 def _workspace_metadata(project: Path) -> dict[str, Any]:
@@ -3885,12 +4780,7 @@ def _read_model_live_refresh_expected(
     server_mode: bool,
     rebuild_in_progress: bool,
 ) -> bool:
-    return (
-        server_mode
-        and not rebuild_in_progress
-        and str(freshness.get("status") or "") in {"stale", "unknown"}
-        and read_model_rebuild.get("mutation_allowed") is True
-    )
+    return False
 
 
 def _control_record_type(record: Any) -> str:
@@ -4156,26 +5046,53 @@ def _inspector_console_warnings(blockers: Sequence[str], runner_problem: str | N
     return warnings
 
 
-def _node_details_payload(context: Mapping[str, Any], models: Mapping[str, Any]) -> dict[str, Any]:
+def _node_details_payload(
+    context: Mapping[str, Any],
+    models: Mapping[str, Any],
+    *,
+    include_split_run_details: bool = False,
+) -> dict[str, Any]:
     json_models = _mapping(models.get("json"))
     jsonl_models = _mapping(models.get("jsonl"))
     workflow_graph = _mapping(json_models.get("workflow_graph.json"))
     nodes = [_mapping(node) for node in _sequence(workflow_graph.get("nodes"))]
     run_summaries = [_mapping(record) for record in _sequence(jsonl_models.get("run_summaries.jsonl"))]
+    run_index = [_mapping(record) for record in _sequence(jsonl_models.get("run_index.jsonl"))]
+    run_records = run_summaries or run_index
+    run_source = "run_summaries.jsonl" if run_summaries else "run_index.jsonl"
     runs_by_id = {
         str(record.get("run_id") or ""): record
-        for record in run_summaries
+        for record in run_records
         if str(record.get("run_id") or "")
     }
+    run_sources_by_id = {run_id: run_source for run_id in runs_by_id}
+    if include_split_run_details:
+        visible_run_ids = {
+            str(node.get("run_id") or "")
+            for node in nodes
+            if str(node.get("run_id") or "")
+        }
+        for split_run_id, detail_record in _split_run_detail_records(context, visible_run_ids).items():
+            summary = dict(_mapping(runs_by_id.get(split_run_id)))
+            detail_metadata = {str(key): value for key, value in detail_record.items() if key != "details"}
+            summary.update(detail_metadata)
+            summary["details"] = _mapping(detail_record.get("details"))
+            runs_by_id[split_run_id] = summary
+            run_sources_by_id[split_run_id] = "run_details"
     node_details: dict[str, Any] = {}
     run_details: dict[str, Any] = {}
     for node in nodes:
         node_id = str(node.get("node_id") or "")
         if not node_id:
             continue
-        detail = _node_detail_from_read_models(context, node, runs_by_id)
-        node_details[node_id] = detail
         run_id = str(node.get("run_id") or "")
+        detail = _node_detail_from_read_models(
+            context,
+            node,
+            runs_by_id,
+            run_source=run_sources_by_id.get(run_id, run_source),
+        )
+        node_details[node_id] = detail
         if run_id and run_id not in run_details and detail.get("run"):
             run_details[run_id] = detail
     return {
@@ -4185,6 +5102,39 @@ def _node_details_payload(context: Mapping[str, Any], models: Mapping[str, Any])
         "nodes": node_details,
         "runs": run_details,
     }
+
+
+def _split_run_detail_records(context: Mapping[str, Any], run_ids: set[str]) -> dict[str, Mapping[str, Any]]:
+    wanted = {run_id for run_id in run_ids if run_id}
+    if not wanted:
+        return {}
+    project = context["project"]
+    paths = context["paths"]
+    manifest = _read_optional_json(paths.read_models_dir / "run_details_manifest.json")
+    try:
+        detail_root = (paths.read_models_dir / READ_MODEL_DETAIL_DIR).resolve()
+    except OSError:
+        return {}
+    records: dict[str, Mapping[str, Any]] = {}
+    for entry in _sequence(manifest.get("runs")):
+        manifest_record = _mapping(entry)
+        run_id = str(manifest_record.get("run_id") or "")
+        if run_id not in wanted:
+            continue
+        detail_path_value = _text(manifest_record.get("path"))
+        if not detail_path_value:
+            continue
+        try:
+            detail_path = _resolve_project_relative_file(project, detail_path_value)
+            resolved_detail = detail_path.resolve()
+            if resolved_detail != detail_root and detail_root not in resolved_detail.parents:
+                continue
+        except (OSError, WorkflowPathError):
+            continue
+        detail_record = _read_optional_json(detail_path)
+        if detail_record and str(detail_record.get("run_id") or "") == run_id:
+            records[run_id] = detail_record
+    return records
 
 
 def _lazy_file_content_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
@@ -4227,6 +5177,8 @@ def _node_detail_from_read_models(
     context: Mapping[str, Any],
     node: Mapping[str, Any],
     runs_by_id: Mapping[str, Mapping[str, Any]],
+    *,
+    run_source: str,
 ) -> dict[str, Any]:
     run_id = str(node.get("run_id") or "")
     node_type = _status_value(node.get("type"))
@@ -4245,7 +5197,7 @@ def _node_detail_from_read_models(
         "node_id": node.get("node_id"),
         "run_id": run_id or None,
         "task_id": node.get("task_id") or run.get("task_id"),
-        "source": "run_summaries.jsonl" if run else "workflow_graph.json",
+        "source": run_source if run else "workflow_graph.json",
         "run": run if run else None,
         "sections": list(sections),
         "available_sections": [str(_mapping(section).get("key")) for section in sections if _mapping(section).get("available")],
@@ -4309,6 +5261,9 @@ def _read_model_response(context: Mapping[str, Any], filename: str) -> dict[str,
 
 
 def _run_detail_payload(context: Mapping[str, Any], run_id: str) -> dict[str, Any]:
+    split_payload = _run_detail_payload_from_split(context, run_id)
+    if split_payload is not None:
+        return split_payload
     workflow = _workflow_record_for_id(_workflow_records(context), str(context["workflow_id"]))
     models, _freshness, _rebuild_result = _load_live_read_models(
         context["project"],
@@ -4316,9 +5271,15 @@ def _run_detail_payload(context: Mapping[str, Any], run_id: str) -> dict[str, An
         workflow_id=str(context["workflow_id"]),
         allow_rebuild=not _workflow_mutation_blockers(workflow),
         max_dashboard_events=_optional_positive_int(context.get("max_dashboard_events")),
+        cache=_read_model_cache_from_context(context),
     )
     summaries = _sequence(_mapping(models.get("jsonl")).get("run_summaries.jsonl"))
+    run_source = "run_summaries.jsonl"
     matches = [record for record in summaries if str(record.get("run_id") or "") == run_id]
+    if not matches:
+        run_source = "run_index.jsonl"
+        run_index = _sequence(_mapping(models.get("jsonl")).get("run_index.jsonl"))
+        matches = [record for record in run_index if str(record.get("run_id") or "") == run_id]
     if not matches:
         return {
             "schema_version": SCHEMA_VERSION,
@@ -4326,9 +5287,28 @@ def _run_detail_payload(context: Mapping[str, Any], run_id: str) -> dict[str, An
             "status": "run_not_found",
             "workflow_id": context["workflow_id"],
             "run_id": run_id,
-            "errors": [f"run {run_id!r} was not found in run_summaries.jsonl"],
+            "errors": [f"run {run_id!r} was not found in run_summaries.jsonl or run_index.jsonl"],
         }
     run = _mapping(matches[-1])
+    run_details = _mapping(run.get("details"))
+    if not run_details and (
+        run_source == "run_index.jsonl"
+        or run.get("compatibility_mode") == "split_details"
+        or run.get("details_externalized") is True
+        or "detail_status" in run
+    ):
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "ok": False,
+            "status": "detail_missing",
+            "workflow_id": context["workflow_id"],
+            "run_id": run_id,
+            "run": _strip_path_file_content(run),
+            "details": {},
+            "node_detail": {},
+            "source": run_source,
+            "errors": [f"run {run_id!r} detail was externalized but no split detail record was available"],
+        }
     node_details = _node_details_payload(context, models) if not models.get("errors") else {}
     run_detail = _mapping(_mapping(node_details.get("runs")).get(run_id))
     return {
@@ -4338,9 +5318,62 @@ def _run_detail_payload(context: Mapping[str, Any], run_id: str) -> dict[str, An
         "workflow_id": context["workflow_id"],
         "run_id": run_id,
         "run": _strip_path_file_content(run),
-        "details": _strip_path_file_content(_mapping(run.get("details"))),
+        "details": _strip_path_file_content(run_details),
         "node_detail": _strip_path_file_content(run_detail),
-        "source": "run_summaries.jsonl",
+        "source": run_source,
+    }
+
+
+def _run_detail_payload_from_split(context: Mapping[str, Any], run_id: str) -> dict[str, Any] | None:
+    project = context["project"]
+    paths = context["paths"]
+    manifest = _read_optional_json(paths.read_models_dir / "run_details_manifest.json")
+    matches = [
+        _mapping(record)
+        for record in _sequence(manifest.get("runs"))
+        if str(_mapping(record).get("run_id") or "") == run_id
+    ]
+    if not matches:
+        return None
+    record = matches[-1]
+    detail_path_value = _text(record.get("path"))
+    if not detail_path_value:
+        return None
+    try:
+        detail_path = _resolve_project_relative_file(project, detail_path_value)
+        detail_root = (paths.read_models_dir / READ_MODEL_DETAIL_DIR).resolve()
+        resolved_detail = detail_path.resolve()
+        if resolved_detail != detail_root and detail_root not in resolved_detail.parents:
+            return None
+    except (OSError, WorkflowPathError):
+        return None
+    detail_record = _read_optional_json(detail_path)
+    if not detail_record:
+        return None
+    run = {str(key): value for key, value in detail_record.items() if key != "details"}
+    details = _mapping(detail_record.get("details"))
+    node_detail = {
+        "schema_version": SCHEMA_VERSION,
+        "workflow_id": context["workflow_id"],
+        "node_id": detail_record.get("node_id"),
+        "run_id": run_id,
+        "task_id": detail_record.get("task_id"),
+        "source": "run_details",
+        "run": run,
+        "sections": list(_sequence(details.get("sections"))),
+        "available_sections": list(_sequence(details.get("available_sections"))),
+        "missing_sections": list(_sequence(details.get("missing_sections"))),
+    }
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "ok": True,
+        "status": "ok",
+        "workflow_id": context["workflow_id"],
+        "run_id": run_id,
+        "run": _strip_path_file_content(run),
+        "details": _strip_path_file_content(details),
+        "node_detail": _strip_path_file_content(node_detail),
+        "source": "run_details",
     }
 
 
@@ -4425,7 +5458,10 @@ def _record_control_request(
 
 def _record_read_model_rebuild_request(context: Mapping[str, Any], body: Mapping[str, Any]) -> dict[str, Any]:
     paths = context["paths"]
-    models = _load_read_models(paths.read_models_dir)
+    models = _load_read_models(
+        paths.read_models_dir,
+        cache_scope=_read_model_cache_scope(context["project"], paths, str(context["workflow_id"])),
+    )
     freshness: Mapping[str, Any] = {}
     if not models["errors"]:
         freshness = _read_model_freshness(context["project"], paths, models["json"])
@@ -4895,27 +5931,214 @@ def _render_error_html(result: Mapping[str, Any]) -> str:
 """
 
 
-def _load_read_models(read_models_dir: Path) -> dict[str, Any]:
+class _ReadModelCache:
+    def __init__(
+        self,
+        *,
+        max_entries: int | None = None,
+        max_scopes: int | None = None,
+        max_bytes: int | None = None,
+    ) -> None:
+        self._max_entries = _read_model_cache_limit(
+            max_entries,
+            env_name="LOOPPLANE_READ_MODEL_CACHE_MAX_ENTRIES",
+            default=READ_MODEL_CACHE_DEFAULT_MAX_ENTRIES,
+        )
+        self._max_scopes = _read_model_cache_limit(
+            max_scopes,
+            env_name="LOOPPLANE_READ_MODEL_CACHE_MAX_SCOPES",
+            default=READ_MODEL_CACHE_DEFAULT_MAX_SCOPES,
+        )
+        self._max_bytes = _read_model_cache_limit(
+            max_bytes,
+            env_name="LOOPPLANE_READ_MODEL_CACHE_MAX_BYTES",
+            default=READ_MODEL_CACHE_DEFAULT_MAX_BYTES,
+        )
+        self._lock = threading.RLock()
+        self._entries: OrderedDict[tuple[str, str, str], tuple[tuple[int, int], int, Any]] = OrderedDict()
+        self._total_bytes = 0
+
+    def read_json(self, path: Path, *, scope: str = "", stats: dict[str, int] | None = None) -> Any:
+        return self._read(path, kind="json", scope=scope, stats=stats)
+
+    def read_jsonl(self, path: Path, *, scope: str = "", stats: dict[str, int] | None = None) -> Any:
+        return self._read(path, kind="jsonl", scope=scope, stats=stats)
+
+    def snapshot(self) -> dict[str, Any]:
+        with self._lock:
+            return {
+                "entries": len(self._entries),
+                "scopes": len({key[0] for key in self._entries}),
+                "total_bytes": self._total_bytes,
+                "max_entries": self._max_entries,
+                "max_scopes": self._max_scopes,
+                "max_bytes": self._max_bytes,
+            }
+
+    def _read(self, path: Path, *, kind: str, scope: str, stats: dict[str, int] | None) -> Any:
+        stat_result = path.stat()
+        byte_size = int(stat_result.st_size)
+        stamp = (byte_size, int(stat_result.st_mtime_ns))
+        key = (scope or "default", _cache_path_key(path), kind)
+        _increment_cache_stats(stats, "read_attempts")
+        with self._lock:
+            cached = self._entries.get(key)
+            if cached is not None and cached[0] == stamp:
+                self._entries.move_to_end(key)
+                _increment_cache_stats(stats, "cache_hits")
+                _increment_cache_stats(stats, "cache_hit_bytes", byte_size)
+                return cached[2]
+        _increment_cache_stats(stats, "disk_reads")
+        _increment_cache_stats(stats, "disk_read_bytes", byte_size)
+        if kind == "jsonl":
+            value = _read_jsonl(path)
+        else:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        if byte_size > self._max_bytes:
+            _increment_cache_stats(stats, "skipped_oversize")
+            return value
+        with self._lock:
+            previous = self._entries.pop(key, None)
+            if previous is not None:
+                self._total_bytes -= previous[1]
+            self._entries[key] = (stamp, byte_size, value)
+            self._entries.move_to_end(key)
+            self._total_bytes += byte_size
+            self._evict_locked(stats)
+        return value
+
+    def _evict_locked(self, stats: dict[str, int] | None) -> None:
+        while (
+            len(self._entries) > self._max_entries
+            or self._total_bytes > self._max_bytes
+            or len({key[0] for key in self._entries}) > self._max_scopes
+        ):
+            _key, removed = self._entries.popitem(last=False)
+            self._total_bytes -= removed[1]
+            _increment_cache_stats(stats, "evictions")
+
+
+def _read_model_cache_limit(value: int | None, *, env_name: str, default: int) -> int:
+    if value is not None:
+        try:
+            return max(1, int(value))
+        except (TypeError, ValueError):
+            return max(1, int(default))
+    raw_value = os.environ.get(env_name)
+    if raw_value is not None:
+        try:
+            return max(1, int(raw_value))
+        except ValueError:
+            return max(1, int(default))
+    return max(1, int(default))
+
+
+def _increment_cache_stats(stats: dict[str, int] | None, key: str, amount: int = 1) -> None:
+    if stats is None:
+        return
+    stats[key] = int(stats.get(key) or 0) + int(amount)
+
+
+def _cache_path_key(path: Path) -> str:
+    try:
+        return path.resolve().as_posix()
+    except OSError:
+        return path.absolute().as_posix()
+
+
+def _read_model_cache_scope(project: Path, paths: WorkflowPaths, workflow_id: str) -> str:
+    return "|".join(
+        (
+            _cache_path_key(project),
+            str(workflow_id or ""),
+            _cache_path_key(paths.read_models_dir),
+        )
+    )
+
+
+def _read_model_cache_diagnostics(
+    cache: "_ReadModelCache | None",
+    stats: Mapping[str, int],
+    *,
+    scope: str,
+) -> dict[str, Any]:
+    diagnostics: dict[str, Any] = {
+        "cache_enabled": cache is not None,
+        "scope": scope,
+        "read_attempts": int(stats.get("read_attempts") or 0),
+        "cache_hits": int(stats.get("cache_hits") or 0),
+        "disk_reads": int(stats.get("disk_reads") or 0),
+        "cache_hit_bytes": int(stats.get("cache_hit_bytes") or 0),
+        "disk_read_bytes": int(stats.get("disk_read_bytes") or 0),
+        "skipped_oversize": int(stats.get("skipped_oversize") or 0),
+        "skipped_legacy_run_summaries": int(stats.get("skipped_legacy_run_summaries") or 0),
+        "evictions": int(stats.get("evictions") or 0),
+    }
+    if cache is not None:
+        diagnostics["cache_snapshot"] = cache.snapshot()
+    return diagnostics
+
+
+def _read_model_cache_from_context(context: Mapping[str, Any]) -> "_ReadModelCache | None":
+    cache = context.get("read_model_cache")
+    return cache if isinstance(cache, _ReadModelCache) else None
+
+
+def _load_read_models(
+    read_models_dir: Path,
+    *,
+    cache: "_ReadModelCache | None" = None,
+    cache_scope: str = "",
+    include_legacy_run_summaries: bool = True,
+    read_model_files: Sequence[str] | None = None,
+) -> dict[str, Any]:
     errors: list[str] = []
     json_models: dict[str, Mapping[str, Any]] = {}
     jsonl_models: dict[str, list[Mapping[str, Any]]] = {}
-    for filename in READ_MODEL_FILES:
+    cache_stats: dict[str, int] = {}
+    for filename in (tuple(read_model_files) if read_model_files is not None else READ_MODEL_FILES):
         path = read_models_dir / filename
+        if filename == "run_summaries.jsonl" and not include_legacy_run_summaries:
+            _increment_cache_stats(cache_stats, "skipped_legacy_run_summaries")
+            continue
         if not path.is_file():
+            if filename in READ_MODEL_COMPAT_OPTIONAL_FILES:
+                continue
             errors.append(f"{filename}: missing from {read_models_dir}")
             continue
         try:
             if filename.endswith(".jsonl"):
-                jsonl_models[filename] = _read_jsonl(path)
+                if cache is not None:
+                    jsonl_models[filename] = cache.read_jsonl(path, scope=cache_scope, stats=cache_stats)
+                else:
+                    _increment_cache_stats(cache_stats, "read_attempts")
+                    stat_result = path.stat()
+                    _increment_cache_stats(cache_stats, "disk_reads")
+                    _increment_cache_stats(cache_stats, "disk_read_bytes", int(stat_result.st_size))
+                    jsonl_models[filename] = _read_jsonl(path)
             else:
-                payload = json.loads(path.read_text(encoding="utf-8"))
+                if cache is not None:
+                    payload = cache.read_json(path, scope=cache_scope, stats=cache_stats)
+                else:
+                    _increment_cache_stats(cache_stats, "read_attempts")
+                    stat_result = path.stat()
+                    _increment_cache_stats(cache_stats, "disk_reads")
+                    _increment_cache_stats(cache_stats, "disk_read_bytes", int(stat_result.st_size))
+                    payload = json.loads(path.read_text(encoding="utf-8"))
                 if not isinstance(payload, Mapping):
                     errors.append(f"{filename}: expected JSON object")
                 else:
                     json_models[filename] = payload
         except (OSError, ValueError, json.JSONDecodeError) as error:
             errors.append(f"{filename}: {error}")
-    return {"json": json_models, "jsonl": jsonl_models, "errors": errors}
+    return {
+        "json": json_models,
+        "jsonl": jsonl_models,
+        "errors": errors,
+        "diagnostics": {
+            "read_models": _read_model_cache_diagnostics(cache, cache_stats, scope=cache_scope),
+        },
+    }
 
 
 def _load_live_read_models(
@@ -4925,21 +6148,28 @@ def _load_live_read_models(
     workflow_id: str,
     allow_rebuild: bool,
     max_dashboard_events: int | None = None,
+    cache: "_ReadModelCache | None" = None,
+    include_legacy_run_summaries: bool = True,
 ) -> tuple[dict[str, Any], dict[str, Any], Mapping[str, Any] | None]:
-    models = _load_read_models(paths.read_models_dir)
+    models = _load_read_models(
+        paths.read_models_dir,
+        cache=cache,
+        cache_scope=_read_model_cache_scope(project, paths, workflow_id),
+        include_legacy_run_summaries=include_legacy_run_summaries,
+        read_model_files=DASHBOARD_LIVE_READ_MODEL_FILES,
+    )
     freshness = _read_model_freshness(project, paths, models["json"]) if not models["errors"] else {}
     rebuild_result: Mapping[str, Any] | None = None
     should_rebuild = bool(models["errors"]) or str(freshness.get("status") or "") in {"stale", "unknown"}
     if allow_rebuild and should_rebuild:
-        rebuild_result = rebuild_read_models(
-            project,
-            write=True,
-            workflow_id=workflow_id,
-            max_dashboard_events=max_dashboard_events,
-        )
-        if rebuild_result.get("ok"):
-            models = _load_read_models(paths.read_models_dir)
-            freshness = _read_model_freshness(project, paths, models["json"]) if not models["errors"] else {}
+        rebuild_result = {
+            "schema_version": SCHEMA_VERSION,
+            "ok": True,
+            "status": "rebuild_not_started",
+            "workflow_id": workflow_id,
+            "message": "Live dashboard refresh does not rebuild read models synchronously.",
+            "max_dashboard_events": max_dashboard_events,
+        }
     return models, freshness, rebuild_result
 
 
@@ -5079,18 +6309,29 @@ def _read_model_freshness(
 
 
 def _event_log_reference(paths: WorkflowPaths) -> dict[str, Any]:
-    projection = load_event_log_projection(paths)
-    state = _mapping(projection.get("state"))
-    latest_event = _mapping(state.get("latest_event"))
-    event_id = _event_id(latest_event) or _optional_string(state.get("latest_event_id"))
-    event_hash = _optional_string(latest_event.get("event_hash")) or _optional_string(state.get("latest_event_hash"))
+    manifest = load_event_segment_manifest(paths.runtime_dir / "events")
+    latest_from_manifest = _mapping(manifest.get("latest_event")) if isinstance(manifest, Mapping) else {}
+    if latest_from_manifest:
+        return {
+            "last_event_seq": _event_sequence(latest_from_manifest),
+            "source_event_id": _event_id(latest_from_manifest),
+            "event_hash": _optional_string(latest_from_manifest.get("event_hash")),
+            "events_count": _coerce_int(manifest.get("event_count")),
+            "freshness_mode": "event_manifest",
+        }
+    latest_event = _latest_event_record(paths.runtime_dir / "events")
+    if latest_event is None:
+        return {
+            "last_event_seq": None,
+            "source_event_id": None,
+            "event_hash": None,
+            "freshness_mode": "event_tail",
+        }
     return {
         "last_event_seq": _event_sequence(latest_event),
-        "source_event_id": event_id,
-        "event_hash": event_hash,
-        "events_sha256": _events_sha256(paths.runtime_dir / "events"),
-        "events_count": _event_record_count(paths.runtime_dir / "events"),
-        "projection_events_replayed": int(projection.get("events_replayed") or 0),
+        "source_event_id": _event_id(latest_event),
+        "event_hash": _optional_string(latest_event.get("event_hash")),
+        "freshness_mode": "event_tail",
     }
 
 
@@ -5236,30 +6477,70 @@ def _event_records_after_sequence(
     through_sequence: int,
     limit: int,
 ) -> tuple[list[Mapping[str, Any]], bool]:
+    if through_sequence <= after_sequence:
+        return [], False
+    if limit <= 0 or through_sequence - after_sequence > limit:
+        return [], True
     records: list[Mapping[str, Any]] = []
-    for path in sorted(events_dir.glob("*.jsonl")):
+    for path in sorted(events_dir.glob("*.jsonl"), reverse=True):
         if not path.is_file():
             continue
-        try:
-            lines = path.read_text(encoding="utf-8").splitlines()
-        except OSError:
-            continue
-        for line in lines:
-            if not line.strip():
-                continue
-            try:
-                record = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if not isinstance(record, Mapping):
-                continue
+        for record in _iter_jsonl_records_reverse(path):
             sequence = _event_sequence(record)
-            if sequence is None or sequence <= after_sequence or sequence > through_sequence:
+            if sequence is None or sequence > through_sequence:
                 continue
+            if sequence <= after_sequence:
+                return _sort_event_records(records), False
             records.append(record)
             if len(records) > limit:
-                return records[:limit], True
-    return records, False
+                return _sort_event_records(records[:limit]), True
+    return _sort_event_records(records), False
+
+
+def _latest_event_record(events_dir: Path) -> Mapping[str, Any] | None:
+    for path in sorted(events_dir.glob("*.jsonl"), reverse=True):
+        if not path.is_file():
+            continue
+        for record in _iter_jsonl_records_reverse(path):
+            return record
+    return None
+
+
+def _iter_jsonl_records_reverse(path: Path) -> Iterator[Mapping[str, Any]]:
+    for line in _iter_jsonl_lines_reverse(path):
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(record, Mapping):
+            yield record
+
+
+def _iter_jsonl_lines_reverse(path: Path, *, chunk_size: int = 65536) -> Iterator[str]:
+    try:
+        with path.open("rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            position = handle.tell()
+            buffer = b""
+            while position > 0:
+                read_size = min(chunk_size, position)
+                position -= read_size
+                handle.seek(position)
+                chunk = handle.read(read_size)
+                buffer = chunk + buffer
+                parts = buffer.split(b"\n")
+                buffer = parts[0]
+                for raw_line in reversed(parts[1:]):
+                    if raw_line.strip():
+                        yield raw_line.decode("utf-8", errors="replace")
+            if buffer.strip():
+                yield buffer.decode("utf-8", errors="replace")
+    except OSError:
+        return
+
+
+def _sort_event_records(records: Sequence[Mapping[str, Any]]) -> list[Mapping[str, Any]]:
+    return sorted(records, key=lambda record: (_event_sequence(record) or 0, str(record.get("event_id") or "")))
 
 
 def _is_benign_freshness_drift_event(record: Mapping[str, Any]) -> bool:
@@ -5323,34 +6604,6 @@ def _freshness_warning_messages(freshness: Mapping[str, Any]) -> list[str]:
     return [f"{summary} Rebuild with: {command}" if command else summary]
 
 
-def _events_sha256(events_dir: Path) -> str:
-    digest = sha256()
-    for path in sorted(events_dir.glob("*.jsonl")):
-        if not path.is_file():
-            continue
-        digest.update(path.name.encode("utf-8"))
-        digest.update(b"\0")
-        try:
-            digest.update(path.read_bytes())
-        except OSError:
-            continue
-        digest.update(b"\0")
-    return "sha256:" + digest.hexdigest()
-
-
-def _event_record_count(events_dir: Path) -> int:
-    count = 0
-    for path in sorted(events_dir.glob("*.jsonl")):
-        if not path.is_file():
-            continue
-        try:
-            lines = path.read_text(encoding="utf-8").splitlines()
-        except OSError:
-            continue
-        count += sum(1 for line in lines if line.strip())
-    return count
-
-
 def _read_jsonl(path: Path) -> list[Mapping[str, Any]]:
     records: list[Mapping[str, Any]] = []
     for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
@@ -5374,7 +6627,18 @@ def _dashboard_output_dir(project: Path, output_dir: Path | str | None) -> Path:
 
 def _copy_read_models(source: Path, destination: Path) -> None:
     for filename in READ_MODEL_FILES:
-        shutil.copy2(source / filename, destination / filename)
+        source_file = source / filename
+        if not source_file.is_file():
+            if filename in READ_MODEL_COMPAT_OPTIONAL_FILES:
+                continue
+            raise FileNotFoundError(source_file)
+        shutil.copy2(source_file, destination / filename)
+    source_details = source / READ_MODEL_DETAIL_DIR
+    if source_details.is_dir():
+        destination_details = destination / READ_MODEL_DETAIL_DIR
+        if destination_details.exists():
+            shutil.rmtree(destination_details)
+        shutil.copytree(source_details, destination_details)
 
 
 def _copy_static_assets(destination: Path) -> None:
@@ -7413,6 +8677,13 @@ def _render_graph_overview(
     total_events = _coerce_int(event_window.get("total_events")) or _coerce_int(_mapping(workflow_graph.get("source_hashes")).get("events_count"))
     event_label = "recent events" if total_events and total_events > event_count else "events"
     event_suffix = f"<small>of {_escape(total_events)}</small>" if total_events and total_events > event_count else ""
+    aggregation = _mapping(workflow_graph.get("self_expansion_aggregation"))
+    aggregated_count = _coerce_int(aggregation.get("aggregated_node_count")) or 0
+    aggregation_html = (
+        f'<span><strong>{aggregated_count}</strong> self-expansion aggregated</span>'
+        if aggregated_count
+        else ""
+    )
     check_count = sum(1 for node in node_records if _is_graph_check_node(node))
     hot_nodes = [
         node
@@ -7424,6 +8695,7 @@ def _render_graph_overview(
   <span><strong>{task_count}</strong> tasks</span>
   <span><strong>{agent_count}</strong> agents</span>
   <span><strong>{event_count}</strong> {_escape(event_label)}{event_suffix}</span>
+  {aggregation_html}
   <span><strong>{check_count}</strong> checks</span>
   <span data-status-tier="{_escape('warning' if hot_nodes else 'muted')}"><strong>{len(hot_nodes)}</strong> attention</span>
 </div>"""
@@ -8166,6 +9438,7 @@ def _human_detail_metadata(item: Mapping[str, Any], *, exclude: set[str] | None 
         "sha256",
         "event_hash",
         "events_sha256",
+        "events_segment_manifest",
         "content_sha256",
         "source_hashes",
         "token",

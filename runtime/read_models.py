@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from hashlib import sha256
@@ -36,7 +38,17 @@ from runtime.path_resolution import (
 )
 from runtime.plan_objectives import parse_plan_objectives
 from runtime.reconciliation import PlanTask, parse_plan_tasks
-from runtime.scheduler import SCHEMA_VERSION, completion_marker_status, load_event_log_projection
+from runtime.scheduler import (
+    AtomicOwnerLock,
+    EVENTS_MANIFEST_FILENAME,
+    EVENT_PAYLOAD_SIDECAR_DIR,
+    SCHEMA_VERSION,
+    SchedulerLockError,
+    _event_hash,
+    completion_marker_status,
+    load_event_log_projection,
+    load_event_segment_manifest,
+)
 from runtime.version_control import run_git_doctor
 from runtime.workspace_identity import relative_root_value
 from runtime.workflow_lifecycle import WorkflowLifecycleError, ensure_compatibility_workflow_metadata
@@ -48,9 +60,12 @@ READ_MODEL_JSON_FILES = (
     "workflow_graph.json",
     "metrics.json",
     "version_control_status.json",
+    "run_details_manifest.json",
+    "build_manifest.json",
 )
 READ_MODEL_JSONL_FILES = (
     "dashboard_feed.jsonl",
+    "run_index.jsonl",
     "run_summaries.jsonl",
 )
 READ_MODEL_FILES = (
@@ -58,10 +73,16 @@ READ_MODEL_FILES = (
     "plan_index.json",
     "workflow_graph.json",
     "dashboard_feed.jsonl",
+    "run_index.jsonl",
     "run_summaries.jsonl",
     "metrics.json",
     "version_control_status.json",
+    "run_details_manifest.json",
+    "build_manifest.json",
 )
+READ_MODEL_COMPAT_OPTIONAL_FILES = frozenset({"run_index.jsonl", "run_details_manifest.json", "build_manifest.json"})
+READ_MODEL_DETAIL_DIR = "run_details"
+READ_MODEL_BUILDER_VERSION = "dashboard-performance-2026-06-24"
 
 
 def _read_model_limit_from_env(name: str, default: int) -> int:
@@ -86,6 +107,11 @@ NODE_DETAIL_TEXT_LIMIT = 4000
 NODE_DETAIL_LOG_LIMIT = 2500
 NODE_DETAIL_ITEM_LIMIT = 12
 NODE_DETAIL_REDACTION_EXTRA_BYTES = 8192
+RUN_DETAIL_BUILD_LIMIT = _read_model_limit_from_env("LOOPPLANE_RUN_DETAIL_BUILD_LIMIT", 200)
+READ_MODEL_REBUILD_LOCK_TTL_SECONDS = _read_model_limit_from_env("LOOPPLANE_READ_MODEL_REBUILD_LOCK_TTL_SECONDS", 120)
+READ_MODEL_REBUILD_LOCK_WAIT_SECONDS = _read_model_limit_from_env("LOOPPLANE_READ_MODEL_REBUILD_LOCK_WAIT_SECONDS", 30)
+SELF_EXPANSION_GRAPH_DETAIL_LIMIT = _read_model_limit_from_env("LOOPPLANE_SELF_EXPANSION_GRAPH_DETAIL_LIMIT", 50)
+SELF_EXPANSION_GRAPH_SAMPLE_LIMIT = _read_model_limit_from_env("LOOPPLANE_SELF_EXPANSION_GRAPH_SAMPLE_LIMIT", 8)
 IMAGE_PREVIEW_SUFFIXES = frozenset({".svg", ".png", ".jpg", ".jpeg", ".gif", ".webp"})
 DEFAULT_DASHBOARD_MAX_EVENTS = _read_model_limit_from_env("LOOPPLANE_MAX_DASHBOARD_EVENTS", 200)
 DASHBOARD_EVENT_NODE_LIMIT = _read_model_limit_from_env("LOOPPLANE_DASHBOARD_EVENT_NODE_LIMIT", DEFAULT_DASHBOARD_MAX_EVENTS)
@@ -134,6 +160,36 @@ class PlanSource:
     warnings: tuple[str, ...] = ()
 
 
+class _TimingTrace:
+    def __init__(self) -> None:
+        self._started = time.perf_counter()
+        self._spans: list[dict[str, Any]] = []
+
+    @contextmanager
+    def span(self, name: str) -> Any:
+        started = time.perf_counter()
+        try:
+            yield
+        finally:
+            self._spans.append(
+                {
+                    "name": name,
+                    "duration_ms": _duration_ms_since(started),
+                }
+            )
+
+    def summary(self, *, counts: Mapping[str, Any] | None = None) -> dict[str, Any]:
+        return {
+            "total_duration_ms": _duration_ms_since(self._started),
+            "spans": list(self._spans),
+            "counts": dict(counts or {}),
+        }
+
+
+def _duration_ms_since(started: float) -> float:
+    return round((time.perf_counter() - started) * 1000, 3)
+
+
 def _mapping_or_empty(value: Any) -> Mapping[str, Any]:
     return value if isinstance(value, Mapping) else {}
 
@@ -147,28 +203,35 @@ def rebuild_read_models(
 ) -> dict[str, Any]:
     project = Path(project_root).expanduser().resolve()
     started_at = utc_timestamp()
+    telemetry = _TimingTrace()
     try:
-        ensure_compatibility_workflow_metadata(project, updated_by="loopplane read-models")
-        workflow_config = load_workflow_config(project, workflow_id=workflow_id)
-        paths = WorkflowPaths.from_config(project, workflow_config)
-        plan_source = _select_plan_source(project, paths, workflow_config)
-        plan_text = plan_source.text
+        with telemetry.span("input_loading"):
+            ensure_compatibility_workflow_metadata(project, updated_by="loopplane read-models")
+            workflow_config = load_workflow_config(project, workflow_id=workflow_id)
+            paths = WorkflowPaths.from_config(project, workflow_config)
+            plan_source = _select_plan_source(project, paths, workflow_config)
+            plan_text = plan_source.text
     except (OSError, json.JSONDecodeError, WorkflowPathError, WorkflowLifecycleError) as error:
         return _failure(project=project, started_at=started_at, message=f"Unable to load workflow inputs: {error}")
 
     workflow_id = str(workflow_config.get("workflow_id") or "unknown_workflow")
     dashboard_event_limit = _dashboard_event_limit(paths, explicit_limit=max_dashboard_events)
     generated_at = utc_timestamp()
-    plan_metadata = _plan_metadata(plan_text)
-    workflow_title = _workflow_title_from_metadata(plan_metadata, workflow_id=workflow_id)
-    tasks = list(parse_plan_tasks(plan_text).values())
-    objectives, objective_parse_errors = parse_plan_objectives(plan_text)
-    objective_model = _objective_model(paths, objectives=objectives, parse_errors=objective_parse_errors)
-    latest_contexts = _task_contexts(project, paths, tasks)
-    validation_records = _collect_validation_records(paths)
-    validation_manifest = _validation_manifest(project, latest_contexts, validation_records)
-    events = _read_event_records(paths)
-    event_projection = load_event_log_projection(paths)
+    with telemetry.span("plan_parsing"):
+        plan_metadata = _plan_metadata(plan_text)
+        workflow_title = _workflow_title_from_metadata(plan_metadata, workflow_id=workflow_id)
+        tasks = list(parse_plan_tasks(plan_text).values())
+        objectives, objective_parse_errors = parse_plan_objectives(plan_text)
+        objective_model = _objective_model(paths, objectives=objectives, parse_errors=objective_parse_errors)
+    with telemetry.span("validation_collection"):
+        latest_contexts = _task_contexts(project, paths, tasks)
+        validation_records = _collect_validation_records(paths)
+        validation_manifest = _validation_manifest(project, latest_contexts, validation_records)
+    with telemetry.span("event_read"):
+        events = _read_event_records(paths, limit=dashboard_event_limit)
+        event_total_count = _event_log_record_count(paths, fallback=len(events))
+    with telemetry.span("event_projection"):
+        event_projection = load_event_log_projection(paths)
     event_state = event_projection.get("state") if isinstance(event_projection, Mapping) else {}
     if not isinstance(event_state, Mapping):
         event_state = {}
@@ -177,15 +240,18 @@ def rebuild_read_models(
         last_event = _compact_event(events[-1]) if events else None
     last_event_seq = _event_sequence(last_event) if isinstance(last_event, Mapping) else None
     source_event_id = _event_id(last_event) if isinstance(last_event, Mapping) else None
-    active_leases = _read_active_leases(paths)
-    source_hashes = _source_hashes(
-        paths,
-        plan_source=plan_source,
-        events=events,
-        last_event=last_event,
-        validation_manifest=validation_manifest,
-        active_leases=active_leases,
-    )
+    with telemetry.span("active_lease_read"):
+        active_leases = _read_active_leases(paths)
+    with telemetry.span("source_hash_construction"):
+        source_hashes = _source_hashes(
+            paths,
+            plan_source=plan_source,
+            events=events,
+            event_total_count=event_total_count,
+            last_event=last_event,
+            validation_manifest=validation_manifest,
+            active_leases=active_leases,
+        )
     plan_source_record = _plan_source_record(project, paths, plan_source)
     common = {
         "schema_version": SCHEMA_VERSION,
@@ -199,35 +265,52 @@ def rebuild_read_models(
     if workflow_title:
         common["workflow_title"] = workflow_title
 
-    runtime_state = _read_json_object(paths.runtime_dir / "state.json", default={})
-    failure_registry = _read_failure_registry(paths, workflow_id=workflow_id)
-    expansion_registry = _read_expansion_registry(paths, workflow_id=workflow_id)
-    expansion_index = _expansion_provenance_index(expansion_registry)
-    control_requests = _read_jsonl(paths.runtime_dir / CONTROL_REQUESTS_FILENAME)
-    control_responses = _read_jsonl(paths.runtime_dir / CONTROL_RESPONSES_FILENAME)
-    approvals = _read_jsonl(paths.runtime_dir / "human_approval_requests.jsonl")
-    approval_responses = _read_jsonl(paths.runtime_dir / "human_approval_responses.jsonl")
-    change_requests = _read_jsonl(paths.requests_dir / CHANGE_REQUESTS_FILENAME)
-    change_request_responses = _read_jsonl(paths.requests_dir / CHANGE_REQUEST_RESPONSES_FILENAME)
-    node_summaries = _collect_node_summaries(paths)
-    agent_statuses = _collect_agent_statuses(paths)
-    task_summaries = _task_summaries(
-        latest_contexts,
-        failures=failure_registry.get("failures", []),
-        expansion_tasks=_mapping_or_empty(expansion_index.get("tasks")),
-    )
-    run_summaries = _build_run_summaries(
-        common=common,
-        paths=paths,
-        events=events,
-        node_summaries=node_summaries,
-        agent_statuses=agent_statuses,
-        validation_records=validation_records,
-        active_leases=active_leases,
-    )
+    with telemetry.span("runtime_control_input_read"):
+        runtime_state = _read_json_object(paths.runtime_dir / "state.json", default={})
+        failure_registry = _read_failure_registry(paths, workflow_id=workflow_id)
+        expansion_registry = _read_expansion_registry(paths, workflow_id=workflow_id)
+        expansion_index = _expansion_provenance_index(expansion_registry)
+        control_requests = _read_jsonl(paths.runtime_dir / CONTROL_REQUESTS_FILENAME)
+        control_responses = _read_jsonl(paths.runtime_dir / CONTROL_RESPONSES_FILENAME)
+        approvals = _read_jsonl(paths.runtime_dir / "human_approval_requests.jsonl")
+        approval_responses = _read_jsonl(paths.runtime_dir / "human_approval_responses.jsonl")
+        change_requests = _read_jsonl(paths.requests_dir / CHANGE_REQUESTS_FILENAME)
+        change_request_responses = _read_jsonl(paths.requests_dir / CHANGE_REQUEST_RESPONSES_FILENAME)
+    with telemetry.span("node_summary_collection"):
+        node_summaries = _collect_node_summaries(paths)
+        agent_statuses = _collect_agent_statuses(paths)
+    with telemetry.span("task_summary_construction"):
+        detail_run_ids = _run_detail_build_run_ids(
+            node_summaries=node_summaries,
+            agent_statuses=agent_statuses,
+            validation_records=validation_records,
+            active_leases=active_leases,
+            limit=RUN_DETAIL_BUILD_LIMIT,
+        )
+        task_summaries = _task_summaries(
+            latest_contexts,
+            failures=failure_registry.get("failures", []),
+            expansion_tasks=_mapping_or_empty(expansion_index.get("tasks")),
+        )
+    with telemetry.span("previous_build_manifest_read"):
+        previous_build = _previous_build_manifest(paths, workflow_id=workflow_id)
+        previous_details = _previous_run_detail_cache(paths, previous_build)
+    with telemetry.span("run_summary_construction"):
+        run_summaries = _build_run_summaries(
+            common=common,
+            paths=paths,
+            events=events,
+            node_summaries=node_summaries,
+            agent_statuses=agent_statuses,
+            validation_records=validation_records,
+            active_leases=active_leases,
+            detail_run_ids=detail_run_ids,
+            previous_details=previous_details,
+        )
+        run_index = [_run_index_record(paths, record) for record in run_summaries]
 
-    json_models = {
-        "workflow_status.json": _workflow_status_model(
+    with telemetry.span("workflow_status_model"):
+        workflow_status_model = _workflow_status_model(
             common=common,
             runtime_state=runtime_state,
             task_summaries=task_summaries,
@@ -242,8 +325,9 @@ def rebuild_read_models(
             expansion_registry=expansion_registry,
             objective_model=objective_model,
             completion_marker=_completion_marker_model(project, paths),
-        ),
-        "plan_index.json": _plan_index_model(
+        )
+    with telemetry.span("plan_index_model"):
+        plan_index_model = _plan_index_model(
             common=common,
             paths=paths,
             plan_source=plan_source,
@@ -251,8 +335,9 @@ def rebuild_read_models(
             task_summaries=task_summaries,
             objective_model=objective_model,
             expansion_phases=_mapping_or_empty(expansion_index.get("phases")),
-        ),
-        "workflow_graph.json": _workflow_graph_model(
+        )
+    with telemetry.span("workflow_graph_model"):
+        workflow_graph_model = _workflow_graph_model(
             common=common,
             events=events,
             event_limit=dashboard_event_limit,
@@ -262,9 +347,10 @@ def rebuild_read_models(
             active_leases=active_leases,
             task_summaries=task_summaries,
             objective_model=objective_model,
-            event_total_count=len(events),
-        ),
-        "metrics.json": _metrics_model(
+            event_total_count=event_total_count,
+        )
+    with telemetry.span("metrics_model"):
+        metrics_model = _metrics_model(
             common=common,
             project=project,
             workflow_config=workflow_config,
@@ -280,18 +366,48 @@ def rebuild_read_models(
             change_request_responses=change_request_responses,
             approvals=approvals,
             approval_responses=approval_responses,
-        ),
-        "version_control_status.json": _version_control_status_model(
+        )
+    with telemetry.span("version_control_status_model"):
+        version_control_status_model = _version_control_status_model(
             common=common,
             project=project,
             paths=paths,
-        ),
+        )
+    with telemetry.span("run_details_manifest_model"):
+        run_details_manifest_model = _run_details_manifest_model(common=common, paths=paths, run_summaries=run_summaries)
+    with telemetry.span("build_manifest_model"):
+        build_manifest_model = _build_manifest_model(
+            common=common,
+            paths=paths,
+            source_hashes=source_hashes,
+            run_summaries=run_summaries,
+            event_projection=event_projection,
+        )
+    json_models = {
+        "workflow_status.json": workflow_status_model,
+        "plan_index.json": plan_index_model,
+        "workflow_graph.json": workflow_graph_model,
+        "metrics.json": metrics_model,
+        "version_control_status.json": version_control_status_model,
+        "run_details_manifest.json": run_details_manifest_model,
+        "build_manifest.json": build_manifest_model,
     }
+    with telemetry.span("dashboard_feed_model"):
+        dashboard_feed = _dashboard_feed_records(common=common, events=events, event_limit=dashboard_event_limit)
     jsonl_models = {
-        "dashboard_feed.jsonl": _dashboard_feed_records(common=common, events=events, event_limit=dashboard_event_limit),
-        "run_summaries.jsonl": run_summaries,
+        "dashboard_feed.jsonl": dashboard_feed,
+        "run_index.jsonl": run_index,
+        "run_summaries.jsonl": [_legacy_run_summary_record(paths, record) for record in run_summaries],
     }
-    validation = validate_read_models(json_models, jsonl_models)
+    with telemetry.span("schema_validation"):
+        validation = validate_read_models(json_models, jsonl_models)
+    diagnostics_counts = _read_model_rebuild_diagnostic_counts(
+        paths,
+        events=events,
+        event_total_count=event_total_count,
+        run_summaries=run_summaries,
+    )
+    diagnostics_counts["run_detail_records_reused"] = sum(1 for record in run_summaries if record.get("detail_reused") is True)
     if validation["status"] != "pass":
         return {
             "schema_version": SCHEMA_VERSION,
@@ -306,21 +422,80 @@ def rebuild_read_models(
             "max_dashboard_events": dashboard_event_limit,
             "schema_validation": validation,
             "written_files": [],
+            "diagnostics": telemetry.summary(counts=diagnostics_counts),
             "errors": list(validation["errors"]),
             "warnings": list(plan_source.warnings),
         }
 
     written: list[str] = []
     if write:
-        paths.read_models_dir.mkdir(parents=True, exist_ok=True)
-        for filename, payload in json_models.items():
-            _atomic_write_json(paths.read_models_dir / filename, payload)
-            written.append(_path_for_record(project, paths.read_models_dir / filename))
-        for filename, records in jsonl_models.items():
-            _atomic_write_jsonl(paths.read_models_dir / filename, records)
-            written.append(_path_for_record(project, paths.read_models_dir / filename))
+        with telemetry.span("write_lock"):
+            try:
+                held_lock, lock_counts = _acquire_read_model_rebuild_lock(paths)
+            except SchedulerLockError as error:
+                diagnostics_counts["write_lock_acquired"] = False
+                return {
+                    "schema_version": SCHEMA_VERSION,
+                    "ok": False,
+                    "status": "read_model_rebuild_locked",
+                    "project_root": project.as_posix(),
+                    "workflow_id": workflow_id,
+                    "started_at": started_at,
+                    "ended_at": utc_timestamp(),
+                    "read_models_dir": _path_for_record(project, paths.read_models_dir),
+                    "read_model_files": list(READ_MODEL_FILES),
+                    "written_files": [],
+                    "event_replay": _event_replay_summary(event_projection, project=project),
+                    "max_dashboard_events": dashboard_event_limit,
+                    "schema_validation": validation,
+                    "source_hashes": source_hashes,
+                    "diagnostics": telemetry.summary(counts=diagnostics_counts),
+                    "errors": [str(error)],
+                    "warnings": list(plan_source.warnings),
+                }
+            diagnostics_counts.update(lock_counts)
+        with held_lock:
+            with telemetry.span("writes"):
+                paths.read_models_dir.mkdir(parents=True, exist_ok=True)
+                model_write_counts = {
+                    "read_model_files_written": 0,
+                    "read_model_files_unchanged": 0,
+                }
+                for filename, payload in json_models.items():
+                    model_path = paths.read_models_dir / filename
+                    if _atomic_write_json_if_changed(model_path, payload):
+                        written.append(_path_for_record(project, model_path))
+                        model_write_counts["read_model_files_written"] += 1
+                    else:
+                        model_write_counts["read_model_files_unchanged"] += 1
+                for filename, records in jsonl_models.items():
+                    model_path = paths.read_models_dir / filename
+                    if _atomic_write_jsonl_if_changed(model_path, records):
+                        written.append(_path_for_record(project, model_path))
+                        model_write_counts["read_model_files_written"] += 1
+                    else:
+                        model_write_counts["read_model_files_unchanged"] += 1
+                diagnostics_counts.update(model_write_counts)
+                detail_write_result = _write_run_detail_models(paths, run_summaries=run_summaries)
+                written.extend(detail_write_result["written_files"])
+                diagnostics_counts.update(detail_write_result["counts"])
+    no_write_comparison: dict[str, Any] | None = None
+    if not write:
+        with telemetry.span("no_write_comparison"):
+            no_write_comparison = _read_model_no_write_comparison(
+                paths,
+                json_models=json_models,
+                jsonl_models=jsonl_models,
+                run_summaries=run_summaries,
+            )
+            diagnostics_counts["no_write_compare_changed_files"] = len(no_write_comparison["changed_files"])
+            diagnostics_counts["no_write_compare_missing_files"] = len(no_write_comparison["missing_files"])
+            diagnostics_counts["no_write_compare_invalid_files"] = len(no_write_comparison["invalid_files"])
+            diagnostics_counts["no_write_compare_extra_run_detail_files"] = len(no_write_comparison["extra_run_detail_files"])
+    diagnostics_counts["written_files"] = len(written)
+    diagnostics_counts["written_bytes"] = _written_file_bytes(project, written)
 
-    return {
+    result = {
         "schema_version": SCHEMA_VERSION,
         "ok": True,
         "status": "rebuilt",
@@ -335,13 +510,522 @@ def rebuild_read_models(
         "max_dashboard_events": dashboard_event_limit,
         "schema_validation": validation,
         "source_hashes": source_hashes,
+        "diagnostics": telemetry.summary(counts=diagnostics_counts),
         "errors": [],
         "warnings": list(plan_source.warnings),
+    }
+    if no_write_comparison is not None:
+        result["no_write_comparison"] = no_write_comparison
+    return result
+
+
+def strict_read_model_diagnostics(
+    project_root: Path | str,
+    *,
+    workflow_id: str | None = None,
+    compare_rebuild: bool = False,
+) -> dict[str, Any]:
+    project = Path(project_root).expanduser().resolve()
+    started_at = utc_timestamp()
+    started = time.perf_counter()
+    errors: list[str] = []
+    warnings: list[str] = []
+    try:
+        workflow_config = load_workflow_config(project, workflow_id=workflow_id)
+        paths = WorkflowPaths.from_config(project, workflow_config)
+    except (OSError, WorkflowPathError, ValueError) as error:
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "ok": False,
+            "status": "failed",
+            "strict": True,
+            "project_root": project.as_posix(),
+            "workflow_id": workflow_id,
+            "started_at": started_at,
+            "ended_at": utc_timestamp(),
+            "read_models_dir": None,
+            "checks": {},
+            "errors": [str(error)],
+            "warnings": [],
+            "diagnostics": {"total_duration_ms": _duration_ms_since(started)},
+        }
+
+    json_models, jsonl_models, load_check = _strict_load_read_models(paths)
+    errors.extend(str(error) for error in load_check["errors"])
+    warnings.extend(str(warning) for warning in load_check["warnings"])
+
+    schema_validation = validate_read_models(json_models, jsonl_models)
+    if schema_validation.get("status") != "pass":
+        errors.extend(f"read-model schema: {error}" for error in schema_validation.get("errors", []))
+
+    events_dir = paths.runtime_dir / "events"
+    events = _read_event_records(paths, limit=None)
+    event_manifest = load_event_segment_manifest(events_dir)
+    event_chain = _strict_event_chain_diagnostics(events)
+    if event_chain["hash_mismatches"] or event_chain["prev_hash_mismatches"] or event_chain["sequence_gaps"]:
+        errors.append("event chain integrity check failed")
+
+    event_checks: dict[str, Any] = {
+        "events_sha256": _events_sha256(events_dir),
+        "event_count": len(events),
+        "segment_count": _event_segment_count(events_dir),
+        "manifest_available": isinstance(event_manifest, Mapping),
+        "manifest_path": _path_for_record(project, events_dir / EVENTS_MANIFEST_FILENAME),
+        "manifest_event_count": event_manifest.get("event_count") if isinstance(event_manifest, Mapping) else None,
+        "manifest_matches_event_count": (
+            int(event_manifest.get("event_count") or -1) == len(events) if isinstance(event_manifest, Mapping) else None
+        ),
+        "chain": event_chain,
+    }
+    if event_checks["manifest_matches_event_count"] is False:
+        errors.append("event segment manifest event_count does not match event log")
+
+    sidecars = _strict_event_payload_sidecar_diagnostics(project, paths, events)
+    if sidecars["missing"] or sidecars["mismatch"] or sidecars["invalid"]:
+        errors.append("event payload sidecar integrity check failed")
+
+    read_model_hashes = _strict_read_model_source_hash_diagnostics(json_models, jsonl_models, event_checks["events_sha256"])
+    if read_model_hashes["events_sha256_mismatches"]:
+        errors.append("read-model source_hashes events_sha256 mismatch")
+
+    run_details = _strict_run_detail_diagnostics(project, paths, json_models.get("run_details_manifest.json"))
+    if run_details["status"] != "pass":
+        errors.append("run detail manifest integrity check failed")
+    warnings.extend(str(warning) for warning in run_details.get("warnings", []))
+
+    no_write_rebuild: dict[str, Any] | None = None
+    if compare_rebuild:
+        no_write_rebuild = _strict_no_write_rebuild_comparison(project, workflow_id=paths.workflow_id)
+        if no_write_rebuild.get("status") != "pass":
+            errors.append("strict no-write rebuild comparison failed")
+
+    ok = not errors
+    checks: dict[str, Any] = {
+        "read_model_load": load_check,
+        "read_model_schema": schema_validation,
+        "events": event_checks,
+        "payload_sidecars": sidecars,
+        "read_model_source_hashes": read_model_hashes,
+        "run_details": run_details,
+    }
+    if no_write_rebuild is not None:
+        checks["no_write_rebuild_comparison"] = no_write_rebuild
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "ok": ok,
+        "status": "pass" if ok else "fail",
+        "strict": True,
+        "project_root": project.as_posix(),
+        "workflow_id": paths.workflow_id,
+        "started_at": started_at,
+        "ended_at": utc_timestamp(),
+        "read_models_dir": _path_for_record(project, paths.read_models_dir),
+        "checks": checks,
+        "errors": errors,
+        "warnings": warnings,
+        "diagnostics": {"total_duration_ms": _duration_ms_since(started)},
+    }
+
+
+def split_legacy_run_summaries(
+    project_root: Path | str,
+    *,
+    workflow_id: str | None = None,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    project = Path(project_root).expanduser().resolve()
+    started_at = utc_timestamp()
+    try:
+        workflow_config = load_workflow_config(project, workflow_id=workflow_id)
+        paths = WorkflowPaths.from_config(project, workflow_config)
+    except (OSError, json.JSONDecodeError, WorkflowPathError, ValueError) as error:
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "ok": False,
+            "status": "failed",
+            "project_root": project.as_posix(),
+            "workflow_id": workflow_id,
+            "started_at": started_at,
+            "ended_at": utc_timestamp(),
+            "read_models_dir": None,
+            "modified_files": [],
+            "errors": [str(error)],
+            "warnings": [],
+        }
+    legacy_path = paths.read_models_dir / "run_summaries.jsonl"
+    if not legacy_path.is_file():
+        return _split_legacy_run_summaries_result(
+            project=project,
+            paths=paths,
+            started_at=started_at,
+            status="legacy_missing",
+            dry_run=dry_run,
+            errors=[f"{_path_for_record(project, legacy_path)} is missing."],
+        )
+    if (paths.read_models_dir / "run_index.jsonl").is_file() and (paths.read_models_dir / "run_details_manifest.json").is_file():
+        return _split_legacy_run_summaries_result(
+            project=project,
+            paths=paths,
+            started_at=started_at,
+            status="current",
+            dry_run=dry_run,
+        )
+    records = _read_jsonl_strict(legacy_path)
+    if records is None:
+        return _split_legacy_run_summaries_result(
+            project=project,
+            paths=paths,
+            started_at=started_at,
+            status="invalid_legacy_run_summaries",
+            dry_run=dry_run,
+            errors=[f"{_path_for_record(project, legacy_path)} is not valid JSONL."],
+        )
+    normalized = [_legacy_run_summary_for_split(record, paths=paths, generated_at=started_at) for record in records]
+    invalid_run_indexes = [index for index, record in enumerate(normalized, start=1) if not str(record.get("run_id") or "")]
+    duplicate_run_ids = _duplicate_legacy_run_ids(normalized)
+    if invalid_run_indexes or duplicate_run_ids:
+        errors = []
+        if invalid_run_indexes:
+            errors.append("run_summaries.jsonl records missing run_id at line(s): " + ", ".join(map(str, invalid_run_indexes)))
+        if duplicate_run_ids:
+            errors.append("run_summaries.jsonl contains duplicate run_id value(s): " + ", ".join(duplicate_run_ids))
+        return _split_legacy_run_summaries_result(
+            project=project,
+            paths=paths,
+            started_at=started_at,
+            status="invalid_legacy_run_summaries",
+            dry_run=dry_run,
+            errors=errors,
+        )
+    run_index = [_run_index_record(paths, record) for record in normalized]
+    common = _legacy_split_common(paths, normalized, generated_at=started_at)
+    run_details_manifest = _run_details_manifest_model(common=common, paths=paths, run_summaries=normalized)
+    build_manifest = _legacy_split_build_manifest(common=common, paths=paths, run_summaries=normalized)
+    detail_records = [record for record in normalized if record.get("detail_status") == "available"]
+    modified_files = [
+        _path_for_record(project, paths.read_models_dir / "run_index.jsonl"),
+        _path_for_record(project, paths.read_models_dir / "run_details_manifest.json"),
+        _path_for_record(project, paths.read_models_dir / "build_manifest.json"),
+        *(_path_for_record(project, _run_detail_path(paths, str(record.get("run_id") or ""))) for record in detail_records),
+    ]
+    modified_files = [path for path in modified_files if path is not None]
+    if not dry_run:
+        paths.read_models_dir.mkdir(parents=True, exist_ok=True)
+        (paths.read_models_dir / READ_MODEL_DETAIL_DIR).mkdir(parents=True, exist_ok=True)
+        _atomic_write_jsonl(paths.read_models_dir / "run_index.jsonl", run_index)
+        _atomic_write_json(paths.read_models_dir / "run_details_manifest.json", run_details_manifest)
+        _atomic_write_json(paths.read_models_dir / "build_manifest.json", build_manifest)
+        for record in detail_records:
+            _atomic_write_json(_run_detail_path(paths, str(record.get("run_id") or "")), _run_detail_record(record))
+    return _split_legacy_run_summaries_result(
+        project=project,
+        paths=paths,
+        started_at=started_at,
+        status="planned" if dry_run else "split",
+        dry_run=dry_run,
+        run_count=len(run_index),
+        detail_count=len(detail_records),
+        modified_files=modified_files if not dry_run else [],
+        planned_files=modified_files,
+    )
+
+
+def _legacy_run_summary_for_split(record: Mapping[str, Any], *, paths: WorkflowPaths, generated_at: str) -> dict[str, Any]:
+    run_id = str(record.get("run_id") or "")
+    normalized = dict(record)
+    normalized.setdefault("schema_version", SCHEMA_VERSION)
+    normalized.setdefault("workflow_id", paths.workflow_id)
+    normalized.setdefault("generated_at", generated_at)
+    normalized.setdefault("source_hashes", {})
+    normalized.setdefault("node_id", _run_node_id(run_id))
+    details = normalized.get("details")
+    if isinstance(details, Mapping):
+        normalized["details"] = _legacy_detail_payload_for_split(details, run_id=run_id, task_id=normalized.get("task_id"))
+        normalized["detail_status"] = "available"
+        if not _valid_legacy_detail_source(normalized.get("detail_source")):
+            normalized["detail_source"] = _legacy_detail_source(normalized)
+    else:
+        normalized["detail_status"] = str(normalized.get("detail_status") or "not_built")
+    return normalized
+
+
+def _valid_legacy_detail_source(value: Any) -> bool:
+    if not isinstance(value, Mapping):
+        return False
+    return (
+        value.get("schema_version") == SCHEMA_VERSION
+        and isinstance(value.get("fingerprint"), str)
+        and str(value.get("fingerprint") or "").startswith("sha256:")
+        and isinstance(value.get("files"), Sequence)
+        and not isinstance(value.get("files"), (str, bytes, bytearray))
+    )
+
+
+def _duplicate_legacy_run_ids(records: Sequence[Mapping[str, Any]]) -> list[str]:
+    seen: set[str] = set()
+    duplicates: set[str] = set()
+    for record in records:
+        run_id = str(record.get("run_id") or "")
+        if not run_id:
+            continue
+        if run_id in seen:
+            duplicates.add(run_id)
+        seen.add(run_id)
+    return sorted(duplicates)
+
+
+def _legacy_detail_payload_for_split(details: Mapping[str, Any], *, run_id: str, task_id: Any) -> dict[str, Any]:
+    payload = dict(details)
+    payload.setdefault("schema_version", SCHEMA_VERSION)
+    payload.setdefault("run_id", run_id)
+    if task_id is not None:
+        payload.setdefault("task_id", task_id)
+    payload.setdefault("sections", [])
+    payload.setdefault("available_sections", [])
+    payload.setdefault("missing_sections", [])
+    return payload
+
+
+def _legacy_detail_source(record: Mapping[str, Any]) -> dict[str, Any]:
+    compact = {
+        str(key): value
+        for key, value in record.items()
+        if str(key) not in {"details", "generated_at", "detail_source", "detail_reused"}
+    }
+    digest = sha256(json.dumps(compact, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")).hexdigest()
+    return {"schema_version": SCHEMA_VERSION, "fingerprint": "sha256:" + digest, "files": []}
+
+
+def _legacy_split_common(paths: WorkflowPaths, records: Sequence[Mapping[str, Any]], *, generated_at: str) -> dict[str, Any]:
+    first = records[0] if records else {}
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "workflow_id": str(first.get("workflow_id") or paths.workflow_id),
+        "generated_at": generated_at,
+        "source_hashes": dict(_mapping_or_empty(first.get("source_hashes"))),
+        "last_event_seq": first.get("source_event_seq") or first.get("last_event_seq"),
+        "source_event_id": first.get("source_event_id"),
+    }
+
+
+def _legacy_split_build_manifest(
+    *,
+    common: Mapping[str, Any],
+    paths: WorkflowPaths,
+    run_summaries: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    run_details = []
+    for record in run_summaries:
+        run_id = str(record.get("run_id") or "")
+        if not run_id or record.get("detail_status") != "available":
+            continue
+        run_details.append(
+            {
+                "run_id": run_id,
+                "path": _path_for_record(paths.project_root, _run_detail_path(paths, run_id)),
+                "detail_source": dict(_mapping_or_empty(record.get("detail_source"))),
+                "detail_reused": False,
+            }
+        )
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "workflow_id": common["workflow_id"],
+        "generated_at": common["generated_at"],
+        "last_event_seq": common.get("last_event_seq"),
+        "source_event_id": common.get("source_event_id"),
+        "builder_version": READ_MODEL_BUILDER_VERSION,
+        "source_hashes": dict(_mapping_or_empty(common.get("source_hashes"))),
+        "event_replay": {},
+        "event_segment_manifest": _event_segment_manifest_ref(paths),
+        "run_details": run_details,
+    }
+
+
+def _split_legacy_run_summaries_result(
+    *,
+    project: Path,
+    paths: WorkflowPaths,
+    started_at: str,
+    status: str,
+    dry_run: bool,
+    run_count: int = 0,
+    detail_count: int = 0,
+    modified_files: Sequence[str] | None = None,
+    planned_files: Sequence[str] | None = None,
+    errors: Sequence[str] | None = None,
+) -> dict[str, Any]:
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "ok": not errors,
+        "status": status,
+        "project_root": project.as_posix(),
+        "workflow_id": paths.workflow_id,
+        "started_at": started_at,
+        "ended_at": utc_timestamp(),
+        "read_models_dir": _path_for_record(project, paths.read_models_dir),
+        "dry_run": dry_run,
+        "run_count": run_count,
+        "detail_count": detail_count,
+        "planned_files": list(planned_files or []),
+        "modified_files": list(modified_files or []),
+        "errors": list(errors or []),
+        "warnings": [],
     }
 
 
 def read_model_rebuild_exit_code(result: Mapping[str, Any]) -> int:
     return 0 if result.get("ok") else 1
+
+
+def _acquire_read_model_rebuild_lock(paths: WorkflowPaths) -> tuple[Any, dict[str, Any]]:
+    owner = f"read-models:{os.getpid()}:{uuid.uuid4().hex[:8]}"
+    lock = AtomicOwnerLock(
+        paths.runtime_dir / "lock" / "read_model_rebuild_lock",
+        owner,
+        ttl_seconds=READ_MODEL_REBUILD_LOCK_TTL_SECONDS,
+    )
+    started = time.perf_counter()
+    attempts = 0
+    wait_seconds = max(0, READ_MODEL_REBUILD_LOCK_WAIT_SECONDS)
+    while True:
+        attempts += 1
+        try:
+            held = lock.acquire()
+            return held, {
+                "write_lock_acquired": True,
+                "write_lock_attempts": attempts,
+                "write_lock_wait_ms": _duration_ms_since(started),
+            }
+        except SchedulerLockError:
+            if (time.perf_counter() - started) >= wait_seconds:
+                raise
+            time.sleep(min(0.1, max(0.01, wait_seconds / 10 if wait_seconds else 0.01)))
+
+
+def _write_run_detail_models(
+    paths: WorkflowPaths,
+    *,
+    run_summaries: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    run_details_dir = paths.read_models_dir / READ_MODEL_DETAIL_DIR
+    run_details_dir.mkdir(parents=True, exist_ok=True)
+    written: list[str] = []
+    current_paths: set[Path] = set()
+    counts = {
+        "run_detail_files_written": 0,
+        "run_detail_files_reused_on_disk": 0,
+        "run_detail_files_removed": 0,
+    }
+    for record in run_summaries:
+        run_id = str(record.get("run_id") or "")
+        if not run_id or record.get("detail_status") != "available":
+            continue
+        detail_path = _run_detail_path(paths, run_id)
+        try:
+            current_paths.add(detail_path.resolve())
+        except OSError:
+            current_paths.add(detail_path.absolute())
+        if record.get("detail_reused") is True and detail_path.is_file():
+            counts["run_detail_files_reused_on_disk"] += 1
+            continue
+        _atomic_write_json(detail_path, _run_detail_record(record))
+        written.append(_path_for_record(paths.project_root, detail_path))
+        counts["run_detail_files_written"] += 1
+    for existing in sorted(run_details_dir.glob("*.json")):
+        try:
+            existing_key = existing.resolve()
+        except OSError:
+            existing_key = existing.absolute()
+        if existing_key in current_paths:
+            continue
+        try:
+            existing.unlink()
+        except OSError:
+            continue
+        counts["run_detail_files_removed"] += 1
+    return {"written_files": written, "counts": counts}
+
+
+def _read_model_rebuild_diagnostic_counts(
+    paths: WorkflowPaths,
+    *,
+    events: Sequence[Mapping[str, Any]],
+    event_total_count: int | None,
+    run_summaries: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    preview_stats = _run_detail_preview_stats(run_summaries)
+    event_stats = _event_segment_file_stats(paths)
+    detail_records = [record for record in run_summaries if record.get("detail_status") == "available"]
+    return {
+        "events_loaded": len(events),
+        "events_total_count": event_total_count,
+        "event_segment_files": event_stats["files"],
+        "event_segment_bytes": event_stats["bytes"],
+        "run_records": len(run_summaries),
+        "run_detail_records_built": len(detail_records),
+        **preview_stats,
+    }
+
+
+def _event_segment_file_stats(paths: WorkflowPaths) -> dict[str, int]:
+    files = 0
+    bytes_total = 0
+    events_dir = paths.runtime_dir / "events"
+    try:
+        candidates = sorted(events_dir.glob("*.jsonl"))
+    except OSError:
+        return {"files": 0, "bytes": 0}
+    for path in candidates:
+        if not path.is_file():
+            continue
+        files += 1
+        try:
+            bytes_total += path.stat().st_size
+        except OSError:
+            continue
+    return {"files": files, "bytes": bytes_total}
+
+
+def _run_detail_preview_stats(run_summaries: Sequence[Mapping[str, Any]]) -> dict[str, int]:
+    stats = {
+        "detail_file_preview_records": 0,
+        "detail_source_file_bytes": 0,
+        "detail_full_sha256_unavailable": 0,
+    }
+
+    def visit(value: Any) -> None:
+        if isinstance(value, Mapping):
+            if "size_bytes" in value and "path" in value:
+                stats["detail_file_preview_records"] += 1
+                try:
+                    stats["detail_source_file_bytes"] += max(0, int(value.get("size_bytes") or 0))
+                except (TypeError, ValueError):
+                    pass
+                if value.get("full_sha256_available") is False:
+                    stats["detail_full_sha256_unavailable"] += 1
+            for child in value.values():
+                visit(child)
+        elif isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+            for child in value:
+                visit(child)
+
+    for record in run_summaries:
+        if record.get("detail_status") == "available":
+            visit(record.get("details"))
+    return stats
+
+
+def _written_file_bytes(project: Path, written_files: Sequence[str]) -> int:
+    total = 0
+    for value in written_files:
+        path = Path(value)
+        if not path.is_absolute():
+            path = project / path
+        try:
+            total += path.stat().st_size
+        except OSError:
+            continue
+    return total
 
 
 def format_read_model_rebuild_text(result: Mapping[str, Any]) -> str:
@@ -361,6 +1045,75 @@ def format_read_model_rebuild_text(result: Mapping[str, Any]) -> str:
     schema_validation = result.get("schema_validation")
     if isinstance(schema_validation, Mapping):
         lines.append(f"schema_validation: {schema_validation.get('status', 'unknown')}")
+    diagnostics = result.get("diagnostics")
+    if isinstance(diagnostics, Mapping):
+        total_ms = diagnostics.get("total_duration_ms")
+        if total_ms is not None:
+            lines.append(f"diagnostics_total_ms: {total_ms}")
+    errors = result.get("errors")
+    if isinstance(errors, Sequence) and not isinstance(errors, (str, bytes)) and errors:
+        lines.append("errors:")
+        lines.extend(f"  - {error}" for error in errors)
+    warnings = result.get("warnings")
+    if isinstance(warnings, Sequence) and not isinstance(warnings, (str, bytes)) and warnings:
+        lines.append("warnings:")
+        lines.extend(f"  - {warning}" for warning in warnings)
+    return "\n".join(lines) + "\n"
+
+
+def format_strict_read_model_diagnostics_text(result: Mapping[str, Any]) -> str:
+    lines = [
+        f"loopplane read-model strict diagnostics: {result.get('status', 'unknown')}",
+        f"workflow_id: {result.get('workflow_id') or 'unknown'}",
+        f"read_models_dir: {result.get('read_models_dir') or 'unknown'}",
+    ]
+    checks = result.get("checks")
+    if isinstance(checks, Mapping):
+        read_model_load = checks.get("read_model_load")
+        if isinstance(read_model_load, Mapping):
+            lines.append(f"read_model_load: {read_model_load.get('status', 'unknown')}")
+        read_model_schema = checks.get("read_model_schema")
+        if isinstance(read_model_schema, Mapping):
+            lines.append(f"read_model_schema: {read_model_schema.get('status', 'unknown')}")
+        events = checks.get("events")
+        if isinstance(events, Mapping):
+            lines.append(f"events_sha256: {events.get('events_sha256') or 'unknown'}")
+            lines.append(f"event_count: {events.get('event_count')}")
+            chain = events.get("chain")
+            if isinstance(chain, Mapping):
+                lines.append(f"event_chain: {chain.get('status', 'unknown')}")
+        sidecars = checks.get("payload_sidecars")
+        if isinstance(sidecars, Mapping):
+            lines.append(
+                "payload_sidecars: "
+                f"{sidecars.get('status', 'unknown')} "
+                f"(referenced={sidecars.get('referenced', 0)}, checked={sidecars.get('checked', 0)})"
+            )
+        source_hashes = checks.get("read_model_source_hashes")
+        if isinstance(source_hashes, Mapping):
+            missing = source_hashes.get("events_sha256_missing_files")
+            if isinstance(missing, Sequence) and not isinstance(missing, (str, bytes)):
+                lines.append(f"events_sha256_missing_files: {len(missing)}")
+        run_details = checks.get("run_details")
+        if isinstance(run_details, Mapping):
+            lines.append(
+                "run_details: "
+                f"{run_details.get('status', 'unknown')} "
+                f"(checked={run_details.get('checked', 0)}, missing={run_details.get('missing', 0)})"
+            )
+        rebuild_compare = checks.get("no_write_rebuild_comparison")
+        if isinstance(rebuild_compare, Mapping):
+            comparison = rebuild_compare.get("comparison")
+            changed = len(comparison.get("changed_files") or []) if isinstance(comparison, Mapping) else 0
+            missing = len(comparison.get("missing_files") or []) if isinstance(comparison, Mapping) else 0
+            lines.append(
+                "no_write_rebuild_comparison: "
+                f"{rebuild_compare.get('status', 'unknown')} "
+                f"(changed={changed}, missing={missing})"
+            )
+    diagnostics = result.get("diagnostics")
+    if isinstance(diagnostics, Mapping) and diagnostics.get("total_duration_ms") is not None:
+        lines.append(f"diagnostics_total_ms: {diagnostics.get('total_duration_ms')}")
     errors = result.get("errors")
     if isinstance(errors, Sequence) and not isinstance(errors, (str, bytes)) and errors:
         lines.append("errors:")
@@ -853,9 +1606,10 @@ def _workflow_graph_model(
     active_leases: Sequence[Mapping[str, Any]],
     task_summaries: Sequence[Mapping[str, Any]],
     objective_model: Mapping[str, Any],
-    event_total_count: int,
+    event_total_count: int | None,
 ) -> dict[str, Any]:
     graph_events = _recent_dashboard_events(events, limit=event_limit)
+    total_events = event_total_count if event_total_count is not None else len(events)
     nodes_by_id: dict[str, dict[str, Any]] = {}
     summary_run_ids = {str(summary.get("run_id") or "") for summary in node_summaries if summary.get("run_id")}
     validation_keys = {
@@ -939,16 +1693,22 @@ def _workflow_graph_model(
         if str(task.get("task_id") or "")
     }
     nodes = [_enrich_node_with_task(node, task_lookup) for node in nodes_by_id.values()]
+    graph = _aggregate_self_expansion_graph(
+        nodes,
+        _dedupe_edges(edges),
+        detail_limit=SELF_EXPANSION_GRAPH_DETAIL_LIMIT,
+    )
     return {
         **dict(common),
         "event_window": {
-            "total_events": event_total_count,
+            "total_events": total_events,
             "visible_event_nodes": len(graph_events),
             "limit": event_limit,
-            "truncated": event_total_count > len(graph_events),
+            "truncated": total_events > len(graph_events),
         },
-        "nodes": sorted(nodes, key=_graph_node_sort_key),
-        "edges": _dedupe_edges(edges),
+        "self_expansion_aggregation": graph["aggregation"],
+        "nodes": graph["nodes"],
+        "edges": graph["edges"],
     }
 
 
@@ -960,6 +1720,269 @@ def _preferred_run_node_id(nodes_by_id: Mapping[str, Mapping[str, Any]], run_id:
         if node_type not in {"event", "validation"}:
             return str(node_id)
     return _run_node_id(run_id)
+
+
+def _aggregate_self_expansion_graph(
+    nodes: Sequence[Mapping[str, Any]],
+    edges: Sequence[Mapping[str, Any]],
+    *,
+    detail_limit: int,
+) -> dict[str, Any]:
+    node_list = [dict(node) for node in nodes]
+    expansion_nodes = [node for node in node_list if _is_self_expansion_graph_node(node)]
+    if detail_limit <= 0:
+        keep_ids = {str(node.get("node_id") or "") for node in expansion_nodes if _status_like_active(node.get("status"))}
+    else:
+        active_ids = {str(node.get("node_id") or "") for node in expansion_nodes if _status_like_active(node.get("status"))}
+        recent = sorted(expansion_nodes, key=_self_expansion_detail_sort_key, reverse=True)[:detail_limit]
+        keep_ids = active_ids | {str(node.get("node_id") or "") for node in recent}
+    aggregate_candidates = [
+        node
+        for node in expansion_nodes
+        if str(node.get("node_id") or "") and str(node.get("node_id") or "") not in keep_ids
+    ]
+    if not aggregate_candidates:
+        sorted_nodes = sorted(node_list, key=_graph_node_sort_key)
+        return {
+            "nodes": sorted_nodes,
+            "edges": _dedupe_edges(edges),
+            "aggregation": {
+                "enabled": False,
+                "visible_node_count": len(sorted_nodes),
+                "aggregated_node_count": 0,
+                "detail_limit": detail_limit,
+                "retention_policy": _self_expansion_retention_policy(detail_limit),
+                "groups": [],
+            },
+        }
+
+    groups: dict[str, list[Mapping[str, Any]]] = {}
+    for node in aggregate_candidates:
+        groups.setdefault(_self_expansion_aggregation_key(node), []).append(node)
+    node_to_group: dict[str, str] = {}
+    aggregate_nodes: list[dict[str, Any]] = []
+    group_records: list[dict[str, Any]] = []
+    for key, group_nodes in sorted(groups.items()):
+        group_id = f"aggregate_self_expansion_{_safe_id(key)}"
+        for node in group_nodes:
+            node_to_group[str(node.get("node_id") or "")] = group_id
+        fields = _self_expansion_group_fields(group_nodes)
+        aggregate_node = _self_expansion_aggregate_node(group_id, key, group_nodes, fields=fields)
+        aggregate_nodes.append(aggregate_node)
+        group_records.append(
+            {
+                "group_id": group_id,
+                "key": key,
+                **fields,
+                "aggregated_node_count": len(group_nodes),
+                "status_counts": _count_values(str(node.get("status") or "unknown") for node in group_nodes),
+                "event_type_counts": _count_values(str(node.get("event_type") or node.get("status") or "unknown") for node in group_nodes),
+                "sample_run_ids": _sample_values(
+                    (str(node.get("run_id") or "") for node in group_nodes if str(node.get("run_id") or "")),
+                    limit=SELF_EXPANSION_GRAPH_SAMPLE_LIMIT,
+                ),
+            }
+        )
+    visible_nodes = [
+        node
+        for node in node_list
+        if str(node.get("node_id") or "") not in node_to_group
+    ]
+    visible_nodes.extend(aggregate_nodes)
+    visible_ids = {str(node.get("node_id") or "") for node in visible_nodes}
+    rewired_edges: list[dict[str, Any]] = []
+    for edge in edges:
+        source = str(edge.get("source") or "")
+        target = str(edge.get("target") or "")
+        source = node_to_group.get(source, source)
+        target = node_to_group.get(target, target)
+        if not source or not target or source == target or source not in visible_ids or target not in visible_ids:
+            continue
+        rewired = dict(edge)
+        rewired["source"] = source
+        rewired["target"] = target
+        rewired["edge_id"] = f"edge_{source}_to_{target}_{_stable_suffix(rewired)}"
+        if source.startswith("aggregate_self_expansion_") or target.startswith("aggregate_self_expansion_"):
+            rewired["aggregated"] = True
+        rewired_edges.append(rewired)
+    sorted_nodes = sorted(visible_nodes, key=_graph_node_sort_key)
+    return {
+        "nodes": sorted_nodes,
+        "edges": _dedupe_edges(rewired_edges),
+        "aggregation": {
+            "enabled": True,
+            "visible_node_count": len(sorted_nodes),
+            "aggregated_node_count": len(aggregate_candidates),
+            "detail_limit": detail_limit,
+            "retention_policy": _self_expansion_retention_policy(detail_limit),
+            "groups": group_records,
+        },
+    }
+
+
+def _is_self_expansion_graph_node(node: Mapping[str, Any]) -> bool:
+    node_type = str(node.get("type") or "").strip().lower()
+    status = str(node.get("status") or "").strip().lower()
+    event_type = str(node.get("event_type") or "").strip().lower()
+    actor = str(node.get("actor_label") or "").strip().lower()
+    role = str(node.get("agent_role") or "").strip().lower()
+    title = str(node.get("title") or "").strip().lower()
+    return any(
+        "expansion_planner" in value or "self-expansion" in value or "self_expansion" in value
+        for value in (node_type, status, event_type, actor, role, title)
+    )
+
+
+def _self_expansion_detail_sort_key(node: Mapping[str, Any]) -> tuple[str, int, str]:
+    timestamp = _latest_node_timestamp(node)
+    sequence = _int_or_none(node.get("event_sequence")) or 0
+    return (timestamp, sequence, str(node.get("node_id") or ""))
+
+
+def _self_expansion_aggregation_key(node: Mapping[str, Any]) -> str:
+    fields = _self_expansion_group_fields([node])
+    return "|".join(
+        (
+            "bucket=" + fields["time_bucket"],
+            "event=" + fields["event_type"],
+            "type=" + fields["expansion_type"],
+            "status=" + fields["terminal_status"],
+            "target=" + fields["target_key"],
+        )
+    )
+
+
+def _self_expansion_group_fields(nodes: Sequence[Mapping[str, Any]]) -> dict[str, str]:
+    first = nodes[0] if nodes else {}
+    return {
+        "time_bucket": _self_expansion_time_bucket(first),
+        "event_type": _self_expansion_field(first, "event_type", "status", "type", default="self_expansion"),
+        "expansion_type": _self_expansion_field(first, "expansion_type", default="unknown"),
+        "terminal_status": _self_expansion_terminal_status(first),
+        "target_key": _self_expansion_target_key(first),
+    }
+
+
+def _self_expansion_time_bucket(node: Mapping[str, Any]) -> str:
+    timestamp = _latest_node_timestamp(node)
+    if not timestamp or len(timestamp) < 10:
+        return "unknown_date"
+    return timestamp[:10]
+
+
+def _self_expansion_field(node: Mapping[str, Any], *keys: str, default: str) -> str:
+    for key in keys:
+        value = str(node.get(key) or "").strip()
+        if value:
+            return value
+    return default
+
+
+def _self_expansion_terminal_status(node: Mapping[str, Any]) -> str:
+    value = _self_expansion_field(node, "status", default="unknown")
+    if _status_like_active(value):
+        return "active"
+    normalized = value.strip().lower().replace("-", "_")
+    if normalized in {"pass", "ok", "completed", "complete", "done", "applied"}:
+        return "completed"
+    if normalized in {"fail", "failed", "error", "rejected", "blocked"}:
+        return "failed"
+    return value
+
+
+def _self_expansion_target_key(node: Mapping[str, Any]) -> str:
+    for key in ("target_failure_ids", "target_task_ids", "target_objective_ids"):
+        raw_values = node.get(key)
+        values = (
+            [str(item).strip() for item in raw_values if str(item).strip()]
+            if isinstance(raw_values, Sequence) and not isinstance(raw_values, (str, bytes, bytearray))
+            else []
+        )
+        if values:
+            return key.removesuffix("_ids") + ":" + ",".join(sorted(values)[:3])
+    for key in ("proposal_id",):
+        value = str(node.get(key) or "").strip()
+        if value:
+            return f"{key}:{value}"
+    return "workflow"
+
+
+def _self_expansion_retention_policy(detail_limit: int) -> dict[str, Any]:
+    return {
+        "mode": "recent_active_detail_with_historical_buckets",
+        "recent_detail_limit": detail_limit,
+        "active_nodes_always_visible": True,
+        "bucket_fields": ["time_bucket", "event_type", "expansion_type", "terminal_status", "target_key"],
+        "sample_limit": SELF_EXPANSION_GRAPH_SAMPLE_LIMIT,
+    }
+
+
+def _self_expansion_aggregate_node(
+    group_id: str,
+    key: str,
+    nodes: Sequence[Mapping[str, Any]],
+    *,
+    fields: Mapping[str, str],
+) -> dict[str, Any]:
+    timestamps = [_latest_node_timestamp(node) for node in nodes if _latest_node_timestamp(node)]
+    started_at = min(timestamps) if timestamps else None
+    ended_at = max(timestamps) if timestamps else None
+    run_ids = [str(node.get("run_id") or "") for node in nodes if str(node.get("run_id") or "")]
+    task_ids = [str(node.get("task_id") or "") for node in nodes if str(node.get("task_id") or "")]
+    status_counts = _count_values(str(node.get("status") or "unknown") for node in nodes)
+    event_type_counts = _count_values(str(node.get("event_type") or node.get("status") or "unknown") for node in nodes)
+    return _node_with_timing(
+        {
+            "node_id": group_id,
+            "type": "self_expansion_group",
+            "status": key,
+            "title": f"Historical Self-Expansion: {key}",
+            "started_at": started_at,
+            "ended_at": ended_at,
+            "aggregated": True,
+            "aggregated_node_count": len(nodes),
+            "aggregated_run_count": len(set(run_ids)),
+            "retention_policy": "recent_active_detail_with_historical_buckets",
+            "time_bucket": fields.get("time_bucket"),
+            "expansion_type": fields.get("expansion_type"),
+            "terminal_status": fields.get("terminal_status"),
+            "target_key": fields.get("target_key"),
+            "sample_run_ids": _sample_values(run_ids, limit=SELF_EXPANSION_GRAPH_SAMPLE_LIMIT),
+            "sample_task_ids": _sample_values(task_ids, limit=SELF_EXPANSION_GRAPH_SAMPLE_LIMIT),
+            "status_counts": status_counts,
+            "event_type_counts": event_type_counts,
+            "input_refs": [],
+            "output_refs": [],
+            "summary": {
+                "one_line": f"{len(nodes)} historical self-expansion node(s) are aggregated for {key}.",
+                "highlights": [f"{len(set(run_ids))} run(s) represented."],
+                "risks": [],
+            },
+        }
+    )
+
+
+def _sample_values(values: Sequence[str] | Any, *, limit: int) -> list[str]:
+    unique = sorted({str(value) for value in values if str(value)})
+    return unique[: max(0, int(limit))]
+
+
+def _count_values(values: Sequence[str] | Any) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for value in values:
+        if not value:
+            continue
+        counts[value] = counts.get(value, 0) + 1
+    return dict(sorted(counts.items()))
+
+
+def _int_or_none(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _propagate_run_graph_metadata(nodes_by_id: Mapping[str, dict[str, Any]]) -> None:
@@ -1135,6 +2158,54 @@ def _recent_dashboard_events(
     return events[-limit:]
 
 
+def _run_detail_build_run_ids(
+    *,
+    node_summaries: Sequence[Mapping[str, Any]],
+    agent_statuses: Sequence[Mapping[str, Any]],
+    validation_records: Sequence[Mapping[str, Any]],
+    active_leases: Sequence[Mapping[str, Any]],
+    limit: int,
+) -> set[str]:
+    active_run_ids = {str(lease.get("run_id") or "") for lease in active_leases if str(lease.get("run_id") or "")}
+    scored: dict[str, tuple[str, int]] = {}
+    order = 0
+
+    def add(record: Mapping[str, Any], *timestamp_keys: str) -> None:
+        nonlocal order
+        run_id = str(record.get("run_id") or "")
+        if not run_id:
+            return
+        order += 1
+        timestamp = ""
+        for key in timestamp_keys:
+            value = str(record.get(key) or "")
+            if value > timestamp:
+                timestamp = value
+        current = scored.get(run_id)
+        candidate = (timestamp, order)
+        if current is None or candidate >= current:
+            scored[run_id] = candidate
+
+    for record in agent_statuses:
+        add(record, "ended_at", "updated_at", "started_at", "created_at")
+    for record in node_summaries:
+        add(record, "ended_at", "updated_at", "started_at", "created_at", "ts", "timestamp")
+    for record in validation_records:
+        add(record, "validated_at", "updated_at", "created_at", "ts", "timestamp")
+    for record in active_leases:
+        add(record, "heartbeat_at", "started_at", "prepared_at", "created_at")
+
+    if limit <= 0:
+        return active_run_ids
+    if len(scored) <= limit:
+        return set(scored) | active_run_ids
+    recent = {
+        run_id
+        for run_id, _score in sorted(scored.items(), key=lambda item: item[1], reverse=True)[:limit]
+    }
+    return recent | active_run_ids
+
+
 def _build_run_summaries(
     *,
     common: Mapping[str, Any],
@@ -1144,6 +2215,8 @@ def _build_run_summaries(
     agent_statuses: Sequence[Mapping[str, Any]],
     validation_records: Sequence[Mapping[str, Any]],
     active_leases: Sequence[Mapping[str, Any]],
+    detail_run_ids: set[str],
+    previous_details: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     by_run: dict[str, dict[str, Any]] = {}
     statuses_by_run = {str(status.get("run_id") or ""): status for status in agent_statuses if status.get("run_id")}
@@ -1278,7 +2351,26 @@ def _build_run_summaries(
         )
 
     for run_id, record in by_run.items():
+        if run_id not in detail_run_ids:
+            record["detail_status"] = "not_built"
+            continue
         task_id = _first_string(record.get("task_id"), _mapping_value(statuses_by_run.get(run_id), "task_id"))
+        detail_source = _run_detail_source_metadata(
+            paths,
+            run_id=run_id,
+            task_id=task_id,
+            agent_status=statuses_by_run.get(run_id),
+            node_summary=summaries_by_run.get(run_id),
+            validation=validations_by_run.get(run_id),
+            active_lease=active_leases_by_run.get(run_id),
+        )
+        reused = _reusable_previous_detail(previous_details or {}, run_id=run_id, detail_source=detail_source)
+        if reused is not None:
+            record["details"] = dict(_mapping_or_empty(reused.get("details")))
+            record["detail_source"] = detail_source
+            record["detail_status"] = "available"
+            record["detail_reused"] = True
+            continue
         record["details"] = _run_detail_sections(
             paths,
             run_id=run_id,
@@ -1288,7 +2380,289 @@ def _build_run_summaries(
             validation=validations_by_run.get(run_id),
             active_lease=active_leases_by_run.get(run_id),
         )
+        record["detail_source"] = detail_source
+        record["detail_status"] = "available"
+        record["detail_reused"] = False
     return sorted(by_run.values(), key=lambda item: str(item.get("run_id")))
+
+
+def _run_index_record(paths: WorkflowPaths, record: Mapping[str, Any]) -> dict[str, Any]:
+    run_id = str(record.get("run_id") or "")
+    details = _mapping_or_empty(record.get("details"))
+    index = {str(key): value for key, value in record.items() if key != "details"}
+    if run_id and record.get("detail_status") == "available":
+        index["detail_path"] = _path_for_record(paths.project_root, _run_detail_path(paths, run_id))
+        index["detail_status"] = "available"
+    index["available_sections"] = list(details.get("available_sections") or [])
+    index["missing_sections"] = list(details.get("missing_sections") or [])
+    return index
+
+
+def _legacy_run_summary_record(paths: WorkflowPaths, record: Mapping[str, Any]) -> dict[str, Any]:
+    summary = _run_index_record(paths, record)
+    summary["compatibility_mode"] = "split_details"
+    if record.get("detail_status") == "available":
+        summary["details_externalized"] = True
+    return summary
+
+
+def _run_detail_record(record: Mapping[str, Any]) -> dict[str, Any]:
+    return {str(key): value for key, value in record.items()}
+
+
+def _run_detail_source_metadata(
+    paths: WorkflowPaths,
+    *,
+    run_id: str,
+    task_id: str | None,
+    agent_status: Mapping[str, Any] | None,
+    node_summary: Mapping[str, Any] | None,
+    validation: Mapping[str, Any] | None,
+    active_lease: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    run_dirs = _run_candidate_dirs(paths, run_id=run_id, task_id=task_id, active_lease=active_lease)
+    files: list[Path] = []
+
+    def add(path: Path | None) -> None:
+        if path is not None:
+            files.append(path)
+
+    for run_dir in run_dirs:
+        for name in (
+            "prompt.md",
+            "planner_prompt.md",
+            "auditor_prompt.md",
+            "change_request_planner_prompt.md",
+            "final.md",
+            "final_output.md",
+            "report.md",
+            "validation.json",
+            "agent_status.json",
+            "node_summary.json",
+            "git/changed_files.json",
+            "git/project_diff.patch",
+        ):
+            add(run_dir / name)
+        logs_dir = run_dir / "logs"
+        if logs_dir.is_dir():
+            try:
+                for path in sorted(logs_dir.glob("*")):
+                    add(path)
+            except OSError:
+                pass
+        for path in (run_dir / "stdout.log", run_dir / "stderr.log"):
+            add(path)
+        artifacts_dir = run_dir / "artifacts"
+        if artifacts_dir.is_dir():
+            try:
+                for path in sorted(artifacts_dir.rglob("*")):
+                    add(path)
+            except OSError:
+                pass
+    if task_id:
+        add(paths.results_dir / task_id / "human_summary.md")
+    for key in ("stdout_path", "stderr_path", "scheduler_run_dir", "role_output_dir", "task_evidence_run_dir"):
+        add(_project_path(paths, _first_string(_mapping_value(active_lease, key))))
+    add(_project_path(paths, _mapping_value(agent_status, "_path")))
+    add(_project_path(paths, _mapping_value(node_summary, "_path")))
+    add(_project_path(paths, _mapping_value(validation, "_path")))
+    add(paths.runtime_dir / "git_checkpoints.jsonl")
+
+    refs = _stat_refs(paths, files)
+    digest = sha256(json.dumps(refs, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "fingerprint": "sha256:" + digest,
+        "files": refs,
+    }
+
+
+def _stat_refs(paths: WorkflowPaths, files: Sequence[Path]) -> list[dict[str, Any]]:
+    refs: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for path in files:
+        if not _is_dashboard_safe_path(paths, path):
+            continue
+        try:
+            resolved = path.resolve()
+        except OSError:
+            resolved = path.absolute()
+        key = resolved.as_posix()
+        if key in seen:
+            continue
+        seen.add(key)
+        safe_path = _safe_dashboard_path(paths, resolved)
+        if not safe_path or safe_path == "[redacted path]":
+            continue
+        try:
+            stat_result = resolved.stat()
+        except OSError:
+            refs.append({"path": safe_path, "exists": False})
+            continue
+        refs.append(
+            {
+                "path": safe_path,
+                "exists": True,
+                "is_file": resolved.is_file(),
+                "size_bytes": stat_result.st_size,
+                "mtime_ns": stat_result.st_mtime_ns,
+            }
+        )
+    return refs
+
+
+def _reusable_previous_detail(
+    previous_details: Mapping[str, Mapping[str, Any]],
+    *,
+    run_id: str,
+    detail_source: Mapping[str, Any],
+) -> Mapping[str, Any] | None:
+    previous = previous_details.get(run_id)
+    if not isinstance(previous, Mapping):
+        return None
+    if previous.get("detail_status") != "available":
+        return None
+    if _mapping_or_empty(previous.get("detail_source")).get("fingerprint") != detail_source.get("fingerprint"):
+        return None
+    details = previous.get("details")
+    if not isinstance(details, Mapping):
+        return None
+    return previous
+
+
+def _run_details_manifest_model(
+    *,
+    common: Mapping[str, Any],
+    paths: WorkflowPaths,
+    run_summaries: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    records = []
+    for record in run_summaries:
+        run_id = str(record.get("run_id") or "")
+        if not run_id or record.get("detail_status") != "available":
+            continue
+        detail_path = _run_detail_path(paths, run_id)
+        details = _mapping_or_empty(record.get("details"))
+        records.append(
+            {
+                "run_id": run_id,
+                "node_id": record.get("node_id"),
+                "task_id": record.get("task_id"),
+                "role": record.get("role"),
+                "status": record.get("status"),
+                "path": _path_for_record(paths.project_root, detail_path),
+                "available_sections": list(details.get("available_sections") or []),
+                "missing_sections": list(details.get("missing_sections") or []),
+            }
+        )
+    return {
+        "schema_version": common["schema_version"],
+        "workflow_id": common["workflow_id"],
+        "generated_at": common["generated_at"],
+        "source_hashes": dict(common.get("source_hashes") or {}),
+        "last_event_seq": common.get("last_event_seq"),
+        "source_event_id": common.get("source_event_id"),
+        "detail_dir": paths.value("read_models_dir").rstrip("/") + f"/{READ_MODEL_DETAIL_DIR}",
+        "run_count": len(records),
+        "runs": records,
+    }
+
+
+def _build_manifest_model(
+    *,
+    common: Mapping[str, Any],
+    paths: WorkflowPaths,
+    source_hashes: Mapping[str, Any],
+    run_summaries: Sequence[Mapping[str, Any]],
+    event_projection: Mapping[str, Any],
+) -> dict[str, Any]:
+    run_details = []
+    for record in run_summaries:
+        run_id = str(record.get("run_id") or "")
+        if not run_id or record.get("detail_status") != "available":
+            continue
+        run_details.append(
+            {
+                "run_id": run_id,
+                "path": _path_for_record(paths.project_root, _run_detail_path(paths, run_id)),
+                "detail_source": dict(_mapping_or_empty(record.get("detail_source"))),
+                "detail_reused": record.get("detail_reused") is True,
+            }
+        )
+    return {
+        "schema_version": common["schema_version"],
+        "workflow_id": common["workflow_id"],
+        "generated_at": common["generated_at"],
+        "last_event_seq": common.get("last_event_seq"),
+        "source_event_id": common.get("source_event_id"),
+        "builder_version": READ_MODEL_BUILDER_VERSION,
+        "source_hashes": dict(source_hashes),
+        "event_replay": _event_replay_summary(event_projection, project=paths.project_root),
+        "event_segment_manifest": _event_segment_manifest_ref(paths),
+        "run_details": run_details,
+    }
+
+
+def _event_segment_manifest_ref(paths: WorkflowPaths) -> dict[str, Any]:
+    path = paths.runtime_dir / "events" / "manifest.json"
+    try:
+        stat_result = path.stat()
+    except OSError:
+        return {
+            "path": _path_for_record(paths.project_root, path),
+            "exists": False,
+        }
+    return {
+        "path": _path_for_record(paths.project_root, path),
+        "exists": True,
+        "size_bytes": stat_result.st_size,
+        "mtime_ns": stat_result.st_mtime_ns,
+    }
+
+
+def _previous_build_manifest(paths: WorkflowPaths, *, workflow_id: str) -> Mapping[str, Any]:
+    manifest = _read_json_object(paths.read_models_dir / "build_manifest.json", default={})
+    if not isinstance(manifest, Mapping):
+        return {}
+    if manifest.get("schema_version") != SCHEMA_VERSION:
+        return {}
+    if manifest.get("workflow_id") != workflow_id:
+        return {}
+    if manifest.get("builder_version") != READ_MODEL_BUILDER_VERSION:
+        return {}
+    return manifest
+
+
+def _previous_run_detail_cache(paths: WorkflowPaths, manifest: Mapping[str, Any]) -> dict[str, Mapping[str, Any]]:
+    cache: dict[str, Mapping[str, Any]] = {}
+    for entry in manifest.get("run_details") or []:
+        if not isinstance(entry, Mapping):
+            continue
+        run_id = str(entry.get("run_id") or "")
+        path_value = str(entry.get("path") or "")
+        if not run_id or not path_value:
+            continue
+        path = paths.project_root / path_value if not Path(path_value).is_absolute() else Path(path_value)
+        try:
+            resolved = path.resolve()
+            resolved.relative_to(paths.read_models_dir.resolve())
+        except (OSError, ValueError):
+            continue
+        detail = _read_json_object(path, default={})
+        if isinstance(detail, Mapping) and detail.get("run_id") == run_id:
+            cache[run_id] = detail
+    return cache
+
+
+def _run_detail_path(paths: WorkflowPaths, run_id: str) -> Path:
+    return paths.read_models_dir / READ_MODEL_DETAIL_DIR / _run_detail_filename(run_id)
+
+
+def _run_detail_filename(run_id: str) -> str:
+    slug = re.sub(r"[^A-Za-z0-9_.-]+", "_", run_id).strip("._") or "run"
+    slug = slug[:80]
+    suffix = sha256(run_id.encode("utf-8")).hexdigest()[:12]
+    return f"{slug}_{suffix}.json"
 
 
 def _run_detail_sections(
@@ -1649,23 +3023,25 @@ def _text_file_record(paths: WorkflowPaths, path: Path, *, limit: int) -> dict[s
     if not path.is_file() or not _is_dashboard_safe_path(paths, path):
         return None
     try:
-        data = path.read_bytes()
+        stat_result = path.stat()
     except OSError:
         return None
     preview_limit = max(limit + NODE_DETAIL_REDACTION_EXTRA_BYTES, limit * 4, 8192)
+    data = _read_file_prefix(path, preview_limit)
     preview_data = data[:preview_limit]
     decoded = preview_data.decode("utf-8", errors="replace")
     content = _truncate_text(_redact_detail_text(decoded), limit)
-    if len(data) > len(preview_data):
+    if stat_result.st_size > len(preview_data):
         content["truncated"] = True
-    return {
+    record: dict[str, Any] = {
         "path": _safe_dashboard_path(paths, path),
-        "size_bytes": len(data),
-        "sha256": "sha256:" + sha256(data).hexdigest(),
+        "size_bytes": stat_result.st_size,
         "render_mode": _file_render_mode(path),
         "content": content["content"],
         "truncated": content["truncated"],
     }
+    _add_bounded_file_hash(record, preview_data=preview_data, size_bytes=stat_result.st_size)
+    return record
 
 
 def _file_render_mode(path: Path) -> str:
@@ -1679,21 +3055,44 @@ def _artifact_record(paths: WorkflowPaths, path: Path) -> dict[str, Any]:
     if not path.is_file() or not _is_dashboard_safe_path(paths, path):
         return {"available": False, "path": _safe_dashboard_path(paths, path)}
     try:
-        data = path.read_bytes()
+        stat_result = path.stat()
     except OSError:
         return {"available": False, "path": _safe_dashboard_path(paths, path)}
+    preview_limit = max(1200 + NODE_DETAIL_REDACTION_EXTRA_BYTES, 8192)
+    data = _read_file_prefix(path, preview_limit)
     record: dict[str, Any] = {
         "available": True,
         "path": _safe_dashboard_path(paths, path),
-        "size_bytes": len(data),
-        "sha256": "sha256:" + sha256(data).hexdigest(),
+        "size_bytes": stat_result.st_size,
         "render_mode": _file_render_mode(path),
     }
+    _add_bounded_file_hash(record, preview_data=data, size_bytes=stat_result.st_size)
     if _looks_textual(path, data):
         content = _truncate_text(_redact_detail_text(data.decode("utf-8", errors="replace")), 1200)
+        if stat_result.st_size > len(data):
+            content["truncated"] = True
         record["content"] = content["content"]
         record["truncated"] = content["truncated"]
     return record
+
+
+def _read_file_prefix(path: Path, limit: int) -> bytes:
+    if limit <= 0:
+        return b""
+    try:
+        with path.open("rb") as handle:
+            return handle.read(limit)
+    except OSError:
+        return b""
+
+
+def _add_bounded_file_hash(record: dict[str, Any], *, preview_data: bytes, size_bytes: int) -> None:
+    if size_bytes <= len(preview_data):
+        record["sha256"] = "sha256:" + sha256(preview_data).hexdigest()
+        record["full_sha256_available"] = True
+    else:
+        record["preview_sha256"] = "sha256:" + sha256(preview_data).hexdigest()
+        record["full_sha256_available"] = False
 
 
 def _looks_textual(path: Path, data: bytes) -> bool:
@@ -2043,23 +3442,130 @@ def _source_hashes(
     *,
     plan_source: PlanSource,
     events: Sequence[Mapping[str, Any]],
+    event_total_count: int | None,
     last_event: Mapping[str, Any] | None,
     validation_manifest: Mapping[str, Any],
     active_leases: Sequence[Mapping[str, Any]],
 ) -> dict[str, Any]:
+    event_source = _event_source_reference(paths, events=events, event_total_count=event_total_count, last_event=last_event)
     return {
         "plan": _sha256_file(plan_source.path),
         "plan_source": plan_source.kind,
         "plan_file": plan_source.value,
         "active_plan": _sha256_file(paths.plan_file),
-        "events_head": _event_id(last_event) if last_event is not None else None,
-        "events_sha256": _events_sha256(paths.runtime_dir / "events"),
+        "events_head": event_source.get("events_head"),
+        "events_source_mode": event_source.get("mode"),
+        "events_segment_manifest": event_source.get("fingerprint"),
+        "events_segment_manifest_path": event_source.get("manifest_path"),
         "state": _sha256_file(paths.runtime_dir / "state.json"),
         "expansion_registry": _sha256_file(paths.runtime_dir / "expansion_registry.json"),
         "validations_manifest": validation_manifest.get("sha256"),
         "active_leases": _active_leases_sha256(active_leases),
-        "events_count": len(events),
+        "events_count": event_source.get("events_count", len(events)),
     }
+
+
+def _event_source_reference(
+    paths: WorkflowPaths,
+    *,
+    events: Sequence[Mapping[str, Any]],
+    event_total_count: int | None,
+    last_event: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    events_dir = paths.runtime_dir / "events"
+    manifest = load_event_segment_manifest(events_dir)
+    if isinstance(manifest, Mapping):
+        compact_manifest = {
+            "event_count": manifest.get("event_count"),
+            "latest_event": _compact_manifest_event_ref(manifest.get("latest_event")),
+            "segments": [
+                _compact_segment_ref(entry)
+                for entry in manifest.get("segments") or []
+                if isinstance(entry, Mapping)
+            ],
+        }
+        fingerprint = sha256(
+            json.dumps(compact_manifest, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        latest = _mapping_or_empty(manifest.get("latest_event"))
+        return {
+            "mode": "event_manifest",
+            "fingerprint": "sha256:" + fingerprint,
+            "manifest_path": _path_for_record(paths.project_root, events_dir / EVENTS_MANIFEST_FILENAME),
+            "events_count": _int_from_manifest(manifest.get("event_count"), default=len(events)),
+            "events_head": _event_id(latest) if latest else _event_id(last_event),
+        }
+    segment_refs = _event_segment_stat_refs(paths)
+    fallback = {
+        "segments": segment_refs,
+        "events_count": event_total_count,
+        "events_head": _event_id(last_event),
+    }
+    fingerprint = sha256(json.dumps(fallback, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+    return {
+        "mode": "event_segment_stats",
+        "fingerprint": "sha256:" + fingerprint,
+        "manifest_path": _path_for_record(paths.project_root, events_dir / EVENTS_MANIFEST_FILENAME),
+        "events_count": event_total_count,
+        "events_head": _event_id(last_event),
+    }
+
+
+def _compact_manifest_event_ref(value: Any) -> dict[str, Any]:
+    event = _mapping_or_empty(value)
+    return {
+        key: event.get(key)
+        for key in ("sequence", "seq", "event_id", "event_hash", "event_type", "ts", "timestamp")
+        if event.get(key) is not None
+    }
+
+
+def _compact_segment_ref(entry: Mapping[str, Any]) -> dict[str, Any]:
+    keys = (
+        "path",
+        "size_bytes",
+        "mtime_ns",
+        "first_sequence",
+        "last_sequence",
+        "first_event_id",
+        "last_event_id",
+        "first_event_hash",
+        "last_event_hash",
+        "record_count",
+        "contains_payload_refs",
+    )
+    return {key: entry.get(key) for key in keys if entry.get(key) is not None}
+
+
+def _event_segment_stat_refs(paths: WorkflowPaths) -> list[dict[str, Any]]:
+    events_dir = paths.runtime_dir / "events"
+    try:
+        segments = sorted(path for path in events_dir.glob("*.jsonl") if path.is_file())
+    except OSError:
+        return []
+    refs: list[dict[str, Any]] = []
+    for path in segments:
+        try:
+            stat_result = path.stat()
+        except OSError:
+            continue
+        refs.append(
+            {
+                "path": _path_for_record(paths.project_root, path),
+                "size_bytes": stat_result.st_size,
+                "mtime_ns": stat_result.st_mtime_ns,
+            }
+        )
+    return refs
+
+
+def _int_from_manifest(value: Any, *, default: int) -> int:
+    if isinstance(value, bool):
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
 
 
 def active_leases_source_hash(paths: WorkflowPaths) -> str:
@@ -2671,6 +4177,12 @@ def _node_from_event(event: Mapping[str, Any]) -> dict[str, Any]:
         "objective_phase_id": payload.get("objective_phase_id") or payload.get("phase_id"),
         "objective_scope": payload.get("scope"),
         "target_objective_ids": list(payload.get("target_objective_ids") or []),
+        "target_task_ids": list(payload.get("target_task_ids") or []),
+        "target_failure_ids": list(payload.get("target_failure_ids") or []),
+        "proposal_id": payload.get("proposal_id"),
+        "expansion_type": payload.get("expansion_type"),
+        "resolution_strategy": payload.get("resolution_strategy"),
+        "risk": payload.get("risk"),
         "actor_label": actor_label,
         "context_label": _event_context_label(task_id=task_id, phase=None, actor_label=actor_label, runner_id=runner_id),
         "event_sequence": sequence,
@@ -2951,12 +4463,38 @@ def _read_expansion_registry(paths: WorkflowPaths, *, workflow_id: str) -> dict[
     }
 
 
-def _read_event_records(paths: WorkflowPaths) -> list[dict[str, Any]]:
+def _event_log_record_count(paths: WorkflowPaths, *, fallback: int | None) -> int | None:
+    manifest = load_event_segment_manifest(paths.runtime_dir / "events")
+    if isinstance(manifest, Mapping):
+        value = _int_or_none(manifest.get("event_count"))
+        if value is not None:
+            return value
+    return fallback
+
+
+def _read_event_records(paths: WorkflowPaths, *, limit: int | None = None) -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
     events_dir = paths.runtime_dir / "events"
     if not events_dir.exists():
         return records
-    for path in sorted(events_dir.glob("*.jsonl")):
+    try:
+        event_paths = sorted(path for path in events_dir.glob("*.jsonl") if path.is_file())
+    except OSError:
+        return records
+    if limit is not None:
+        remaining = max(0, int(limit))
+        if remaining <= 0:
+            return records
+        for path in reversed(event_paths):
+            segment_records = _read_jsonl_tail(path, limit=remaining)
+            for record in segment_records:
+                record["_segment"] = _path_for_record(paths.project_root, path)
+                records.append(record)
+            remaining = max(0, int(limit) - len(records))
+            if remaining <= 0:
+                break
+        return sorted(records, key=lambda record: (_event_sequence(record) or 0, str(record.get("event_id") or "")))
+    for path in event_paths:
         for record in _read_jsonl(path):
             record["_segment"] = _path_for_record(paths.project_root, path)
             records.append(record)
@@ -2966,15 +4504,54 @@ def _read_event_records(paths: WorkflowPaths) -> list[dict[str, Any]]:
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()
+        handle = path.open("r", encoding="utf-8")
     except OSError:
         return records
+    with handle:
+        for line in handle:
+            if not line.strip():
+                continue
+            try:
+                data = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(data, Mapping):
+                records.append(dict(data))
+    return records
+
+
+def _read_jsonl_tail(path: Path, *, limit: int) -> list[dict[str, Any]]:
+    if limit <= 0:
+        return []
+    chunk_size = 64 * 1024
+    chunks: list[bytes] = []
+    newline_count = 0
+    try:
+        with path.open("rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            position = handle.tell()
+            while position > 0 and newline_count <= limit:
+                read_size = min(chunk_size, position)
+                position -= read_size
+                handle.seek(position)
+                chunk = handle.read(read_size)
+                chunks.append(chunk)
+                newline_count += chunk.count(b"\n")
+    except OSError:
+        return []
+    if not chunks:
+        return []
+    raw = b"".join(reversed(chunks))
+    lines = raw.splitlines()
+    if len(lines) > limit:
+        lines = lines[-limit:]
+    records: list[dict[str, Any]] = []
     for line in lines:
         if not line.strip():
             continue
         try:
-            data = json.loads(line)
-        except json.JSONDecodeError:
+            data = json.loads(line.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
             continue
         if isinstance(data, Mapping):
             records.append(dict(data))
@@ -2996,12 +4573,724 @@ def _atomic_write_json(path: Path, data: Mapping[str, Any]) -> None:
     temp_path.replace(path)
 
 
+def _atomic_write_json_if_changed(path: Path, data: Mapping[str, Any]) -> bool:
+    existing = _read_json_object(path, default=None)
+    if isinstance(existing, Mapping) and _read_model_semantic_value(existing) == _read_model_semantic_value(data):
+        return False
+    _atomic_write_json(path, data)
+    return True
+
+
 def _atomic_write_jsonl(path: Path, records: Sequence[Mapping[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temp_path = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
     text = "".join(json.dumps(dict(record), sort_keys=True, separators=(",", ":")) + "\n" for record in records)
     temp_path.write_text(text, encoding="utf-8")
     temp_path.replace(path)
+
+
+def _atomic_write_jsonl_if_changed(path: Path, records: Sequence[Mapping[str, Any]]) -> bool:
+    existing = _read_jsonl_strict(path)
+    if existing is not None and _read_model_semantic_value(existing) == _read_model_semantic_value(list(records)):
+        return False
+    _atomic_write_jsonl(path, records)
+    return True
+
+
+def _read_jsonl_strict(path: Path) -> list[dict[str, Any]] | None:
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+    records: list[dict[str, Any]] = []
+    for line in lines:
+        if not line.strip():
+            continue
+        try:
+            data = json.loads(line)
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(data, Mapping):
+            return None
+        records.append(dict(data))
+    return records
+
+
+def _strict_load_read_models(
+    paths: WorkflowPaths,
+) -> tuple[dict[str, Mapping[str, Any]], dict[str, Sequence[Mapping[str, Any]]], dict[str, Any]]:
+    json_models: dict[str, Mapping[str, Any]] = {}
+    jsonl_models: dict[str, Sequence[Mapping[str, Any]]] = {}
+    errors: list[str] = []
+    warnings: list[str] = []
+    loaded: list[str] = []
+    missing: list[str] = []
+    invalid: list[str] = []
+    for filename in READ_MODEL_JSON_FILES:
+        path = paths.read_models_dir / filename
+        if not path.exists():
+            missing.append(filename)
+            if filename in READ_MODEL_COMPAT_OPTIONAL_FILES:
+                warnings.append(f"{filename}: missing optional compatibility read-model")
+            else:
+                errors.append(f"{filename}: missing read-model file")
+            continue
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            invalid.append(filename)
+            errors.append(f"{filename}: invalid JSON ({error})")
+            continue
+        if not isinstance(data, Mapping):
+            invalid.append(filename)
+            errors.append(f"{filename}: expected JSON object")
+            continue
+        json_models[filename] = dict(data)
+        loaded.append(filename)
+    for filename in READ_MODEL_JSONL_FILES:
+        path = paths.read_models_dir / filename
+        if not path.exists():
+            missing.append(filename)
+            if filename in READ_MODEL_COMPAT_OPTIONAL_FILES:
+                warnings.append(f"{filename}: missing optional compatibility read-model")
+            else:
+                errors.append(f"{filename}: missing read-model file")
+            continue
+        records, line_errors = _strict_read_jsonl_with_errors(path)
+        if line_errors:
+            invalid.append(filename)
+            errors.extend(f"{filename}: {error}" for error in line_errors[:5])
+            if len(line_errors) > 5:
+                errors.append(f"{filename}: {len(line_errors) - 5} additional JSONL parse errors")
+            continue
+        jsonl_models[filename] = records
+        loaded.append(filename)
+    return (
+        json_models,
+        jsonl_models,
+        {
+            "schema_version": SCHEMA_VERSION,
+            "status": "pass" if not errors else "fail",
+            "loaded_files": sorted(loaded),
+            "missing_files": sorted(missing),
+            "invalid_files": sorted(set(invalid)),
+            "errors": errors,
+            "warnings": warnings,
+        },
+    )
+
+
+def _strict_read_jsonl_with_errors(path: Path) -> tuple[list[dict[str, Any]], list[str]]:
+    records: list[dict[str, Any]] = []
+    errors: list[str] = []
+    try:
+        handle = path.open("r", encoding="utf-8")
+    except OSError as error:
+        return [], [f"could not read JSONL ({error})"]
+    with handle:
+        for index, line in enumerate(handle, start=1):
+            if not line.strip():
+                continue
+            try:
+                data = json.loads(line)
+            except json.JSONDecodeError as error:
+                errors.append(f"line {index}: invalid JSON ({error})")
+                continue
+            if not isinstance(data, Mapping):
+                errors.append(f"line {index}: expected JSON object")
+                continue
+            records.append(dict(data))
+    return records, errors
+
+
+def _read_model_no_write_comparison(
+    paths: WorkflowPaths,
+    *,
+    json_models: Mapping[str, Mapping[str, Any]],
+    jsonl_models: Mapping[str, Sequence[Mapping[str, Any]]],
+    run_summaries: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    changed_files: list[str] = []
+    missing_files: list[str] = []
+    invalid_files: list[str] = []
+    checked_files: list[str] = []
+    samples: list[dict[str, Any]] = []
+    for filename, expected in sorted(json_models.items()):
+        path = paths.read_models_dir / filename
+        checked_files.append(filename)
+        existing = _read_json_object(path, default=None)
+        if existing is None:
+            if path.exists():
+                invalid_files.append(filename)
+                _append_strict_sample(samples, {"issue": "invalid_json", "file": filename})
+            else:
+                missing_files.append(filename)
+                _append_strict_sample(samples, {"issue": "missing_file", "file": filename})
+            continue
+        if _read_model_comparison_value(existing) != _read_model_comparison_value(expected):
+            changed_files.append(filename)
+            _append_strict_sample(samples, {"issue": "changed_file", "file": filename})
+    for filename, expected_records in sorted(jsonl_models.items()):
+        path = paths.read_models_dir / filename
+        checked_files.append(filename)
+        existing_records = _read_jsonl_strict(path)
+        if existing_records is None:
+            if path.exists():
+                invalid_files.append(filename)
+                _append_strict_sample(samples, {"issue": "invalid_jsonl", "file": filename})
+            else:
+                missing_files.append(filename)
+                _append_strict_sample(samples, {"issue": "missing_file", "file": filename})
+            continue
+        if _read_model_comparison_value(existing_records) != _read_model_comparison_value(list(expected_records)):
+            changed_files.append(filename)
+            _append_strict_sample(samples, {"issue": "changed_file", "file": filename})
+
+    detail_compare = _run_detail_no_write_comparison(paths, run_summaries=run_summaries)
+    changed_files.extend(detail_compare["changed_files"])
+    missing_files.extend(detail_compare["missing_files"])
+    invalid_files.extend(detail_compare["invalid_files"])
+    checked_files.extend(detail_compare["checked_files"])
+    for sample in detail_compare["samples"]:
+        _append_strict_sample(samples, sample)
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "status": "pass" if not (changed_files or missing_files or invalid_files or detail_compare["extra_run_detail_files"]) else "fail",
+        "checked_files": sorted(checked_files),
+        "checked_run_details": detail_compare["checked_run_details"],
+        "changed_files": sorted(changed_files),
+        "missing_files": sorted(missing_files),
+        "invalid_files": sorted(invalid_files),
+        "extra_run_detail_files": detail_compare["extra_run_detail_files"],
+        "samples": samples,
+    }
+
+
+def _run_detail_no_write_comparison(
+    paths: WorkflowPaths,
+    *,
+    run_summaries: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    changed_files: list[str] = []
+    missing_files: list[str] = []
+    invalid_files: list[str] = []
+    checked_files: list[str] = []
+    expected_paths: set[Path] = set()
+    checked_run_details = 0
+    samples: list[dict[str, Any]] = []
+    for record in run_summaries:
+        run_id = str(record.get("run_id") or "")
+        if not run_id or record.get("detail_status") != "available":
+            continue
+        detail_path = _run_detail_path(paths, run_id)
+        rel = _path_for_record(paths.project_root, detail_path) or detail_path.as_posix()
+        checked_files.append(rel)
+        try:
+            expected_paths.add(detail_path.resolve())
+        except OSError:
+            expected_paths.add(detail_path.absolute())
+        existing = _read_json_object(detail_path, default=None)
+        if existing is None:
+            if detail_path.exists():
+                invalid_files.append(rel)
+                _append_strict_sample(samples, {"issue": "invalid_run_detail", "file": rel, "run_id": run_id})
+            else:
+                missing_files.append(rel)
+                _append_strict_sample(samples, {"issue": "missing_run_detail", "file": rel, "run_id": run_id})
+            continue
+        checked_run_details += 1
+        expected = _run_detail_record(record)
+        if _read_model_comparison_value(existing) != _read_model_comparison_value(expected):
+            changed_files.append(rel)
+            _append_strict_sample(samples, {"issue": "changed_run_detail", "file": rel, "run_id": run_id})
+    extra_files = _extra_run_detail_files(paths, expected_paths)
+    for path in extra_files[:10]:
+        _append_strict_sample(samples, {"issue": "extra_run_detail", "file": path})
+    return {
+        "checked_files": checked_files,
+        "checked_run_details": checked_run_details,
+        "changed_files": changed_files,
+        "missing_files": missing_files,
+        "invalid_files": invalid_files,
+        "extra_run_detail_files": extra_files,
+        "samples": samples,
+    }
+
+
+def _extra_run_detail_files(paths: WorkflowPaths, expected_paths: set[Path]) -> list[str]:
+    detail_root = paths.read_models_dir / READ_MODEL_DETAIL_DIR
+    try:
+        candidates = sorted(path for path in detail_root.glob("*.json") if path.is_file())
+    except OSError:
+        return []
+    extras: list[str] = []
+    for path in candidates:
+        try:
+            resolved = path.resolve()
+        except OSError:
+            resolved = path.absolute()
+        if resolved in expected_paths:
+            continue
+        rel = _path_for_record(paths.project_root, path)
+        if rel is not None:
+            extras.append(rel)
+    return extras
+
+
+def _read_model_comparison_value(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {
+            str(key): _read_model_comparison_value(item)
+            for key, item in value.items()
+            if str(key) not in {"generated_at", "detail_reused", "workflow_elapsed_seconds", "active_worker_seconds"}
+        }
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return [_read_model_comparison_value(item) for item in value]
+    return value
+
+
+def _strict_no_write_rebuild_comparison(project: Path, *, workflow_id: str) -> dict[str, Any]:
+    rebuild = rebuild_read_models(project, write=False, workflow_id=workflow_id)
+    comparison = rebuild.get("no_write_comparison")
+    comparison_status = comparison.get("status") if isinstance(comparison, Mapping) else None
+    ok = rebuild.get("ok") is True and comparison_status == "pass"
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "status": "pass" if ok else "fail",
+        "rebuild_ok": rebuild.get("ok") is True,
+        "rebuild_status": rebuild.get("status"),
+        "comparison": dict(comparison) if isinstance(comparison, Mapping) else None,
+        "diagnostics": rebuild.get("diagnostics") if isinstance(rebuild.get("diagnostics"), Mapping) else {},
+        "errors": list(rebuild.get("errors") or []),
+        "warnings": list(rebuild.get("warnings") or []),
+    }
+
+
+def _strict_event_chain_diagnostics(events: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    hash_mismatches = 0
+    prev_hash_mismatches = 0
+    sequence_gaps = 0
+    samples: list[dict[str, Any]] = []
+    previous_hash: str | None = None
+    previous_sequence: int | None = None
+    for index, event in enumerate(events):
+        event_id = _event_id(event)
+        sequence = _event_sequence(event)
+        recorded_hash = event.get("event_hash")
+        comparable = {
+            str(key): value
+            for key, value in dict(event).items()
+            if not str(key).startswith("_")
+        }
+        computed_hash = _event_hash(comparable)
+        if recorded_hash != computed_hash:
+            hash_mismatches += 1
+            _append_strict_sample(
+                samples,
+                {
+                    "issue": "event_hash_mismatch",
+                    "event_id": event_id,
+                    "sequence": sequence,
+                    "recorded": recorded_hash,
+                    "computed": computed_hash,
+                    "segment": event.get("_segment"),
+                },
+            )
+        recorded_prev = event.get("prev_event_hash")
+        if index == 0:
+            if recorded_prev not in (None, ""):
+                prev_hash_mismatches += 1
+                _append_strict_sample(
+                    samples,
+                    {
+                        "issue": "first_event_prev_hash_present",
+                        "event_id": event_id,
+                        "sequence": sequence,
+                        "recorded_prev_event_hash": recorded_prev,
+                    },
+                )
+        elif recorded_prev != previous_hash:
+            prev_hash_mismatches += 1
+            _append_strict_sample(
+                samples,
+                {
+                    "issue": "prev_event_hash_mismatch",
+                    "event_id": event_id,
+                    "sequence": sequence,
+                    "recorded_prev_event_hash": recorded_prev,
+                    "expected_prev_event_hash": previous_hash,
+                },
+            )
+        if previous_sequence is not None and sequence is not None and sequence != previous_sequence + 1:
+            sequence_gaps += 1
+            _append_strict_sample(
+                samples,
+                {
+                    "issue": "event_sequence_gap",
+                    "event_id": event_id,
+                    "sequence": sequence,
+                    "expected_sequence": previous_sequence + 1,
+                },
+            )
+        previous_hash = str(recorded_hash) if isinstance(recorded_hash, str) else None
+        previous_sequence = sequence if sequence is not None else previous_sequence
+    return {
+        "status": "pass" if not (hash_mismatches or prev_hash_mismatches or sequence_gaps) else "fail",
+        "checked": len(events),
+        "hash_mismatches": hash_mismatches,
+        "prev_hash_mismatches": prev_hash_mismatches,
+        "sequence_gaps": sequence_gaps,
+        "samples": samples,
+    }
+
+
+def _strict_event_payload_sidecar_diagnostics(
+    project: Path,
+    paths: WorkflowPaths,
+    events: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    referenced = 0
+    checked = 0
+    missing = 0
+    mismatch = 0
+    invalid = 0
+    samples: list[dict[str, Any]] = []
+    for event in events:
+        if event.get("payload_compacted") is not True and not event.get("payload_ref"):
+            continue
+        referenced += 1
+        event_id = _event_id(event)
+        sequence = _event_sequence(event)
+        expected_digest = event.get("payload_sha256")
+        expected_size = _int_or_none(event.get("payload_size_bytes"))
+        sidecar_path = _strict_payload_sidecar_path(project, paths, event.get("payload_ref"))
+        if sidecar_path is None:
+            invalid += 1
+            _append_strict_sample(
+                samples,
+                {"issue": "invalid_payload_ref", "event_id": event_id, "sequence": sequence, "payload_ref": event.get("payload_ref")},
+            )
+            continue
+        if not sidecar_path.exists():
+            missing += 1
+            _append_strict_sample(
+                samples,
+                {
+                    "issue": "missing_payload_sidecar",
+                    "event_id": event_id,
+                    "sequence": sequence,
+                    "path": _path_for_record(project, sidecar_path),
+                },
+            )
+            continue
+        sidecar = _read_json_object(sidecar_path, default=None)
+        if not isinstance(sidecar, Mapping) or "payload" not in sidecar:
+            invalid += 1
+            _append_strict_sample(
+                samples,
+                {
+                    "issue": "invalid_payload_sidecar",
+                    "event_id": event_id,
+                    "sequence": sequence,
+                    "path": _path_for_record(project, sidecar_path),
+                },
+            )
+            continue
+        checked += 1
+        encoded = json.dumps(sidecar.get("payload"), sort_keys=True, separators=(",", ":")).encode("utf-8")
+        actual_digest = "sha256:" + sha256(encoded).hexdigest()
+        actual_size = len(encoded)
+        sidecar_digest = sidecar.get("payload_sha256")
+        sidecar_size = _int_or_none(sidecar.get("payload_size_bytes"))
+        if (
+            not isinstance(expected_digest, str)
+            or actual_digest != expected_digest
+            or sidecar_digest != expected_digest
+            or (expected_size is not None and actual_size != expected_size)
+            or (sidecar_size is not None and sidecar_size != actual_size)
+        ):
+            mismatch += 1
+            _append_strict_sample(
+                samples,
+                {
+                    "issue": "payload_sidecar_mismatch",
+                    "event_id": event_id,
+                    "sequence": sequence,
+                    "path": _path_for_record(project, sidecar_path),
+                    "expected_sha256": expected_digest,
+                    "sidecar_sha256": sidecar_digest,
+                    "actual_sha256": actual_digest,
+                    "expected_size_bytes": expected_size,
+                    "sidecar_size_bytes": sidecar_size,
+                    "actual_size_bytes": actual_size,
+                },
+            )
+    return {
+        "status": "pass" if not (missing or mismatch or invalid) else "fail",
+        "referenced": referenced,
+        "checked": checked,
+        "missing": missing,
+        "mismatch": mismatch,
+        "invalid": invalid,
+        "samples": samples,
+    }
+
+
+def _strict_payload_sidecar_path(project: Path, paths: WorkflowPaths, value: Any) -> Path | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    raw_path = Path(value)
+    candidate = raw_path if raw_path.is_absolute() else project / raw_path
+    try:
+        resolved = candidate.resolve()
+        sidecar_root = (paths.runtime_dir / EVENT_PAYLOAD_SIDECAR_DIR).resolve()
+    except OSError:
+        return None
+    if not _path_is_relative_to(resolved, sidecar_root):
+        return None
+    return resolved
+
+
+def _path_is_relative_to(path: Path, parent: Path) -> bool:
+    try:
+        path.relative_to(parent)
+    except ValueError:
+        return False
+    return True
+
+
+def _strict_read_model_source_hash_diagnostics(
+    json_models: Mapping[str, Mapping[str, Any]],
+    jsonl_models: Mapping[str, Sequence[Mapping[str, Any]]],
+    events_sha256: str,
+) -> dict[str, Any]:
+    checked_files: list[str] = []
+    events_sha256_recorded_files: list[str] = []
+    events_sha256_missing_files: list[str] = []
+    validation_manifest_recorded_files: list[str] = []
+    events_sha256_mismatches: list[dict[str, Any]] = []
+    for filename, payload in sorted(json_models.items()):
+        checked_files.append(filename)
+        source_hashes = payload.get("source_hashes")
+        if not isinstance(source_hashes, Mapping):
+            continue
+        if source_hashes.get("validations_manifest"):
+            validation_manifest_recorded_files.append(filename)
+        event_hash = source_hashes.get("events_sha256")
+        if event_hash is None:
+            events_sha256_missing_files.append(filename)
+        elif event_hash == events_sha256:
+            events_sha256_recorded_files.append(filename)
+        else:
+            events_sha256_mismatches.append({"file": filename, "recorded": event_hash, "computed": events_sha256})
+    for filename, records in sorted(jsonl_models.items()):
+        checked_files.append(filename)
+        hashes = [record.get("source_hashes") for record in records if isinstance(record.get("source_hashes"), Mapping)]
+        validation_recorded = any(source.get("validations_manifest") for source in hashes if isinstance(source, Mapping))
+        if validation_recorded:
+            validation_manifest_recorded_files.append(filename)
+        event_hashes = [
+            source.get("events_sha256")
+            for source in hashes
+            if isinstance(source, Mapping) and source.get("events_sha256") is not None
+        ]
+        if not event_hashes:
+            events_sha256_missing_files.append(filename)
+            continue
+        mismatched = [value for value in event_hashes if value != events_sha256]
+        if mismatched:
+            events_sha256_mismatches.append(
+                {"file": filename, "recorded": mismatched[0], "computed": events_sha256, "mismatched_records": len(mismatched)}
+            )
+        else:
+            events_sha256_recorded_files.append(filename)
+    return {
+        "checked_files": checked_files,
+        "events_sha256": events_sha256,
+        "events_sha256_recorded_files": sorted(events_sha256_recorded_files),
+        "events_sha256_missing_files": sorted(events_sha256_missing_files),
+        "events_sha256_mismatches": events_sha256_mismatches[:10],
+        "validations_manifest_recorded_files": sorted(validation_manifest_recorded_files),
+    }
+
+
+def _strict_run_detail_diagnostics(project: Path, paths: WorkflowPaths, manifest: Mapping[str, Any] | None) -> dict[str, Any]:
+    errors: list[str] = []
+    warnings: list[str] = []
+    samples: list[dict[str, Any]] = []
+    if not isinstance(manifest, Mapping):
+        return {
+            "status": "fail",
+            "checked": 0,
+            "missing": 0,
+            "invalid": 0,
+            "mismatched": 0,
+            "orphan_files": [],
+            "samples": [{"issue": "missing_run_details_manifest"}],
+            "warnings": [],
+        }
+    runs = manifest.get("runs")
+    if not isinstance(runs, Sequence) or isinstance(runs, (str, bytes)):
+        runs = []
+        errors.append("run_details_manifest.json: runs must be an array")
+        _append_strict_sample(samples, {"issue": "invalid_manifest_runs"})
+    declared_count = _int_or_none(manifest.get("run_count"))
+    if declared_count is not None and declared_count != len(runs):
+        errors.append("run_details_manifest.json: run_count does not match runs length")
+        _append_strict_sample(
+            samples,
+            {"issue": "run_count_mismatch", "declared": declared_count, "actual": len(runs)},
+        )
+    referenced_paths: set[Path] = set()
+    checked = 0
+    missing = 0
+    invalid = 0
+    mismatched = 0
+    detail_root = (paths.read_models_dir / READ_MODEL_DETAIL_DIR).resolve()
+    for entry in runs:
+        if not isinstance(entry, Mapping):
+            invalid += 1
+            _append_strict_sample(samples, {"issue": "invalid_manifest_entry"})
+            continue
+        run_id = str(entry.get("run_id") or "")
+        detail_path = _strict_run_detail_path(project, detail_root, entry.get("path"))
+        if detail_path is None:
+            invalid += 1
+            _append_strict_sample(samples, {"issue": "invalid_run_detail_path", "run_id": run_id, "path": entry.get("path")})
+            continue
+        referenced_paths.add(detail_path)
+        if not detail_path.exists():
+            missing += 1
+            _append_strict_sample(
+                samples,
+                {"issue": "missing_run_detail", "run_id": run_id, "path": _path_for_record(project, detail_path)},
+            )
+            continue
+        detail = _read_json_object(detail_path, default=None)
+        if not isinstance(detail, Mapping):
+            invalid += 1
+            _append_strict_sample(
+                samples,
+                {"issue": "invalid_run_detail_json", "run_id": run_id, "path": _path_for_record(project, detail_path)},
+            )
+            continue
+        checked += 1
+        detail_errors = _strict_run_detail_record_errors(paths, entry, detail)
+        if detail_errors:
+            mismatched += 1
+            _append_strict_sample(
+                samples,
+                {
+                    "issue": "run_detail_record_mismatch",
+                    "run_id": run_id,
+                    "path": _path_for_record(project, detail_path),
+                    "errors": detail_errors[:5],
+                },
+            )
+    orphan_files = _strict_run_detail_orphans(project, detail_root, referenced_paths)
+    if orphan_files:
+        warnings.append(f"{len(orphan_files)} run detail files are not referenced by run_details_manifest.json")
+    return {
+        "status": "pass" if not (errors or missing or invalid or mismatched) else "fail",
+        "declared_run_count": declared_count,
+        "manifest_run_count": len(runs),
+        "checked": checked,
+        "missing": missing,
+        "invalid": invalid,
+        "mismatched": mismatched,
+        "orphan_files": orphan_files[:10],
+        "samples": samples,
+        "errors": errors,
+        "warnings": warnings,
+    }
+
+
+def _strict_run_detail_path(project: Path, detail_root: Path, value: Any) -> Path | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    raw_path = Path(value)
+    candidate = raw_path if raw_path.is_absolute() else project / raw_path
+    try:
+        resolved = candidate.resolve()
+    except OSError:
+        return None
+    if not _path_is_relative_to(resolved, detail_root):
+        return None
+    return resolved
+
+
+def _strict_run_detail_record_errors(
+    paths: WorkflowPaths,
+    manifest_entry: Mapping[str, Any],
+    detail: Mapping[str, Any],
+) -> list[str]:
+    errors: list[str] = []
+    for field in ("schema_version", "workflow_id", "generated_at", "source_hashes", "run_id", "node_id", "detail_status", "details"):
+        if field not in detail:
+            errors.append(f"missing field {field}")
+    if detail.get("schema_version") != SCHEMA_VERSION:
+        errors.append(f"schema_version must be {SCHEMA_VERSION}")
+    if detail.get("workflow_id") != paths.workflow_id:
+        errors.append("workflow_id mismatch")
+    if detail.get("run_id") != manifest_entry.get("run_id"):
+        errors.append("run_id mismatch")
+    if detail.get("node_id") != manifest_entry.get("node_id"):
+        errors.append("node_id mismatch")
+    if detail.get("detail_status") != "available":
+        errors.append("detail_status must be available")
+    if not isinstance(detail.get("source_hashes"), Mapping):
+        errors.append("source_hashes must be an object")
+    details = detail.get("details")
+    if not isinstance(details, Mapping):
+        errors.append("details must be an object")
+    else:
+        if details.get("schema_version") != SCHEMA_VERSION:
+            errors.append(f"details.schema_version must be {SCHEMA_VERSION}")
+        if details.get("run_id") != detail.get("run_id"):
+            errors.append("details.run_id mismatch")
+        if not isinstance(details.get("sections"), Sequence) or isinstance(details.get("sections"), (str, bytes)):
+            errors.append("details.sections must be an array")
+        if not isinstance(details.get("available_sections"), Sequence) or isinstance(details.get("available_sections"), (str, bytes)):
+            errors.append("details.available_sections must be an array")
+        if not isinstance(details.get("missing_sections"), Sequence) or isinstance(details.get("missing_sections"), (str, bytes)):
+            errors.append("details.missing_sections must be an array")
+    return errors
+
+
+def _strict_run_detail_orphans(project: Path, detail_root: Path, referenced_paths: set[Path]) -> list[str]:
+    try:
+        candidates = sorted(path.resolve() for path in detail_root.glob("*.json") if path.is_file())
+    except OSError:
+        return []
+    return [
+        value
+        for value in (_path_for_record(project, path) for path in candidates if path not in referenced_paths)
+        if value is not None
+    ]
+
+
+def _event_segment_count(events_dir: Path) -> int:
+    try:
+        return len([path for path in events_dir.glob("*.jsonl") if path.is_file()])
+    except OSError:
+        return 0
+
+
+def _append_strict_sample(samples: list[dict[str, Any]], sample: Mapping[str, Any], *, limit: int = 10) -> None:
+    if len(samples) < limit:
+        samples.append(dict(sample))
+
+
+def _read_model_semantic_value(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {
+            str(key): _read_model_semantic_value(item)
+            for key, item in value.items()
+            if str(key) not in {"generated_at", "workflow_elapsed_seconds", "active_worker_seconds"}
+        }
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return [_read_model_semantic_value(item) for item in value]
+    return value
 
 
 def _sha256_file(path: Path) -> str | None:

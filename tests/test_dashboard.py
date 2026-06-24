@@ -20,6 +20,7 @@ from urllib.error import HTTPError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
 
+import runtime.dashboard as dashboard_module
 from runtime.dashboard import (
     _cmdline_is_loopplane_dashboard,
     _render_graph_panel,
@@ -496,6 +497,23 @@ def request_json_status(
         return error.code, json.loads(error.read().decode("utf-8"))
 
 
+def request_status_text(
+    url: str,
+    *,
+    token: str | None = None,
+    headers: dict[str, str] | None = None,
+) -> tuple[int, str, dict[str, str]]:
+    request_headers = dict(headers or {})
+    if token is not None:
+        request_headers["Authorization"] = f"Bearer {token}"
+    request = Request(url, headers=request_headers)
+    try:
+        with urlopen(request, timeout=5) as response:
+            return response.status, response.read().decode("utf-8"), dict(response.headers.items())
+    except HTTPError as error:
+        return error.code, error.read().decode("utf-8"), dict(error.headers.items())
+
+
 def read_jsonl(path: Path) -> list[dict[str, object]]:
     records: list[dict[str, object]] = []
     for line in path.read_text(encoding="utf-8").splitlines():
@@ -891,7 +909,11 @@ class StaticDashboardTest(unittest.TestCase):
             self.assertEqual(payload["plan_markdown"]["path"], "PLAN.md")
             self.assertIn("Phase P0: Validation Fixture", payload["plan_markdown"]["content"])
             self.assertIn("node_details", payload)
+            run_summaries = payload["jsonl_models"]["run_summaries.jsonl"]
+            self.assertTrue(run_summaries)
+            self.assertTrue(all("details" not in record for record in run_summaries))
             run_detail = payload["node_details"]["runs"]["run_fixture"]
+            self.assertEqual(run_detail["source"], "run_details")
             run_sections = sections_by_key(run_detail)
             self.assertTrue(REQUIRED_RUN_DETAIL_SECTIONS.issubset(run_sections), sorted(run_sections))
             for section_key in REQUIRED_RUN_DETAIL_SECTIONS:
@@ -1041,6 +1063,13 @@ class StaticDashboardTest(unittest.TestCase):
         workflow_graph = {
             "source_hashes": {"events_count": 300},
             "event_window": {"total_events": 300, "visible_event_nodes": 2, "limit": 2, "truncated": True},
+            "self_expansion_aggregation": {
+                "enabled": True,
+                "visible_node_count": 3,
+                "aggregated_node_count": 42,
+                "detail_limit": 50,
+                "groups": [],
+            },
             "nodes": [
                 {
                     "node_id": "run_EXP001",
@@ -1095,6 +1124,7 @@ class StaticDashboardTest(unittest.TestCase):
         self.assertIn("06-18 10:00 -&gt; Present", graph_html)
         self.assertNotIn("06-18 10:00 -&gt; 06-18 10:01", graph_html)
         self.assertIn("<strong>2</strong> recent events<small>of 300</small>", graph_html)
+        self.assertIn("<strong>42</strong> self-expansion aggregated", graph_html)
 
     def test_static_dashboard_shows_ready_planning_draft_before_activation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1655,10 +1685,15 @@ class StaticDashboardTest(unittest.TestCase):
             )
             current_before = current_path.read_bytes()
 
-            result = render_static_dashboard(project, output_dir=project / "dashboard_selector")
+            result = render_static_dashboard(
+                project,
+                output_dir=project / "dashboard_selector",
+                embed_workflow_snapshots=True,
+            )
 
             self.assertTrue(result["ok"], json.dumps(result, indent=2, sort_keys=True))
             self.assertIn("workspace_selector", result["covered_sections"])
+            self.assertTrue(result["embed_workflow_snapshots"])
             self.assertEqual(current_path.read_bytes(), current_before)
             html = (project / result["index_file"]).read_text(encoding="utf-8")
             self.assertIn("Workflow History Selector", html)
@@ -1693,6 +1728,52 @@ class StaticDashboardTest(unittest.TestCase):
             self.assertFalse(payload["workflow_snapshots"][archived_workflow_id]["read_model_rebuild"]["mutation_allowed"])
             self.assertIn("read_only", payload["workflow_snapshots"][archived_workflow_id]["read_model_rebuild"]["mutation_blockers"])
             self.assertFalse(payload["workflow_snapshots"][missing_workflow_id]["ok"])
+
+    def test_static_dashboard_default_does_not_embed_inactive_workflow_snapshots(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            prepare_dashboard_project(project)
+            current = json.loads((project / ".loopplane" / "config" / "workflow.json").read_text(encoding="utf-8"))
+            current_workflow_id = current["workflow_id"]
+            archived_workflow_id = "wf_static_lightweight_archived"
+            write_canonical_read_models(project, archived_workflow_id)
+            registry = {
+                "schema_version": "1.6",
+                "workspace_id": "ws_static_lightweight",
+                "workflows": [
+                    {
+                        "workflow_id": current_workflow_id,
+                        "name": "current static workflow",
+                        "status": "active",
+                        "workflow_root": ".loopplane",
+                        "plan_file": "PLAN.md",
+                        "read_models_dir": ".loopplane/read_models",
+                        "runtime_dir": ".loopplane/runtime",
+                        "requests_dir": ".loopplane/requests",
+                    },
+                    {
+                        "workflow_id": archived_workflow_id,
+                        "name": "archived static workflow",
+                        "status": "archived_view",
+                        "workflow_root": f".loopplane/workflows/{archived_workflow_id}",
+                        "read_only": True,
+                        "archived": True,
+                    },
+                ],
+            }
+            (project / ".loopplane" / "workflow_registry.json").write_text(
+                json.dumps(registry, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+
+            result = render_static_dashboard(project, output_dir=project / "dashboard_lightweight")
+
+            self.assertTrue(result["ok"], json.dumps(result, indent=2, sort_keys=True))
+            self.assertFalse(result["embed_workflow_snapshots"])
+            payload = dashboard_script_payload((project / result["index_file"]).read_text(encoding="utf-8"))
+            self.assertNotIn("workflow_snapshots", payload)
+            self.assertEqual(payload["workflow_id"], current_workflow_id)
+            self.assertEqual(len(payload["workflows"]), 2)
 
     def test_static_dashboard_defaults_to_current_workflow_when_visualizable(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1776,7 +1857,7 @@ class StaticDashboardTest(unittest.TestCase):
             self.assertEqual(payload["workflow_id"], current_workflow_id)
             self.assertEqual(payload["workspace"]["current_workflow_id"], current_workflow_id)
             self.assertEqual(payload["workspace"]["selected_workflow_id"], current_workflow_id)
-            self.assertFalse(payload["workflow_snapshots"][missing_workflow_id]["ok"])
+            self.assertNotIn("workflow_snapshots", payload)
 
             explicit = render_static_dashboard(
                 project,
@@ -1788,6 +1869,460 @@ class StaticDashboardTest(unittest.TestCase):
             self.assertEqual(explicit["workflow_id"], current_workflow_id)
             explicit_payload = dashboard_script_payload((project / explicit["index_file"]).read_text(encoding="utf-8"))
             self.assertEqual(explicit_payload["workspace"]["selected_workflow_id"], current_workflow_id)
+
+    def test_workflow_recency_selection_does_not_parse_jsonl_read_models(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            prepare_dashboard_project(project)
+            record = {
+                "workflow_id": "wf_recency_jsonl_guard",
+                "read_models_dir": ".loopplane/read_models",
+                "last_seen_at": "2026-06-15T00:00:00Z",
+            }
+            jsonl_path = project / ".loopplane" / "read_models" / "run_summaries.jsonl"
+            jsonl_path.write_text("{not valid json object}\n" * 1024, encoding="utf-8")
+
+            original_read_optional_json = dashboard_module._read_optional_json
+
+            def guarded_read_optional_json(path: Path) -> dict[str, object]:
+                self.assertNotEqual(path.suffix, ".jsonl", f"recency selection must not parse {path.name}")
+                return original_read_optional_json(path)
+
+            dashboard_module._read_optional_json = guarded_read_optional_json
+            try:
+                key = dashboard_module._dashboard_workflow_recency_key(project, record, fallback_index=7)
+            finally:
+                dashboard_module._read_optional_json = original_read_optional_json
+
+            self.assertEqual(key[1], 7)
+
+    def test_read_model_cache_is_scoped_bounded_and_invalidates_by_stat(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            project.mkdir()
+            model = project / "workflow_status.json"
+            model.write_text(json.dumps({"value": 1}, sort_keys=True) + "\n", encoding="utf-8")
+            cache = dashboard_module._ReadModelCache(max_entries=4, max_scopes=2, max_bytes=512)
+
+            first_stats: dict[str, int] = {}
+            self.assertEqual(cache.read_json(model, scope="project-a|workflow-a", stats=first_stats)["value"], 1)
+            self.assertEqual(first_stats["disk_reads"], 1)
+            self.assertEqual(first_stats.get("cache_hits", 0), 0)
+
+            second_stats: dict[str, int] = {}
+            self.assertEqual(cache.read_json(model, scope="project-a|workflow-a", stats=second_stats)["value"], 1)
+            self.assertEqual(second_stats["cache_hits"], 1)
+            self.assertEqual(second_stats.get("disk_reads", 0), 0)
+
+            scoped_stats: dict[str, int] = {}
+            self.assertEqual(cache.read_json(model, scope="project-a|workflow-b", stats=scoped_stats)["value"], 1)
+            self.assertEqual(scoped_stats["disk_reads"], 1)
+            self.assertEqual(scoped_stats.get("cache_hits", 0), 0)
+
+            model.write_text(json.dumps({"value": 22, "padding": "x"}, sort_keys=True) + "\n", encoding="utf-8")
+            stale_stats: dict[str, int] = {}
+            self.assertEqual(cache.read_json(model, scope="project-a|workflow-a", stats=stale_stats)["value"], 22)
+            self.assertEqual(stale_stats["disk_reads"], 1)
+            self.assertEqual(stale_stats.get("cache_hits", 0), 0)
+
+            bounded = dashboard_module._ReadModelCache(max_entries=10, max_scopes=1, max_bytes=170)
+            for index, scope in enumerate(("scope-a", "scope-b", "scope-c"), start=1):
+                path = project / f"model_{index}.json"
+                path.write_text(
+                    json.dumps({"index": index, "padding": "x" * 80}, sort_keys=True) + "\n",
+                    encoding="utf-8",
+                )
+                bounded.read_json(path, scope=scope, stats={})
+            snapshot = bounded.snapshot()
+            self.assertLessEqual(snapshot["scopes"], 1)
+            self.assertLessEqual(snapshot["total_bytes"], 170)
+
+    def test_read_model_cache_defaults_are_tunable_by_environment(self) -> None:
+        previous = {
+            key: os.environ.get(key)
+            for key in (
+                "LOOPPLANE_READ_MODEL_CACHE_MAX_ENTRIES",
+                "LOOPPLANE_READ_MODEL_CACHE_MAX_SCOPES",
+                "LOOPPLANE_READ_MODEL_CACHE_MAX_BYTES",
+            )
+        }
+        try:
+            os.environ["LOOPPLANE_READ_MODEL_CACHE_MAX_ENTRIES"] = "7"
+            os.environ["LOOPPLANE_READ_MODEL_CACHE_MAX_SCOPES"] = "3"
+            os.environ["LOOPPLANE_READ_MODEL_CACHE_MAX_BYTES"] = "2048"
+
+            cache = dashboard_module._ReadModelCache()
+            snapshot = cache.snapshot()
+            self.assertEqual(snapshot["max_entries"], 7)
+            self.assertEqual(snapshot["max_scopes"], 3)
+            self.assertEqual(snapshot["max_bytes"], 2048)
+
+            explicit = dashboard_module._ReadModelCache(max_entries=2, max_scopes=1, max_bytes=99).snapshot()
+            self.assertEqual(explicit["max_entries"], 2)
+            self.assertEqual(explicit["max_scopes"], 1)
+            self.assertEqual(explicit["max_bytes"], 99)
+        finally:
+            for key, value in previous.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+
+    def test_split_run_detail_lookup_does_not_open_other_run_details(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            paths, _run_dir = prepare_dashboard_project(project)
+            write_worker_run(project, run_id="run_other", create_artifact=True)
+            rebuild = rebuild_read_models(project)
+            self.assertTrue(rebuild["ok"], json.dumps(rebuild, indent=2, sort_keys=True))
+            manifest = json.loads((paths.read_models_dir / "run_details_manifest.json").read_text(encoding="utf-8"))
+            other_detail = next(record for record in manifest["runs"] if record["run_id"] == "run_other")
+            other_detail_path = (project / other_detail["path"]).resolve()
+            workflow_config = load_workflow_config(project)
+            context = {
+                "project": project,
+                "paths": paths,
+                "workflow_id": workflow_config["workflow_id"],
+            }
+
+            original_read_optional_json = dashboard_module._read_optional_json
+
+            def guarded_read_optional_json(path: Path) -> dict[str, object]:
+                self.assertNotEqual(Path(path).resolve(), other_detail_path, "run A lookup must not open run B detail")
+                return original_read_optional_json(path)
+
+            dashboard_module._read_optional_json = guarded_read_optional_json
+            try:
+                payload = dashboard_module._run_detail_payload_from_split(context, "run_fixture")
+            finally:
+                dashboard_module._read_optional_json = original_read_optional_json
+
+            self.assertIsNotNone(payload)
+            self.assertEqual(payload["run_id"], "run_fixture")
+            self.assertEqual(payload["source"], "run_details")
+
+    def test_missing_split_run_detail_get_does_not_write_read_models(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            paths, _run_dir = prepare_dashboard_project(project)
+            workflow_config = load_workflow_config(project)
+            context = {
+                "project": project,
+                "paths": paths,
+                "workflow_id": workflow_config["workflow_id"],
+            }
+            manifest = json.loads((paths.read_models_dir / "run_details_manifest.json").read_text(encoding="utf-8"))
+            detail_entry = next(record for record in manifest["runs"] if record["run_id"] == "run_fixture")
+            detail_path = project / detail_entry["path"]
+            self.assertTrue(detail_path.is_file())
+            detail_path.unlink()
+            protected = [paths.read_models_dir / filename for filename in READ_MODEL_FILES]
+            before = file_hashes(project, protected)
+
+            payload = dashboard_module._run_detail_payload(context, "run_fixture")
+
+            after = file_hashes(project, protected)
+            self.assertFalse(payload["ok"])
+            self.assertEqual(payload["status"], "detail_missing")
+            self.assertEqual(payload["run_id"], "run_fixture")
+            self.assertEqual(after, before)
+
+    def test_selected_dashboard_data_does_not_open_split_run_details(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            paths, _run_dir = prepare_dashboard_project(project)
+            workflow_config = load_workflow_config(project)
+            context = {
+                "project": project,
+                "paths": paths,
+                "workflow_id": workflow_config["workflow_id"],
+            }
+            (paths.read_models_dir / "run_details_manifest.json").write_text("{not valid json\n", encoding="utf-8")
+            (paths.read_models_dir / "build_manifest.json").write_text("{not valid json\n", encoding="utf-8")
+            detail_root = (paths.read_models_dir / "run_details").resolve()
+            self.assertTrue(detail_root.is_dir())
+            original_read_optional_json = dashboard_module._read_optional_json
+
+            def guarded_read_optional_json(path: Path) -> dict[str, object]:
+                resolved = Path(path).resolve()
+                if resolved != detail_root and detail_root in resolved.parents:
+                    raise AssertionError("selected dashboard data must not open split run detail files")
+                return original_read_optional_json(path)
+
+            dashboard_module._read_optional_json = guarded_read_optional_json
+            try:
+                payload = dashboard_module._dashboard_data_response(context)
+            finally:
+                dashboard_module._read_optional_json = original_read_optional_json
+
+            self.assertTrue(payload["ok"], json.dumps(payload, indent=2, sort_keys=True))
+            self.assertIn("run_index.jsonl", payload["jsonl_models"])
+            self.assertNotIn("run_summaries.jsonl", payload["jsonl_models"])
+            self.assertNotIn("run_details_manifest.json", payload["read_models"])
+            self.assertNotIn("build_manifest.json", payload["read_models"])
+            self.assertNotIn("run_details_manifest.json", payload["read_model_freshness"]["checked_files"])
+            self.assertNotIn("build_manifest.json", payload["read_model_freshness"]["checked_files"])
+            self.assertNotIn("run_details_manifest.json", dashboard_module._dashboard_data_read_model_filenames(paths))
+            self.assertNotIn("build_manifest.json", dashboard_module._dashboard_data_read_model_filenames(paths))
+
+    def test_selected_dashboard_data_skips_legacy_run_summaries_when_split_index_is_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            paths, _run_dir = prepare_dashboard_project(project)
+            workflow_config = load_workflow_config(project)
+            (paths.read_models_dir / "run_index.jsonl").unlink()
+            legacy_path = paths.read_models_dir / "run_summaries.jsonl"
+            legacy_path.write_text('{"legacy": true, "padding": "' + ("x" * 2048) + '"}\n', encoding="utf-8")
+            context = {
+                "project": project,
+                "paths": paths,
+                "workflow_id": workflow_config["workflow_id"],
+            }
+            original_read_jsonl = dashboard_module._read_jsonl
+
+            def guarded_read_jsonl(path: Path) -> list[dict[str, object]]:
+                if Path(path).resolve() == legacy_path.resolve():
+                    raise AssertionError("live selected dashboard data must not read legacy run_summaries.jsonl")
+                return original_read_jsonl(path)
+
+            dashboard_module._read_jsonl = guarded_read_jsonl
+            try:
+                payload = dashboard_module._dashboard_data_response(context)
+            finally:
+                dashboard_module._read_jsonl = original_read_jsonl
+
+            self.assertTrue(payload["ok"], json.dumps(payload, indent=2, sort_keys=True))
+            self.assertNotIn("run_summaries.jsonl", payload["jsonl_models"])
+            self.assertNotIn("run_index.jsonl", payload["jsonl_models"])
+            self.assertEqual(
+                payload["read_model_diagnostics"]["read_models"]["skipped_legacy_run_summaries"],
+                1,
+            )
+
+    def test_selected_dashboard_data_uses_split_index_without_reading_legacy_run_summaries(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            paths, _run_dir = prepare_dashboard_project(project)
+            workflow_config = load_workflow_config(project)
+            legacy_path = paths.read_models_dir / "run_summaries.jsonl"
+            legacy_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "1.5",
+                        "workflow_id": workflow_config["workflow_id"],
+                        "generated_at": "2026-06-24T00:00:00Z",
+                        "source_hashes": {},
+                        "run_id": "run_heavy_legacy",
+                        "node_id": "node_run_heavy_legacy",
+                        "detail_status": "available",
+                        "details": {"padding": "x" * 4096},
+                    },
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            context = {
+                "project": project,
+                "paths": paths,
+                "workflow_id": workflow_config["workflow_id"],
+            }
+            original_read_jsonl = dashboard_module._read_jsonl
+
+            def guarded_read_jsonl(path: Path) -> list[dict[str, object]]:
+                if Path(path).resolve() == legacy_path.resolve():
+                    raise AssertionError("selected dashboard data must use run_index.jsonl without reading legacy run_summaries.jsonl")
+                return original_read_jsonl(path)
+
+            dashboard_module._read_jsonl = guarded_read_jsonl
+            try:
+                payload = dashboard_module._dashboard_data_response(context)
+            finally:
+                dashboard_module._read_jsonl = original_read_jsonl
+
+            self.assertTrue(payload["ok"], json.dumps(payload, indent=2, sort_keys=True))
+            self.assertIn("run_index.jsonl", payload["jsonl_models"])
+            self.assertNotIn("run_summaries.jsonl", payload["jsonl_models"])
+            self.assertEqual(
+                payload["read_model_diagnostics"]["read_models"]["skipped_legacy_run_summaries"],
+                1,
+            )
+
+    def test_dashboard_benchmark_cli_reports_bounded_loading_operations(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            prepare_dashboard_project(project)
+
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(LoopPlane),
+                    "dashboard",
+                    "benchmark",
+                    "--project",
+                    str(project),
+                    "--iterations",
+                    "1",
+                    "--warmups",
+                    "0",
+                    "--json",
+                ],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr + completed.stdout)
+            payload = json.loads(completed.stdout)
+            self.assertTrue(payload["ok"], json.dumps(payload, indent=2, sort_keys=True))
+            self.assertEqual(payload["status"], "benchmarked")
+            operations = payload["operations"]
+            self.assertIn("dashboard_shell", operations)
+            self.assertIn("dashboard_data_etag", operations)
+            self.assertIn("selected_dashboard_data_cold_cache", operations)
+            self.assertIn("selected_dashboard_data_warm_cache", operations)
+            shell_sample = operations["dashboard_shell"]["samples"][0]
+            cold_sample = operations["selected_dashboard_data_cold_cache"]["samples"][0]
+            self.assertEqual(shell_sample["json_model_count"], 0)
+            self.assertEqual(shell_sample["jsonl_model_count"], 0)
+            self.assertGreater(cold_sample["payload_bytes"], 0)
+            self.assertIn("read_model_disk_read_bytes", cold_sample)
+            for operation in operations.values():
+                for sample in operation["samples"]:
+                    self.assertNotIn("read_models", sample)
+                    self.assertNotIn("jsonl_models", sample)
+
+    def test_dashboard_data_etag_does_not_parse_plan_index_json(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            paths, _run_dir = prepare_dashboard_project(project)
+            workflow_config = load_workflow_config(project)
+            context = {
+                "project": project,
+                "paths": paths,
+                "workflow_id": workflow_config["workflow_id"],
+            }
+            original_read_optional_json = dashboard_module._read_optional_json
+
+            def guarded_read_optional_json(path: Path) -> dict[str, object]:
+                if Path(path).resolve() == (paths.read_models_dir / "plan_index.json").resolve():
+                    raise AssertionError("dashboard-data ETag must not parse plan_index.json")
+                return original_read_optional_json(path)
+
+            dashboard_module._read_optional_json = guarded_read_optional_json
+            try:
+                etag = dashboard_module._dashboard_data_etag(context)
+            finally:
+                dashboard_module._read_optional_json = original_read_optional_json
+
+            self.assertTrue(etag.startswith('"dashboard-'))
+
+    def test_dashboard_data_etag_uses_bounded_legacy_active_lease_fingerprint(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            paths, _run_dir = prepare_dashboard_project(project)
+            workflow_config = load_workflow_config(project)
+            lease_dir = paths.runtime_dir / "active_run_leases"
+            lease_dir.mkdir(parents=True, exist_ok=True)
+            stamp_path = paths.runtime_dir / dashboard_module.ACTIVE_RUN_LEASE_FINGERPRINT_FILENAME
+            if stamp_path.exists():
+                stamp_path.unlink()
+            existing_count = len(list(lease_dir.glob("*.json")))
+            for index in range(80):
+                (lease_dir / f"run_legacy_{index:03d}.json").write_text(
+                    json.dumps(
+                        {
+                            "schema_version": "1.5",
+                            "workflow_id": workflow_config["workflow_id"],
+                            "run_id": f"run_legacy_{index:03d}",
+                            "status": "completed",
+                        },
+                        sort_keys=True,
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
+            context = {
+                "project": project,
+                "paths": paths,
+                "workflow_id": workflow_config["workflow_id"],
+            }
+            original_path_stat_fingerprint = dashboard_module._path_stat_fingerprint
+
+            def guarded_path_stat_fingerprint(root: Path, path: Path) -> dict[str, object]:
+                resolved = Path(path).resolve()
+                if resolved.parent == lease_dir.resolve() and resolved.suffix == ".json":
+                    raise AssertionError("dashboard-data ETag must not stat each legacy active-run lease")
+                return original_path_stat_fingerprint(root, path)
+
+            dashboard_module._path_stat_fingerprint = guarded_path_stat_fingerprint
+            try:
+                fingerprint = dashboard_module._active_run_leases_etag_fingerprint(project, paths)
+                etag = dashboard_module._dashboard_data_etag(context)
+            finally:
+                dashboard_module._path_stat_fingerprint = original_path_stat_fingerprint
+
+            self.assertEqual(fingerprint["mode"], "bounded_legacy_directory")
+            self.assertEqual(fingerprint["legacy_files"]["file_count"], existing_count + 80)
+            self.assertTrue(fingerprint["legacy_files"]["truncated"])
+            self.assertTrue(etag.startswith('"dashboard-'))
+
+    def test_dashboard_data_etag_uses_active_lease_stamp_when_available(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            paths, _run_dir = prepare_dashboard_project(project)
+            stamp_path = paths.runtime_dir / dashboard_module.ACTIVE_RUN_LEASE_FINGERPRINT_FILENAME
+            stamp_path.write_text('{"schema_version":"1.5","update_id":"stamp"}\n', encoding="utf-8")
+            original_bounded = dashboard_module._bounded_directory_name_fingerprints
+
+            def fail_bounded(*_args: object, **_kwargs: object) -> dict[str, object]:
+                raise AssertionError("stamp mode must not scan legacy active-run lease names")
+
+            dashboard_module._bounded_directory_name_fingerprints = fail_bounded
+            try:
+                fingerprint = dashboard_module._active_run_leases_etag_fingerprint(project, paths)
+            finally:
+                dashboard_module._bounded_directory_name_fingerprints = original_bounded
+
+            self.assertEqual(fingerprint["mode"], "stamp")
+            self.assertTrue(fingerprint["stamp"]["exists"])
+
+    def test_server_index_shell_does_not_load_selected_read_models(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            prepare_dashboard_project(project)
+            original_load_read_models = dashboard_module._load_read_models
+
+            def fail_if_read_models_loaded(*args: object, **kwargs: object) -> dict[str, object]:
+                raise AssertionError("server index shell must not load selected workflow read models")
+
+            dashboard_module._load_read_models = fail_if_read_models_loaded
+            try:
+                prepared = dashboard_module._prepare_dashboard_shell_payload(project)
+            finally:
+                dashboard_module._load_read_models = original_load_read_models
+
+            self.assertTrue(prepared["ok"], json.dumps(dashboard_module._public_result(prepared), indent=2, sort_keys=True))
+            payload = prepared["_payload"]
+            self.assertTrue(payload["initial_dashboard_load"])
+            self.assertEqual(payload["read_models"], {})
+            self.assertEqual(payload["jsonl_models"], {})
+            self.assertIn("workflow_summaries", payload)
+            self.assertNotIn("workflow_snapshots", payload)
+
+    def test_dashboard_freshness_falls_back_to_event_tail_when_manifest_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            paths, _run_dir = prepare_dashboard_project(project)
+            manifest_path = paths.runtime_dir / "events" / "manifest.json"
+            self.assertTrue(manifest_path.is_file())
+            manifest_path.unlink()
+
+            reference = dashboard_module._event_log_reference(paths)
+
+            self.assertEqual(reference["freshness_mode"], "event_tail")
+            self.assertIsNotNone(reference["source_event_id"])
 
     def test_static_dashboard_runner_config_is_read_only_until_trusted_local_mode(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -3059,7 +3594,7 @@ class StaticDashboardTest(unittest.TestCase):
             self.skipTest("127.0.0.1:3766 is already in use")
         with tempfile.TemporaryDirectory() as tmp:
             project = Path(tmp) / "project"
-            prepare_dashboard_project(project)
+            paths, _run_dir = prepare_dashboard_project(project)
             workflow = json.loads((project / ".loopplane" / "config" / "workflow.json").read_text(encoding="utf-8"))
             workflow_id = workflow["workflow_id"]
             process = subprocess.Popen(
@@ -3091,12 +3626,12 @@ class StaticDashboardTest(unittest.TestCase):
                 self.assertIn("Live Dashboard", html)
                 self.assertIn("loopplane_logo_dark.png", html)
                 self.assertIn("loopplane_logo_light.png", html)
-                self.assertIn("Full PLAN.md", html)
-                self.assertIn("graph-phase-group", html)
-                self.assertIn("graph-pipeline-scroll", html)
-                self.assertIn('data-graph-mode="phase_pipeline"', html)
                 self.assertIn("dashboard-refresh-button", html)
                 self.assertIn("Auto-refresh every 30s.", html)
+                server_payload = dashboard_script_payload(html)
+                self.assertTrue(server_payload["initial_dashboard_load"])
+                self.assertEqual(server_payload["read_models"], {})
+                self.assertEqual(server_payload["jsonl_models"], {})
                 js = request_text(f"{base}/static_dashboard.js", token)
                 css = request_text(f"{base}/static_dashboard.css", token)
                 logos = []
@@ -3133,8 +3668,78 @@ class StaticDashboardTest(unittest.TestCase):
                 self.assertEqual(workspace["workspace"]["current_workflow_id"], workflow_id)
                 status = request_json(f"{base}/api/workflows/{workflow_id}/status", token)
                 self.assertEqual(status["data"]["workflow_id"], workflow_id)
+                protected_read_models = [paths.read_models_dir / filename for filename in READ_MODEL_FILES]
+                diagnostics_before = file_hashes(project, protected_read_models)
+                strict_diagnostics = request_json(f"{base}/api/workflows/{workflow_id}/read-model-diagnostics", token)
+                diagnostics_after = file_hashes(project, protected_read_models)
+                self.assertEqual(diagnostics_after, diagnostics_before)
+                self.assertTrue(strict_diagnostics["ok"], json.dumps(strict_diagnostics, indent=2, sort_keys=True))
+                self.assertTrue(strict_diagnostics["strict"])
+                self.assertEqual(strict_diagnostics["checks"]["events"]["chain"]["status"], "pass")
+                self.assertTrue(str(strict_diagnostics["checks"]["events"]["events_sha256"]).startswith("sha256:"))
+                self.assertEqual(strict_diagnostics["checks"]["run_details"]["status"], "pass")
                 controls = request_json(f"{base}/api/workflows/{workflow_id}/control-requests", token)
                 self.assertEqual(controls["workflow_id"], workflow_id)
+                dashboard_url = f"{base}/api/workflows/{workflow_id}/dashboard-data"
+                status_code, dashboard_body, dashboard_headers = request_status_text(
+                    dashboard_url,
+                    token=token,
+                    headers={"Accept": "application/json"},
+                )
+                self.assertEqual(status_code, 200)
+                dashboard_payload = json.loads(dashboard_body)
+                self.assertTrue(dashboard_payload["ok"], json.dumps(dashboard_payload, indent=2, sort_keys=True))
+                self.assertTrue(dashboard_payload["plan_markdown"]["content"])
+                self.assertTrue(dashboard_payload["read_models"]["workflow_graph.json"]["nodes"])
+                self.assertIn("run_index.jsonl", dashboard_payload["jsonl_models"])
+                self.assertNotIn("run_summaries.jsonl", dashboard_payload["jsonl_models"])
+                self.assertEqual(dashboard_headers.get("X-LoopPlane-Dashboard-Result"), "full")
+                etag = dashboard_headers.get("ETag")
+                self.assertIsNotNone(etag)
+                self.assertEqual(dashboard_payload["dashboard_etag"], etag)
+                dashboard_diagnostics = dashboard_payload["dashboard_diagnostics"]
+                self.assertEqual(dashboard_diagnostics["response_mode"], "full")
+                self.assertGreaterEqual(dashboard_diagnostics["timings"]["etag_ms"], 0)
+                self.assertGreaterEqual(dashboard_diagnostics["timings"]["payload_build_ms"], 0)
+                self.assertGreaterEqual(dashboard_diagnostics["timings"]["total_ms"], 0)
+                diagnostics = dashboard_payload["read_model_diagnostics"]["read_models"]
+                self.assertTrue(diagnostics["cache_enabled"])
+                self.assertIn(workflow_id, diagnostics["scope"])
+                self.assertIn("cache_snapshot", diagnostics)
+                unchanged_status, unchanged_body, unchanged_headers = request_status_text(
+                    dashboard_url,
+                    token=token,
+                    headers={"Accept": "application/json", "If-None-Match": str(etag)},
+                )
+                self.assertEqual(unchanged_status, 304)
+                self.assertEqual(unchanged_body, "")
+                self.assertEqual(unchanged_headers.get("ETag"), etag)
+                self.assertEqual(unchanged_headers.get("X-LoopPlane-Dashboard-Result"), "not_modified")
+                self.assertIsNotNone(unchanged_headers.get("X-LoopPlane-Dashboard-Duration-Ms"))
+                alias_status, alias_body, alias_headers = request_status_text(
+                    f"{base}/api/dashboard?workflow={quote(workflow_id)}",
+                    token=token,
+                    headers={"Accept": "application/json", "If-None-Match": str(etag)},
+                )
+                self.assertEqual(alias_status, 304)
+                self.assertEqual(alias_body, "")
+                self.assertEqual(alias_headers.get("ETag"), etag)
+                append_event(
+                    paths,
+                    workflow_id=workflow_id,
+                    event_type="dashboard_etag_marker",
+                    data={"source": "test_cli_dashboard_fixed_port_3766_serves_static_assets_and_core_api"},
+                    snapshot_interval=None,
+                )
+                changed_status, changed_body, changed_headers = request_status_text(
+                    dashboard_url,
+                    token=token,
+                    headers={"Accept": "application/json", "If-None-Match": str(etag)},
+                )
+                self.assertEqual(changed_status, 200)
+                changed_payload = json.loads(changed_body)
+                self.assertTrue(changed_payload["ok"], json.dumps(changed_payload, indent=2, sort_keys=True))
+                self.assertNotEqual(changed_headers.get("ETag"), etag)
             finally:
                 process.terminate()
                 try:
@@ -3203,12 +3808,7 @@ class StaticDashboardTest(unittest.TestCase):
                 self.assertIn('class="app-header"', html)
                 self.assertIn("LoopPlane", html)
                 self.assertIn("Live Dashboard", html)
-                self.assertIn("Full PLAN.md", html)
                 self.assertIn("plan-view-toggle", html)
-                self.assertIn("graph-phase-group", html)
-                self.assertIn("graph-overview", html)
-                self.assertIn("graph-pipeline-scroll", html)
-                self.assertIn('data-graph-mode="phase_pipeline"', html)
                 self.assertIn("panel-collapse-toggle", html)
                 self.assertIn('data-panel-key="runner"', html)
                 self.assertIn('id="theme-toggle"', html)
@@ -3224,46 +3824,53 @@ class StaticDashboardTest(unittest.TestCase):
                 self.assertIn('data-control-action="pause"', html)
                 self.assertIn('data-control-action="resume"', html)
                 self.assertIn('data-control-action="stop"', html)
-                self.assertIn("Creates dashboard request records only", html)
                 self.assertIn("Inspector Chat / Change Request Console", html)
                 self.assertIn("inspector-chat-form", html)
                 self.assertIn("change-request-form", html)
-                self.assertIn(f'/api/workflows/{workflow_id}/chat', html)
-                self.assertIn(f'/api/workflows/{workflow_id}/change-requests', html)
                 server_payload = dashboard_script_payload(html)
                 self.assertTrue(server_payload["server_mode"])
+                self.assertTrue(server_payload["initial_dashboard_load"])
+                self.assertEqual(server_payload["read_models"], {})
+                self.assertEqual(server_payload["jsonl_models"], {})
+                self.assertIn("workflow_summaries", server_payload)
+                self.assertNotIn("workflow_snapshots", server_payload)
+
+                dashboard_payload = request_json(f"{base}/api/workflows/{workflow_id}/dashboard-data", token)
+                self.assertTrue(dashboard_payload["server_mode"])
                 self.assertEqual(
-                    path_content_records(server_payload["node_details"]),
+                    path_content_records(dashboard_payload["node_details"]),
                     [],
                     "live dashboard node_details should lazy-load file content",
                 )
+                self.assertIn("run_index.jsonl", dashboard_payload["jsonl_models"])
+                self.assertNotIn("run_summaries.jsonl", dashboard_payload["jsonl_models"])
                 self.assertEqual(
-                    path_content_records(server_payload["jsonl_models"]["run_summaries.jsonl"]),
+                    path_content_records(dashboard_payload["jsonl_models"]["run_index.jsonl"]),
                     [],
-                    "live dashboard run_summaries should lazy-load file content",
+                    "live dashboard run_index should not carry run detail content",
                 )
                 self.assertEqual(
-                    path_content_records(server_payload["read_models"]["plan_index.json"]),
+                    path_content_records(dashboard_payload["read_models"]["plan_index.json"]),
                     [],
                     "live dashboard plan_index summaries should lazy-load markdown content",
                 )
                 self.assertEqual(
-                    path_content_records(server_payload["read_models"]["workflow_graph.json"]),
+                    path_content_records(dashboard_payload["read_models"]["workflow_graph.json"]),
                     [],
                     "live dashboard workflow_graph summaries should lazy-load markdown content",
                 )
-                self.assertTrue(server_payload["planning_controls"]["mutation_allowed"])
+                self.assertTrue(dashboard_payload["planning_controls"]["mutation_allowed"])
                 self.assertEqual(
-                    server_payload["planning_controls"]["endpoints"],
+                    dashboard_payload["planning_controls"]["endpoints"],
                     {
                         "plan": f"/api/workflows/{workflow_id}/plan",
                         "audit": f"/api/workflows/{workflow_id}/audit",
                         "activate_plan": f"/api/workflows/{workflow_id}/activate-plan",
                     },
                 )
-                self.assertTrue(server_payload["execution_controls"]["mutation_allowed"])
+                self.assertTrue(dashboard_payload["execution_controls"]["mutation_allowed"])
                 self.assertEqual(
-                    server_payload["execution_controls"]["endpoints"],
+                    dashboard_payload["execution_controls"]["endpoints"],
                     {
                         "start": f"/api/workflows/{workflow_id}/control-requests",
                         "pause": f"/api/workflows/{workflow_id}/control-requests",
@@ -3271,16 +3878,16 @@ class StaticDashboardTest(unittest.TestCase):
                         "stop": f"/api/workflows/{workflow_id}/control-requests",
                     },
                 )
-                self.assertTrue(server_payload["read_model_rebuild"]["mutation_allowed"])
+                self.assertTrue(dashboard_payload["read_model_rebuild"]["mutation_allowed"])
                 self.assertEqual(
-                    server_payload["read_model_rebuild"]["endpoint"],
+                    dashboard_payload["read_model_rebuild"]["endpoint"],
                     f"/api/workflows/{workflow_id}/rebuild-read-models",
                 )
-                self.assertTrue(server_payload["inspector_console"]["mutation_allowed"])
-                self.assertTrue(server_payload["inspector_console"]["chat_allowed"])
-                self.assertTrue(server_payload["inspector_console"]["change_request_allowed"])
+                self.assertTrue(dashboard_payload["inspector_console"]["mutation_allowed"])
+                self.assertTrue(dashboard_payload["inspector_console"]["chat_allowed"])
+                self.assertTrue(dashboard_payload["inspector_console"]["change_request_allowed"])
                 self.assertEqual(
-                    server_payload["inspector_console"]["endpoints"],
+                    dashboard_payload["inspector_console"]["endpoints"],
                     {
                         "chat": f"/api/workflows/{workflow_id}/chat",
                         "change_request": f"/api/workflows/{workflow_id}/change-requests",
@@ -3303,7 +3910,7 @@ class StaticDashboardTest(unittest.TestCase):
                 run_id = next(node["run_id"] for node in graph["data"]["nodes"] if node.get("run_id"))
                 run_detail = request_json(f"{base}/api/workflows/{workflow_id}/runs/{run_id}", token)
                 self.assertEqual(run_detail["run_id"], run_id)
-                self.assertEqual(run_detail["source"], "run_summaries.jsonl")
+                self.assertEqual(run_detail["source"], "run_details")
                 self.assertEqual(run_detail["node_detail"]["run_id"], run_id)
                 api_sections = sections_by_key(run_detail["node_detail"])
                 direct_sections = sections_by_key(run_detail["details"])
@@ -3548,14 +4155,14 @@ class StaticDashboardTest(unittest.TestCase):
 
                 html = request_text(f"{base}/?token={token}", token)
                 self.assertIn("Approval Panel", html)
-                self.assertIn("2 pending approval requests", html)
-                self.assertIn("approval-response-form", html)
-                self.assertIn("Approve server panel fixture.", html)
                 server_payload = dashboard_script_payload(html)
-                self.assertEqual(server_payload["approval_controls"]["pending_count"], 2)
-                self.assertTrue(server_payload["approval_controls"]["mutation_allowed"])
+                self.assertTrue(server_payload["initial_dashboard_load"])
+                self.assertEqual(server_payload["approval_controls"]["status"], "loading")
+                dashboard_data = request_json(f"{base}/api/workflows/{workflow_id}/dashboard-data", token)
+                self.assertEqual(dashboard_data["approval_controls"]["pending_count"], 2)
+                self.assertTrue(dashboard_data["approval_controls"]["mutation_allowed"])
                 self.assertEqual(
-                    server_payload["approval_controls"]["pending"][0]["respond_endpoint"],
+                    dashboard_data["approval_controls"]["pending"][0]["respond_endpoint"],
                     f"/api/workflows/{workflow_id}/approvals/approval_server_approve/respond",
                 )
 
@@ -3673,20 +4280,26 @@ class StaticDashboardTest(unittest.TestCase):
                 endpoint = f"{base}/api/workflows/{workflow_id}/rebuild-read-models"
 
                 html = request_text(f"{base}/?token={token}", token)
-                self.assertIn("Live Refresh In Progress", html)
-                self.assertIn("Read Models Are Refreshing", html)
-                self.assertIn("read-model-rebuild-form", html)
-                self.assertIn(f"/api/workflows/{workflow_id}/rebuild-read-models", html)
-                self.assertIn("Live Refresh Running", html)
-                self.assertNotIn("Create Rebuild Request", re.search(r'<form id="read-model-rebuild-form".+?</form>', html, re.S).group(0))
-                self.assertIn('data-rebuild-action="rebuild_read_models" disabled', html)
                 payload = dashboard_script_payload(html)
-                self.assertEqual(payload["read_model_freshness"]["status"], "stale")
-                self.assertEqual(payload["read_model_freshness"]["event_log"]["source_event_id"], stale_event["event_id"])
-                self.assertTrue(payload["read_model_rebuild"]["mutation_allowed"])
-                self.assertTrue(payload["read_model_rebuild"]["request_allowed"])
-                self.assertFalse(payload["read_model_rebuild"]["rebuild_in_progress"])
+                self.assertTrue(payload["initial_dashboard_load"])
+                self.assertEqual(payload["read_models"], {})
+                self.assertEqual(payload["jsonl_models"], {})
+                self.assertIn("workflow_summaries", payload)
+                self.assertNotIn("workflow_snapshots", payload)
+                self.assertEqual(payload["read_model_freshness"]["status"], "loading")
                 self.assertEqual(payload["read_model_rebuild"]["endpoint"], f"/api/workflows/{workflow_id}/rebuild-read-models")
+
+                dashboard_data = request_json(f"{base}/api/workflows/{workflow_id}/dashboard-data", token)
+                self.assertEqual(dashboard_data["read_model_freshness"]["status"], "stale")
+                self.assertEqual(dashboard_data["read_model_freshness"]["event_log"]["source_event_id"], stale_event["event_id"])
+                self.assertEqual(dashboard_data["read_model_freshness"]["event_log"]["freshness_mode"], "event_manifest")
+                self.assertTrue(dashboard_data["read_model_rebuild"]["mutation_allowed"])
+                self.assertTrue(dashboard_data["read_model_rebuild"]["request_allowed"])
+                self.assertFalse(dashboard_data["read_model_rebuild"]["rebuild_in_progress"])
+                self.assertEqual(
+                    dashboard_data["read_model_rebuild"]["endpoint"],
+                    f"/api/workflows/{workflow_id}/rebuild-read-models",
+                )
 
                 status_code, unauthorized = request_json_status(endpoint, body={"reason": "missing token"})
                 self.assertEqual(status_code, 401)
@@ -3713,8 +4326,9 @@ class StaticDashboardTest(unittest.TestCase):
                 self.assertEqual(control_requests[-1]["source"], "dashboard_api")
                 self.assertEqual(control_requests[-1]["payload"]["reason"], "dashboard stale read model smoke")
                 dashboard_data = request_json(f"{base}/api/workflows/{workflow_id}/dashboard-data", token)
-                self.assertEqual(dashboard_data["read_model_freshness"]["status"], "current")
+                self.assertEqual(dashboard_data["read_model_freshness"]["status"], "stale")
                 self.assertTrue(dashboard_data["rebuild_read_models"]["ok"])
+                self.assertEqual(dashboard_data["rebuild_read_models"]["status"], "rebuild_not_started")
                 self.assertEqual(dashboard_data["read_model_rebuild"]["pending_count"], 1)
                 self.assertEqual(dashboard_data["read_model_rebuild"]["recent"][-1]["type"], "rebuild_read_models")
                 self.assertFalse((paths.requests_dir / "dashboard_requests.jsonl").exists())
@@ -3789,10 +4403,17 @@ class StaticDashboardTest(unittest.TestCase):
 
                 set_dashboard_trusted_local(project, True)
                 trusted_html = request_text(f"{base}/?token={token}", token)
-                self.assertIn("runner-config-request-form", trusted_html)
-                self.assertIn('<option value="worker" selected>worker</option>', trusted_html)
-                self.assertIn('name="timeout_seconds" type="number" min="1" value="21600"', trusted_html)
-                self.assertIn("21600s (6h safety ceiling)", trusted_html)
+                trusted_shell = dashboard_script_payload(trusted_html)
+                self.assertTrue(trusted_shell["initial_dashboard_load"])
+                trusted_dashboard = request_json(f"{base}/api/workflows/{workflow_id}/dashboard-data", token)
+                self.assertTrue(trusted_dashboard["runner_configuration"]["trusted_local_mode"])
+                self.assertTrue(
+                    any(
+                        runner["runner_id"] == "worker"
+                        and runner["timeout_seconds"] == 21600
+                        for runner in trusted_dashboard["runner_configuration"]["runners"]
+                    )
+                )
                 trusted_runners = request_json(runners_url, token)
                 self.assertEqual(trusted_runners["status"], "trusted_local")
                 self.assertTrue(trusted_runners["runner_configuration"]["trusted_local_mode"])

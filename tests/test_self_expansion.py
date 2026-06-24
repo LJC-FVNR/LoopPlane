@@ -430,6 +430,87 @@ class SelfExpansionTest(unittest.TestCase):
             self.assertEqual(registry["proposals"][0]["failure_resolution_status"], "pending_evidence")
             self.assertEqual(registry["proposals"][0]["target_phase_id"], "P0")
 
+    def test_pending_reopen_evidence_task_runs_before_reexpanding_same_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "Run pending reopen evidence before re-expanding.")
+            write_plan(project, first_status="x", second_status="x")
+            record_active_plan(project)
+            write_failure(project)
+            proposal_path = write_patch_and_proposal(project)
+
+            result = apply_expansion_proposal(project, proposal_path, run_id="run_expansion_fixture", runner_id="expansion_planner")
+
+            self.assertTrue(result["ok"], result)
+            action = select_next_action(load_scheduler_snapshot(project))
+            self.assertEqual(action["action"], "run_worker")
+            self.assertEqual(action["selected"]["task_id"], "SE001")
+
+    def test_unfinished_sibling_reopen_evidence_defers_failure_resolution(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "Finish sibling evidence before reopening.")
+            write_plan(project, first_status="x", second_status="x")
+            plan_path = project / "PLAN.md"
+            plan_path.write_text(
+                plan_path.read_text(encoding="utf-8")
+                + """
+- [ ] T003: Materialize reopen evidence bundle
+  - acceptance: Bundle exists.
+  - evidence: .loopplane/results/T003/
+  - latest: .loopplane/results/T003/latest.json
+  - depends_on: [T002]
+  - risk: low
+  - validation: file_exists: report.md
+  - max_attempts: 1
+  - approval: not_required
+  - deliverables: report.md
+""",
+                encoding="utf-8",
+            )
+            record_active_plan(project)
+            write_failure(project)
+            workflow_id = json.loads((project / ".loopplane" / "config" / "workflow.json").read_text(encoding="utf-8"))["workflow_id"]
+            write_json(
+                project / ".loopplane" / "runtime" / "expansion_registry.json",
+                {
+                    "schema_version": "1.5",
+                    "workflow_id": workflow_id,
+                    "cycle": 2,
+                    "events": [],
+                    "proposals": [
+                        {
+                            "schema_version": "1.5",
+                            "proposal_id": "exp_audit",
+                            "workflow_id": workflow_id,
+                            "status": "applied",
+                            "expansion_type": "failed_recovery_decomposition",
+                            "resolution_strategy": "reopen_failure_after_new_evidence",
+                            "target_task_ids": ["T001"],
+                            "target_failure_ids": ["fail_T001"],
+                            "added_task_ids": ["T002"],
+                            "failure_resolution_status": "pending_evidence",
+                        },
+                        {
+                            "schema_version": "1.5",
+                            "proposal_id": "exp_bundle",
+                            "workflow_id": workflow_id,
+                            "status": "applied",
+                            "expansion_type": "failed_recovery_decomposition",
+                            "resolution_strategy": "reopen_failure_after_new_evidence",
+                            "target_task_ids": ["T001"],
+                            "target_failure_ids": ["fail_T001"],
+                            "added_task_ids": ["T003"],
+                            "failure_resolution_status": "pending_evidence",
+                        },
+                    ],
+                },
+            )
+
+            action = select_next_action(load_scheduler_snapshot(project))
+            self.assertEqual(action["action"], "run_worker")
+            self.assertEqual(action["selected"]["task_id"], "T003")
+
     def test_target_task_recovery_expansion_must_stay_in_target_phase(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             project = Path(tmp) / "project"
