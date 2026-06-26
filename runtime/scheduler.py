@@ -3484,6 +3484,7 @@ def _handle_control_request(
     current_status = str(current_state.get("status") or "unknown")
     response_status = "applied" if action in CONTROL_REQUEST_TYPES else "rejected"
     message = "Control request applied."
+    response_details: dict[str, Any] = {}
     scheduler_update: dict[str, Any] = {
         "last_action": "handle_control_request",
         "last_control_request_id": request_id,
@@ -3523,9 +3524,25 @@ def _handle_control_request(
         scheduler_update["migration_status"] = "not_required"
         scheduler_update["migration_checked_at"] = utc_timestamp()
         message = "Migration request applied; no migration is required for the current schema version."
-    elif action in {"cancel_run", "cancel_background_job", "rebuild_read_models", "run_final_verifier"}:
+    elif action in {"cancel_run", "cancel_background_job", "run_final_verifier"}:
         scheduler_update[f"last_{action}_request_id"] = request_id
         message = f"{action} control request recorded for a later execution phase."
+    elif action == "rebuild_read_models":
+        from runtime.read_models import rebuild_read_models
+
+        payload = request.get("payload") if isinstance(request.get("payload"), Mapping) else {}
+        max_dashboard_events = _positive_config_int(payload.get("max_dashboard_events")) if isinstance(payload, Mapping) else None
+        rebuild_result = rebuild_read_models(
+            paths.project_root,
+            write=True,
+            workflow_id=str(snapshot.get("workflow_id") or ""),
+            max_dashboard_events=max_dashboard_events,
+        )
+        response_status = "applied" if rebuild_result.get("ok") is True else "rejected"
+        scheduler_update[f"last_{action}_request_id"] = request_id
+        scheduler_update["last_read_model_rebuild_status"] = rebuild_result.get("status")
+        message = "Read models rebuilt by control request." if response_status == "applied" else "Read model rebuild failed."
+        response_details["read_model_rebuild"] = dict(rebuild_result)
     resulting_status = runtime_status or current_status
     response = {
         "schema_version": SCHEMA_VERSION,
@@ -3538,6 +3555,7 @@ def _handle_control_request(
         "resulting_workflow_status": resulting_status,
         "message": message,
     }
+    response.update(response_details)
     if response_status == "applied" and runtime_status in {"running", "paused", "stopped"}:
         try:
             registry_update = mark_workflow_runtime_status(

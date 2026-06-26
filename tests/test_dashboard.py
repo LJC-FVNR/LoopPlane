@@ -4327,6 +4327,89 @@ class StaticDashboardTest(unittest.TestCase):
                 if process.stderr is not None:
                     process.stderr.close()
 
+    def test_dashboard_rebuild_endpoint_rebuilds_without_pending_control_request(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            paths, run_dir = prepare_dashboard_project(project)
+            workflow = json.loads((project / ".loopplane" / "config" / "workflow.json").read_text(encoding="utf-8"))
+            workflow_id = workflow["workflow_id"]
+            stale_event = append_event(
+                paths,
+                workflow_id=workflow_id,
+                event_type="dashboard_manual_rebuild_stale_marker",
+                data={"task_id": "T001"},
+                snapshot_interval=None,
+            )
+            read_model_paths = [paths.read_models_dir / filename for filename in READ_MODEL_FILES]
+            authoritative_paths = [
+                project / "PLAN.md",
+                paths.runtime_dir / "state.json",
+                paths.runtime_dir / "events" / "events_000001.jsonl",
+                paths.results_dir / "T001" / "latest.json",
+                run_dir / "validation.json",
+            ]
+            read_models_before = file_hashes(project, read_model_paths)
+            authoritative_before = file_hashes(project, authoritative_paths)
+            port = free_local_port()
+            process = subprocess.Popen(
+                [
+                    sys.executable,
+                    str(LoopPlane),
+                    "dashboard",
+                    "--project",
+                    str(project),
+                    "--port",
+                    str(port),
+                    "--json",
+                ],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            try:
+                startup = read_server_startup(process)
+                token = (project / str(startup["token_file"])).read_text(encoding="utf-8").strip()
+                base = f"http://127.0.0.1:{port}"
+                endpoint = f"{base}/api/workflows/{workflow_id}/rebuild-read-models"
+
+                html = request_text(f"{base}/?token={token}", token)
+                payload = dashboard_script_payload(html)
+                self.assertTrue(payload["initial_dashboard_load"])
+
+                status_code, result = request_json_status(
+                    endpoint,
+                    token=token,
+                    body={"reason": "dashboard manual rebuild smoke", "source": "dashboard_ui"},
+                    headers={"Origin": base},
+                )
+                self.assertEqual(status_code, 202)
+                self.assertTrue(result["ok"], json.dumps(result, indent=2, sort_keys=True))
+                self.assertEqual(result["status"], "rebuilt")
+                self.assertFalse(result["read_model_rebuild_request_only"])
+                self.assertEqual(result["request"]["freshness"]["status"], "stale")
+                self.assertEqual(result["request"]["freshness"]["event_log"]["source_event_id"], stale_event["event_id"])
+                self.assertEqual(result["read_model_rebuild"]["status"], "rebuilt")
+                self.assertNotEqual(file_hashes(project, read_model_paths), read_models_before)
+                self.assertEqual(file_hashes(project, authoritative_paths), authoritative_before)
+
+                control_requests_path = paths.runtime_dir / "control_requests.jsonl"
+                if control_requests_path.exists():
+                    self.assertFalse(any(record.get("type") == "rebuild_read_models" for record in read_jsonl(control_requests_path)))
+                dashboard_data = request_json(f"{base}/api/workflows/{workflow_id}/dashboard-data", token)
+                self.assertEqual(dashboard_data["read_model_freshness"]["status"], "current")
+                self.assertEqual(dashboard_data["read_model_freshness"]["event_log"]["source_event_id"], stale_event["event_id"])
+            finally:
+                process.terminate()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=5)
+                if process.stdout is not None:
+                    process.stdout.close()
+                if process.stderr is not None:
+                    process.stderr.close()
+
     def test_dashboard_runner_config_api_requires_trusted_local_and_records_request_only(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             project = Path(tmp) / "project"

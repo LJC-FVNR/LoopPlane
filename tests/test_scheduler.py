@@ -23,6 +23,7 @@ from runtime.exit_codes import (
 )
 from runtime.init_workflow import init_project
 from runtime.prompt_builder import PromptBuildError
+from runtime.read_models import READ_MODEL_FILES, rebuild_read_models
 from runtime.scheduler import (
     EXIT_DUPLICATE_SCHEDULER,
     AtomicOwnerLock,
@@ -306,6 +307,50 @@ class SchedulerSelectionTest(unittest.TestCase):
             next_action = select_next_action(load_scheduler_snapshot(project))
             self.assertEqual(next_action["action"], "wait_paused")
             self.assertEqual(next_action["selected"]["last_control_request_id"], synthetic_id)
+
+    def test_rebuild_read_models_control_request_rebuilds_read_models(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "Rebuild read models control request.")
+            workflow = json.loads((project / ".loopplane" / "config" / "workflow.json").read_text(encoding="utf-8"))
+            context = load_scheduler_context(project)["context"]
+            paths = context.paths
+            first = rebuild_read_models(project)
+            self.assertTrue(first["ok"], json.dumps(first, indent=2, sort_keys=True))
+            append_event(
+                paths,
+                workflow_id=workflow["workflow_id"],
+                event_type="scheduler_rebuild_control_stale_marker",
+                data={"source": "test"},
+                snapshot_interval=None,
+            )
+            read_model_paths = [paths.read_models_dir / filename for filename in READ_MODEL_FILES]
+            before = {path.relative_to(project).as_posix(): sha256(path.read_bytes()).hexdigest() for path in read_model_paths}
+            append_jsonl(
+                paths.runtime_dir / "control_requests.jsonl",
+                {
+                    "schema_version": "1.5",
+                    "request_id": "ctrl_rebuild_read_models",
+                    "type": "rebuild_read_models",
+                    "status": "pending",
+                    "workflow_id": workflow["workflow_id"],
+                    "payload": {"max_dashboard_events": 50},
+                },
+            )
+
+            selected = select_next_action(load_scheduler_snapshot(project))
+            self.assertEqual(selected["action"], "handle_control_request")
+            self.assertEqual(selected["selected"]["request"]["type"], "rebuild_read_models")
+
+            result = run_scheduler(project, max_ticks=1)
+
+            self.assertEqual(result["exit_code"], 0, json.dumps(result, indent=2, sort_keys=True))
+            response = read_jsonl(paths.runtime_dir / "control_responses.jsonl")[-1]
+            self.assertEqual(response["request_id"], "ctrl_rebuild_read_models")
+            self.assertEqual(response["status"], "applied")
+            self.assertEqual(response["read_model_rebuild"]["status"], "rebuilt")
+            after = {path.relative_to(project).as_posix(): sha256(path.read_bytes()).hexdigest() for path in read_model_paths}
+            self.assertNotEqual(after, before)
 
     def test_waiting_approval_is_selected_before_background_or_work(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -5457,6 +5457,7 @@ def _record_control_request(
 
 
 def _record_read_model_rebuild_request(context: Mapping[str, Any], body: Mapping[str, Any]) -> dict[str, Any]:
+    project = context["project"]
     paths = context["paths"]
     models = _load_read_models(
         paths.read_models_dir,
@@ -5466,24 +5467,41 @@ def _record_read_model_rebuild_request(context: Mapping[str, Any], body: Mapping
     if not models["errors"]:
         freshness = _read_model_freshness(context["project"], paths, models["json"])
     reason = _bounded_text(body.get("reason"), limit=500)
-    payload: dict[str, Any] = {
+    max_dashboard_events = _optional_positive_int(context.get("max_dashboard_events")) or _dashboard_payload_event_limit(
+        paths,
+        explicit_limit=None,
+        rebuild_result=None,
+    )
+    request = {
         "source": str(body.get("source") or "dashboard_api"),
-        "request_channel": "control_requests",
         "requested_action": "rebuild_read_models",
-        "mutation_policy": "request_record_only",
-        "dashboard_must_not_rebuild_directly": True,
-        "max_dashboard_events": _optional_positive_int(context.get("max_dashboard_events")) or _dashboard_payload_event_limit(
-            paths,
-            explicit_limit=None,
-            rebuild_result=None,
-        ),
+        "mutation_policy": "direct_read_model_rebuild",
+        "max_dashboard_events": max_dashboard_events,
         "freshness": _freshness_request_summary(freshness, errors=models["errors"]),
     }
     if reason:
-        payload["reason"] = reason
-    result = _record_control_request(context, "rebuild_read_models", payload=payload)
-    result["read_model_rebuild_request_only"] = True
-    return result
+        request["reason"] = reason
+    rebuild_result = rebuild_read_models(
+        project,
+        write=True,
+        workflow_id=str(context["workflow_id"]),
+        max_dashboard_events=max_dashboard_events,
+    )
+    ok = rebuild_result.get("ok") is True
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "ok": ok,
+        "status": str(rebuild_result.get("status") or ("rebuilt" if ok else "read_model_rebuild_failed")),
+        "project_root": project.as_posix(),
+        "workflow_id": context["workflow_id"],
+        "request": request,
+        "request_record_only": False,
+        "read_model_rebuild_request_only": False,
+        "read_model_rebuild": dict(rebuild_result),
+        "files_written": list(rebuild_result.get("written_files") or []),
+        "errors": list(rebuild_result.get("errors") or []),
+        "warnings": list(rebuild_result.get("warnings") or []),
+    }
 
 
 def _freshness_request_summary(freshness: Mapping[str, Any], *, errors: Sequence[Any]) -> dict[str, Any]:
