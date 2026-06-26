@@ -85,23 +85,8 @@
     if (!payload) {
       return;
     }
-    activePayload = payload;
-    mountPanelCollapses();
-    mountWorkspaceSelector(payload);
-    mountGraphOverflow();
-    mountGraphExpandToggle();
-    mountNodeDetails(payload);
-    mountRunnerConfigForm(payload);
-    mountPlanningControlForm(payload);
-    mountExecutionControlForm(payload);
-    mountReadModelRebuildForm(payload);
-    mountApprovalResponseForms(payload);
-    mountInspectorConsoleForms(payload);
-    mountRefreshControls(payload);
-    mountPlanViewToggle();
-    mountReadModelLinks();
-    mountFilePreviewActions(payload);
-    loadRequestedWorkflowFromLocation(payload);
+    applyPayload(payload);
+    loadRequestedWorkflowFromLocation(activePayload || payload);
   }
 
   function text(value) {
@@ -3230,6 +3215,7 @@
     setHtml("approval-alert-shell", renderApprovalTopAlert(approvalControls));
     setHtml("freshness-banner-shell", renderFreshnessBanner(payload));
     setMetric("elapsed", workflowElapsedLabel(payload, workflowStatus, workflowGraph, feed));
+    mountWorkspaceSelector(payload);
     setHtml("plan-panel-body", renderPlanPanel(planIndex, payload.plan_markdown || {}, workflowGraph, payload));
     setHtml("graph-panel-body", renderGraphPanel(workflowGraph, planIndex));
     setHtml("node-detail-body", '<p class="empty-state">No node selected.</p>');

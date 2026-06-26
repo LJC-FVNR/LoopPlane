@@ -507,7 +507,7 @@ def doctor_agent_runners(
     optional_results = [
         result
         for result in results
-        if result.get("status") != DOCTOR_STATUS_OK and all_runners and result.get("enabled") is False
+        if all_runners and result.get("enabled") is False
     ]
     status = AGENT_COMMAND_STATUS_OK if not blocking_results else AGENT_COMMAND_STATUS_WAITING_CONFIG
     errors = [
@@ -515,7 +515,7 @@ def doctor_agent_runners(
         for result in blocking_results
     ]
     warnings = [
-        f"{result['runner_id']}: optional disabled runner skipped by default; configure it only if this workflow needs that runner. {result.get('message', 'runner requires configuration')}"
+        f"{result['runner_id']}: optional disabled runner skipped by default; enable or configure it only if this workflow needs that runner. {result.get('message', 'runner requires configuration')}"
         for result in optional_results
     ]
     next_steps = _doctor_next_steps(config, results)

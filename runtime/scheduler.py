@@ -1323,7 +1323,11 @@ def select_next_action(snapshot: Mapping[str, Any]) -> dict[str, Any]:
     considered.append({"candidate": "self_expansion_resolution", "result": "none"})
 
     recovery_expansion = expansion_candidate(snapshot, mode="no_executable")
-    if recovery_expansion is not None and str(recovery_expansion.get("trigger") or "") == "recovery_exhausted":
+    if (
+        recovery_expansion is not None
+        and str(recovery_expansion.get("trigger") or "") == "recovery_exhausted"
+        and _next_executable_task(snapshot) is not None
+    ):
         expansion_action = _self_expansion_selected_action(
             snapshot,
             recovery_expansion,

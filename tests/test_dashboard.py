@@ -1366,7 +1366,11 @@ class StaticDashboardTest(unittest.TestCase):
             )
             current_before = current_path.read_bytes()
 
-            result = render_static_dashboard(project, output_dir=project / "dashboard_browser_static")
+            result = render_static_dashboard(
+                project,
+                output_dir=project / "dashboard_browser_static",
+                embed_workflow_snapshots=True,
+            )
 
             self.assertTrue(result["ok"], json.dumps(result, indent=2, sort_keys=True))
             self.assertEqual(result["status"], "rendered_with_warnings")
