@@ -158,6 +158,11 @@ def schema_targets(project_root: Path | str, workflow_config: Mapping[str, Any] 
     targets.append(SchemaTarget(".loopplane/config/local/agent_runners.local.json", "agent_runners_local.schema.json", required=False))
     version_control_path = paths.value("version_control_config_file")
     targets.append(SchemaTarget(version_control_path, CONFIG_SCHEMA_FILES["version_control.json"]))
+    targets.append(SchemaTarget(f"{paths.workflow_root_value}/template_instance.json", "template_instance.schema.json", required=False))
+    presets_dir = project / ".loopplane" / "presets"
+    if presets_dir.exists():
+        for preset_path in sorted(presets_dir.glob("*.json")):
+            targets.append(SchemaTarget(_path_for_record(project, preset_path), "workflow_preset.schema.json", required=False))
 
     runtime_dir = paths.value("runtime_dir")
     read_models_dir = paths.value("read_models_dir")
@@ -399,6 +404,26 @@ def validate_project_schemas(project_root: Path | str) -> dict[str, Any]:
         checked_files.append(target.relative_path)
         schema = _load_schema(target.schema_file)
         schemas_used.append(target.schema_file)
+        if target.kind == "jsonl":
+            records, read_error = _read_jsonl_values(path)
+            if read_error:
+                errors.append(f"{target.relative_path}: {read_error}")
+                continue
+            for line_number, record in records:
+                location = f"{target.relative_path}:{line_number}"
+                errors.extend(_validate_against_schema(record, schema, location))
+                if isinstance(record, Mapping):
+                    errors.extend(
+                        _custom_json_checks(
+                            location,
+                            record,
+                            workflow_id=workflow_id,
+                            workspace_id=workspace_id,
+                            registry_workflow_ids=registry_workflow_ids,
+                            current_workflow_id=current_workflow_id,
+                        )
+                    )
+            continue
         data, read_error = _read_json_value(path)
         if read_error:
             errors.append(f"{target.relative_path}: {read_error}")
@@ -786,6 +811,10 @@ def _expected_schema_version_for_target(relative_path: str) -> str | None:
     if relative_path in V16_SCHEMA_VERSION_PROJECT_TARGETS:
         return WORKSPACE_SCHEMA_VERSION
     if relative_path in SCHEMA_VERSION_VALIDATED_BY_SCHEMA_ONLY:
+        return None
+    if relative_path.endswith("/template_instance.json"):
+        return None
+    if relative_path.startswith(".loopplane/presets/") and relative_path.endswith(".json"):
         return None
     if relative_path.endswith("/schema_version.json"):
         return None

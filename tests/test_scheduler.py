@@ -1042,6 +1042,38 @@ class SchedulerSelectionTest(unittest.TestCase):
             project = Path(tmp) / "project"
             init_project(project, "Dead active lease fixture.")
             write_active_plan(project, {"P0.T001": " ", "P1.T001": " "})
+            worker_script = write_worker_script(
+                project,
+                "lease_reclaim_worker.py",
+                """
+                import json
+                import os
+                from pathlib import Path
+
+                run_dir = Path(os.environ["LOOPPLANE_TASK_EVIDENCE_RUN_DIR"])
+                run_dir.mkdir(parents=True, exist_ok=True)
+                (run_dir / "report.md").write_text("lease reclaim worker completed\\n", encoding="utf-8")
+                (run_dir / "commands.sh").write_text("python lease_reclaim_worker.py\\n", encoding="utf-8")
+                status = {
+                    "schema_version": "1.5",
+                    "run_id": os.environ["LOOPPLANE_RUN_ID"],
+                    "task_id": os.environ["LOOPPLANE_TASK_ID"],
+                    "primary_task_id": os.environ["LOOPPLANE_TASK_ID"],
+                    "status": "completed",
+                    "validation_claim": "ready_for_validation",
+                    "summary_candidate": "Lease reclaim worker completed.",
+                    "evidence_satisfies": ["report.md"],
+                    "commands": [{"cmd": "python lease_reclaim_worker.py", "exit_code": 0}],
+                    "known_risks": [],
+                    "incomplete_items": [],
+                }
+                (run_dir / "agent_status.json").write_text(
+                    json.dumps(status, indent=2, sort_keys=True) + "\\n",
+                    encoding="utf-8",
+                )
+                """,
+            )
+            configure_shell_worker(project, worker_script)
             lease_path = (
                 project / ".loopplane" / "runtime" / "active_run_leases" / "run_dead_stale.json"
             )

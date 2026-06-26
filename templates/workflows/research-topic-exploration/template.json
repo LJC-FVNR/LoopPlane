@@ -1,0 +1,55 @@
+{
+  "schema_version": "1.0",
+  "kind": "loopplane.workflow_template",
+  "id": "research-topic-exploration",
+  "version": "0.1.0",
+  "title": "Research Topic Exploration",
+  "description": "Create a bounded research workflow with experiment, analysis, and publication gates.",
+  "inputs": {
+    "topic": {
+      "type": "string",
+      "required": true,
+      "description": "Short topic label or research target."
+    },
+    "topic_slug": {
+      "type": "string",
+      "derived": "slug(topic)"
+    },
+    "target_standard": {
+      "type": "string",
+      "default": "publication_grade",
+      "enum": ["exploratory", "internal_report", "publication_grade"]
+    },
+    "max_exploration_runs": {
+      "type": "integer",
+      "default": 50,
+      "minimum": 1,
+      "maximum": 1000
+    },
+    "final_report_path": {
+      "type": "string",
+      "default": "reports/{{topic_slug}}_final.md"
+    },
+    "enable_literature_review": {
+      "type": "boolean",
+      "default": true
+    },
+    "enable_ablation": {
+      "type": "boolean",
+      "default": true
+    }
+  },
+  "renders": {
+    "project_brief": "PROJECT_BRIEF.md.tpl",
+    "plan_draft": "PLAN_DRAFT.md.tpl",
+    "shared_context": "SHARED_CONTEXT.md.tpl"
+  },
+  "locked_sections": ["phase_structure", "task_ids", "dependency_graph", "objective_gates"],
+  "default_policy": {
+    "planner_mode": "deterministic",
+    "activation_required": true,
+    "self_expansion": "bounded",
+    "validation_strictness": "high",
+    "final_review": true
+  }
+}

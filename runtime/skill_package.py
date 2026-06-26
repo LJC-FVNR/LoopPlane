@@ -114,10 +114,13 @@ RUNTIME_SCHEMA_PACKAGE_FILES = (
     "runtime/schemas/self_expansion_policy.schema.json",
     "runtime/schemas/version_control.schema.json",
     "runtime/schemas/worker_write_boundary.schema.json",
+    "runtime/schemas/template_instance.schema.json",
     "runtime/schemas/workflow.schema.json",
     "runtime/schemas/workflow_defaults.schema.json",
     "runtime/schemas/workflow_instance.schema.json",
+    "runtime/schemas/workflow_preset.schema.json",
     "runtime/schemas/workflow_registry.schema.json",
+    "runtime/schemas/workflow_template.schema.json",
     "runtime/schemas/workspace.schema.json",
 )
 
@@ -220,6 +223,7 @@ PACKAGE_FILE_REQUIREMENT_GROUPS: tuple[dict[str, Any], ...] = (
             "runtime/plan_objectives.py",
             "runtime/objective_verification.py",
             "runtime/read_model_builder.py",
+            "runtime/template_presets.py",
         ),
     },
     {
@@ -243,6 +247,26 @@ PACKAGE_FILE_REQUIREMENT_GROUPS: tuple[dict[str, Any], ...] = (
         "classification": "required",
         "spec_reference": "LoopPlane.md 9 Files and Data Models; LoopPlane.md 30.2 Schema validation; LoopPlane.md 31-33 v1.6 metadata",
         "files": RUNTIME_SCHEMA_PACKAGE_FILES,
+    },
+    {
+        "name": "workflow_template_presets",
+        "label": "builtin workflow template presets",
+        "classification": "required",
+        "spec_reference": "LoopPlane.md 7.2 templates/; deterministic workflow template preset feature",
+        "files": (
+            "templates/workflows/README.md",
+            "templates/workflows/research-topic-exploration/template.json",
+            "templates/workflows/research-topic-exploration/PROJECT_BRIEF.md.tpl",
+            "templates/workflows/research-topic-exploration/SHARED_CONTEXT.md.tpl",
+            "templates/workflows/research-topic-exploration/PLAN_DRAFT.md.tpl",
+            "templates/workflows/research-topic-exploration/examples/minimal.preset.json",
+            "templates/workflows/research-topic-exploration/examples/publication_grade.preset.json",
+            "templates/workflows/dashboard-performance-investigation/template.json",
+            "templates/workflows/dashboard-performance-investigation/PROJECT_BRIEF.md.tpl",
+            "templates/workflows/dashboard-performance-investigation/SHARED_CONTEXT.md.tpl",
+            "templates/workflows/dashboard-performance-investigation/PLAN_DRAFT.md.tpl",
+            "templates/workflows/dashboard-performance-investigation/examples/local_dashboard_latency.preset.json",
+        ),
     },
     {
         "name": "dashboard_server_package_files",

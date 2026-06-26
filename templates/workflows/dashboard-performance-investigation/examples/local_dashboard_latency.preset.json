@@ -1,0 +1,21 @@
+{
+  "schema_version": "1.0",
+  "kind": "loopplane.workflow_preset",
+  "name": "local-dashboard-latency-example",
+  "template": "dashboard-performance-investigation",
+  "template_version": "0.1.0",
+  "inputs": {
+    "target_workflow": "wf_example_dashboard_stress",
+    "symptom": "Dashboard loading becomes slow after many self-expansion runs.",
+    "benchmark_command": "loopplane dashboard benchmark --iterations 3 --json",
+    "latency_budget_ms": 1500,
+    "payload_budget_bytes": 5000000,
+    "maxrss_budget_kb": 358400
+  },
+  "policy": {
+    "planner_mode": "deterministic",
+    "self_expansion": "bounded",
+    "validation_strictness": "high",
+    "final_review": true
+  }
+}

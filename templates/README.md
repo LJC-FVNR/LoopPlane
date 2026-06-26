@@ -31,3 +31,14 @@ templates preserve the required project brief fields, plan task grammar,
 authority hierarchy, evidence paths, validation strategy, retry budgets,
 blocked/skipped metadata, high-level objective gates, self-expansion follow-up
 semantics, and completion semantics.
+
+## Workflow Templates
+
+`templates/workflows/` is a separate deterministic workflow-template layer.
+Those files are JSON manifests, JSON presets, and Markdown render templates used
+by `loopplane template ...` and `loopplane workflow create --preset ...`.
+
+Workflow templates do not replace the prompt templates above. They only render a
+new workflow's `PROJECT_BRIEF.md`, `SHARED_CONTEXT.md`, and
+`planning/PLAN_DRAFT.md`; `PLAN.md` remains inactive until the normal
+`activate-plan` readiness path promotes the draft.

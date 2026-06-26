@@ -50,6 +50,13 @@ The initialization phase turns user intent into `PROJECT_BRIEF.md`, runs the
 planner to create `PLAN_DRAFT.md` and a readiness report, optionally audits the
 draft, and activates `PLAN.md` only after readiness checks pass.
 
+Workflow template presets are deterministic initialization helpers. A template
+or preset may render `PROJECT_BRIEF.md`, `SHARED_CONTEXT.md`, and
+`planning/PLAN_DRAFT.md`, and may record provenance in `template_instance.json`,
+but it does not make the draft authoritative. Template-created workflows must
+still pass the same readiness and `activate-plan` promotion path before
+`PLAN.md` becomes active.
+
 The execution phase advances one durable unit of work at a time. A scheduler
 tick reconciles plan, state, events, and evidence; handles requests, approvals,
 background jobs, and configuration waits; selects recovery before new work;

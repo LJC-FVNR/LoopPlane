@@ -172,6 +172,21 @@ class JsonSchemaCoverageTest(unittest.TestCase):
         self.assertIn(".loopplane/runtime/objectives/final_objective_verification.json", result["checked_files"])
         self.assertIn("objective_verification_report.schema.json", result["schemas_used"])
 
+    def test_project_validation_accepts_empty_optional_jsonl_read_models(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "empty jsonl read model schema fixture.")
+            workflow = load_workflow_config(project)
+            paths = WorkflowPaths.from_config(project, workflow)
+            paths.read_models_dir.mkdir(parents=True, exist_ok=True)
+            (paths.read_models_dir / "run_index.jsonl").write_text("", encoding="utf-8")
+
+            result = validate_project_schemas(project)
+
+        self.assertTrue(result["ok"], json.dumps(result, indent=2, sort_keys=True))
+        self.assertIn(".loopplane/read_models/run_index.jsonl", result["checked_files"])
+        self.assertIn("read_model_run_index.schema.json", result["schemas_used"])
+
     def test_project_validation_ignores_objective_verifier_run_json_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             project = Path(tmp) / "project"

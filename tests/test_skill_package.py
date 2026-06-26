@@ -240,13 +240,25 @@ class SkillPackageDoctorTest(unittest.TestCase):
         self.assertIn("runtime/plan_objectives.py", groups["core_runtime_files"]["files"])
         self.assertIn("runtime/objective_verification.py", groups["core_runtime_files"]["files"])
         self.assertIn("runtime/read_model_builder.py", groups["core_runtime_files"]["files"])
+        self.assertIn("runtime/template_presets.py", groups["core_runtime_files"]["files"])
         schema_group = groups["runtime_schema_files"]
         self.assertEqual(schema_group["classification"], "required")
         self.assertIn("runtime/schemas/workspace.schema.json", schema_group["files"])
         self.assertIn("runtime/schemas/loopplane_home_workspaces.schema.json", schema_group["files"])
         self.assertIn("runtime/schemas/migration_export_manifest.schema.json", schema_group["files"])
         self.assertIn("runtime/schemas/runner_resource_lock.schema.json", schema_group["files"])
+        self.assertIn("runtime/schemas/workflow_template.schema.json", schema_group["files"])
+        self.assertIn("runtime/schemas/workflow_preset.schema.json", schema_group["files"])
+        self.assertIn("runtime/schemas/template_instance.schema.json", schema_group["files"])
         self.assertEqual(sorted(schema_group["files"]), sorted(RUNTIME_SCHEMA_PACKAGE_FILES))
+        template_group = groups["workflow_template_presets"]
+        self.assertEqual(template_group["classification"], "required")
+        self.assertIn("templates/workflows/README.md", template_group["files"])
+        self.assertIn("templates/workflows/research-topic-exploration/template.json", template_group["files"])
+        self.assertIn(
+            "templates/workflows/dashboard-performance-investigation/examples/local_dashboard_latency.preset.json",
+            template_group["files"],
+        )
         dashboard_group = groups["dashboard_server_package_files"]
         self.assertEqual(dashboard_group["classification"], "required")
         self.assertIn("runtime/dashboard.py", dashboard_group["files"])

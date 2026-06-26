@@ -197,6 +197,21 @@ from runtime.skill_package import (
     skill_update_exit_code,
     update_skill_project,
 )
+from runtime.template_presets import (
+    create_workflow_from_template,
+    doctor_workflow_template,
+    extract_preset_from_template_instance,
+    format_template_doctor_text,
+    format_template_instance_text,
+    format_template_list_text,
+    format_template_render_text,
+    format_template_show_text,
+    list_workflow_templates,
+    render_template_preview,
+    show_template,
+    show_template_instance,
+    template_command_exit_code,
+)
 from runtime.version_control import (
     bundle_import_exit_code,
     bundle_export_exit_code,
@@ -284,6 +299,7 @@ COMMAND_GROUPS = """Command groups:
   background: background start, background status, background complete, background cancel
   migration: export --profile source|stateful|archive --output <archive>, import <archive> --target <project>
   dashboard: dashboard, dashboard list, dashboard cleanup, dashboard stop
+  template: template list, template show, template doctor, template render, template instance show, template extract-preset
   workspace: workspace current, workspace register, workspace unregister, workspace scan, workspace list, workspace doctor
   workflow: workflow list, workflow current, workflow show, workflow switch, workflow create, workflow archive, workflow restore, workflow fork
   inspection: ask, change-request, approvals, approve, reject
@@ -366,6 +382,8 @@ NESTED_WORKSPACE_GUARDED_COMMANDS = {
     ("workflow", "archive"),
     ("workflow", "restore"),
     ("workflow", "fork"),
+    ("template", "instance", "show"),
+    ("template", "extract-preset"),
 }
 
 
@@ -2438,8 +2456,119 @@ def run_workflow_switch(args: argparse.Namespace) -> int:
     return workflow_switch_exit_code(result)
 
 
+def run_template_list(args: argparse.Namespace) -> int:
+    result = list_workflow_templates(Path(args.project).expanduser() if getattr(args, "project", None) else None)
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+    else:
+        print(format_template_list_text(result), end="")
+    return template_command_exit_code(result)
+
+
+def run_template_show(args: argparse.Namespace) -> int:
+    result = show_template(str(args.template_id), template_dir=getattr(args, "template_dir", None))
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+    else:
+        print(format_template_show_text(result), end="")
+    return template_command_exit_code(result)
+
+
+def run_template_doctor(args: argparse.Namespace) -> int:
+    result = doctor_workflow_template(str(args.template_id), template_dir=getattr(args, "template_dir", None))
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+    else:
+        print(format_template_doctor_text(result), end="")
+    return template_command_exit_code(result)
+
+
+def run_template_render(args: argparse.Namespace) -> int:
+    result = render_template_preview(
+        template_id=str(args.template_id),
+        preset_path=getattr(args, "preset", None),
+        overrides=_parse_template_set_values(getattr(args, "set_values", None) or []),
+        template_dir=getattr(args, "template_dir", None),
+        output=getattr(args, "output", None),
+        project_root=Path(args.project or "."),
+    )
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+    else:
+        print(format_template_render_text(result), end="")
+    return template_command_exit_code(result)
+
+
+def run_template_instance_show(args: argparse.Namespace) -> int:
+    result = show_template_instance(Path(args.project or "."), workflow_id=getattr(args, "workflow_id", None))
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+    else:
+        print(format_template_instance_text(result), end="")
+    return template_command_exit_code(result)
+
+
+def run_template_extract_preset(args: argparse.Namespace) -> int:
+    result = extract_preset_from_template_instance(
+        Path(args.project or "."),
+        workflow_id=getattr(args, "workflow_id", None),
+        output=getattr(args, "output", None),
+    )
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+    else:
+        print(format_template_instance_text(result), end="")
+    return template_command_exit_code(result)
+
+
+def _parse_template_set_values(values: Sequence[str]) -> dict[str, Any]:
+    parsed: dict[str, Any] = {}
+    for value in values:
+        if "=" not in value:
+            raise SystemExit(f"--set expects key=value, got {value!r}")
+        key, raw = value.split("=", 1)
+        key = key.strip()
+        if not key:
+            raise SystemExit("--set key must be non-empty")
+        parsed[key] = raw
+    return parsed
+
+
 def run_workflow_create(args: argparse.Namespace) -> int:
-    result = create_workflow(Path(args.project or "."), str(args.brief))
+    template_id = getattr(args, "template", None)
+    preset = getattr(args, "preset", None)
+    if template_id or preset:
+        overrides = _parse_template_set_values(getattr(args, "set_values", None) or [])
+        if getattr(args, "brief", None):
+            result = {
+                "schema_version": "1.6",
+                "ok": False,
+                "status": "template_brief_unsupported",
+                "errors": ["--brief is only supported for free-form workflow creation."],
+                "warnings": [],
+                "recovery_actions": ["Use --set <input=value> for template workflow inputs, or omit --template/--preset."],
+            }
+        else:
+            result = create_workflow_from_template(
+                Path(args.project or "."),
+                template_id=template_id,
+                preset_path=preset,
+                overrides=overrides,
+                template_dir=getattr(args, "template_dir", None),
+                dry_run=bool(getattr(args, "dry_run", False)),
+            )
+    else:
+        if not str(getattr(args, "brief", "") or "").strip():
+            result = {
+                "schema_version": "1.6",
+                "ok": False,
+                "status": "invalid_brief",
+                "errors": ["--brief must be a non-empty string unless --template or --preset is supplied."],
+                "warnings": [],
+                "recovery_actions": ["Pass --brief <text> for free-form workflow creation or use --template/--preset."],
+            }
+        else:
+            result = create_workflow(Path(args.project or "."), str(args.brief))
     if args.json:
         print(json.dumps(result, indent=2, sort_keys=True))
     else:
@@ -3685,6 +3814,98 @@ def add_workspace_commands(subparsers: argparse._SubParsersAction[argparse.Argum
     doctor.set_defaults(handler=run_workspace_doctor, command_path=("workspace", "doctor"))
 
 
+def add_template_commands(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    parser = subparsers.add_parser(
+        "template",
+        help="Workflow template and preset commands.",
+        description="Inspect and render deterministic workflow templates and presets.",
+    )
+    parser.set_defaults(handler=show_help, help_parser=parser, command_path=("template",))
+    template_subparsers = parser.add_subparsers(
+        dest="template_command",
+        metavar="<template-command>",
+        title="template commands",
+    )
+
+    list_command = template_subparsers.add_parser(
+        "list",
+        help="List available workflow templates.",
+        description="List builtin and optional project-local workflow templates.",
+    )
+    list_command.add_argument("--project", metavar="<path>", help="Optional project path for project-local template discovery.")
+    list_command.add_argument("--json", action="store_true", help="Emit a machine-readable result.")
+    list_command.set_defaults(handler=run_template_list, command_path=("template", "list"))
+
+    show = template_subparsers.add_parser(
+        "show",
+        help="Show one workflow template.",
+        description="Show template metadata, inputs, render targets, and default policy.",
+    )
+    show.add_argument("template_id", metavar="<template_id>", help="Template id to inspect.")
+    show.add_argument("--template-dir", metavar="<path>", help="Explicit template directory for local development.")
+    show.add_argument("--json", action="store_true", help="Emit a machine-readable result.")
+    show.set_defaults(handler=run_template_show, command_path=("template", "show"))
+
+    doctor = template_subparsers.add_parser(
+        "doctor",
+        help="Validate one workflow template.",
+        description="Validate template metadata, render files, examples, and safety constraints.",
+    )
+    doctor.add_argument("template_id", metavar="<template_id>", help="Template id to inspect.")
+    doctor.add_argument("--template-dir", metavar="<path>", help="Explicit template directory for local development.")
+    doctor.add_argument("--json", action="store_true", help="Emit a machine-readable result.")
+    doctor.set_defaults(handler=run_template_doctor, command_path=("template", "doctor"))
+
+    render = template_subparsers.add_parser(
+        "render",
+        help="Render a workflow template preview.",
+        description="Render template files to memory or an explicit output directory without mutating workflow truth.",
+    )
+    render.add_argument("template_id", metavar="<template_id>", help="Template id to render.")
+    render.add_argument("--template-dir", metavar="<path>", help="Explicit template directory for local development.")
+    render.add_argument("--preset", metavar="<path>", help="Workflow preset JSON file.")
+    render.add_argument("--set", dest="set_values", action="append", default=[], metavar="<key=value>", help="Override a template input. May be repeated.")
+    render.add_argument("--output", metavar="<dir>", help="Write rendered preview files to this directory.")
+    render.add_argument("--project", metavar="<path>", help="Optional project path used for preview workflow paths.")
+    render.add_argument("--dry-run", action="store_true", help="Accepted for symmetry; render is non-mutating unless --output is supplied.")
+    render.add_argument("--json", action="store_true", help="Emit a machine-readable result.")
+    render.set_defaults(handler=run_template_render, command_path=("template", "render"))
+
+    instance = template_subparsers.add_parser(
+        "instance",
+        help="Inspect template provenance for a workflow.",
+        description="Read template_instance.json for the current or selected workflow.",
+    )
+    instance.set_defaults(handler=show_help, help_parser=instance, command_path=("template", "instance"))
+    instance_subparsers = instance.add_subparsers(
+        dest="template_instance_command",
+        metavar="<instance-command>",
+        title="template instance commands",
+    )
+    instance_show = instance_subparsers.add_parser(
+        "show",
+        help="Show one workflow template instance record.",
+        description="Read template_instance.json for the current or selected workflow.",
+    )
+    instance_show.add_argument("--project", metavar="<path>", help="Project path. Defaults to the current directory.")
+    instance_show.add_argument("--workflow", dest="workflow_id", metavar="<workflow_id>", help="Workflow id to inspect. Defaults to current workflow.")
+    _add_nested_workspace_options(instance_show)
+    instance_show.add_argument("--json", action="store_true", help="Emit a machine-readable result.")
+    instance_show.set_defaults(handler=run_template_instance_show, command_path=("template", "instance", "show"))
+
+    extract = template_subparsers.add_parser(
+        "extract-preset",
+        help="Extract a preset from a workflow template instance.",
+        description="Reconstruct a workflow preset from template_instance.json.",
+    )
+    extract.add_argument("--project", metavar="<path>", help="Project path. Defaults to the current directory.")
+    extract.add_argument("--workflow", dest="workflow_id", metavar="<workflow_id>", help="Workflow id to inspect. Defaults to current workflow.")
+    extract.add_argument("--output", metavar="<path>", help="Preset path to write.")
+    _add_nested_workspace_options(extract)
+    extract.add_argument("--json", action="store_true", help="Emit a machine-readable result.")
+    extract.set_defaults(handler=run_template_extract_preset, command_path=("template", "extract-preset"))
+
+
 def _add_workflow_common_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--project", metavar="<path>", help="Project path. Defaults to the current directory.")
     _add_nested_workspace_options(parser)
@@ -3747,10 +3968,15 @@ def add_workflow_commands(subparsers: argparse._SubParsersAction[argparse.Argume
 
     create = workflow_subparsers.add_parser(
         "create",
-        help="Create a new workflow history from a brief.",
+        help="Create a new workflow history from a brief, template, or preset.",
         description="Create a new workflow_id without overwriting existing workflow history.",
     )
-    create.add_argument("--brief", required=True, metavar="<text>", help="Brief text for the new workflow.")
+    create.add_argument("--brief", metavar="<text>", help="Brief text for free-form workflow creation.")
+    create.add_argument("--template", metavar="<template_id>", help="Workflow template id.")
+    create.add_argument("--template-dir", metavar="<path>", help="Explicit template directory for local development.")
+    create.add_argument("--preset", metavar="<path>", help="Workflow preset JSON file.")
+    create.add_argument("--set", dest="set_values", action="append", default=[], metavar="<key=value>", help="Override a template input. May be repeated.")
+    create.add_argument("--dry-run", action="store_true", help="Render and inspect a template workflow without writing files.")
     _add_workflow_common_options(create)
     create.set_defaults(handler=run_workflow_create, command_path=("workflow", "create"))
 
@@ -3807,6 +4033,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_self_expansion_commands(subparsers)
     add_version_control_commands(subparsers)
     add_workspace_commands(subparsers)
+    add_template_commands(subparsers)
     add_workflow_commands(subparsers)
 
     return parser

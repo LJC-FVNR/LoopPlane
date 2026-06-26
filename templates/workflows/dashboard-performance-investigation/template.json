@@ -1,0 +1,59 @@
+{
+  "schema_version": "1.0",
+  "kind": "loopplane.workflow_template",
+  "id": "dashboard-performance-investigation",
+  "version": "0.1.0",
+  "title": "Dashboard Performance Investigation",
+  "description": "Create a workflow for reproducing, diagnosing, fixing, and benchmarking dashboard/read-model latency.",
+  "inputs": {
+    "target_workflow": {
+      "type": "string",
+      "required": true,
+      "description": "Workflow id, project label, or stress case to investigate."
+    },
+    "target_slug": {
+      "type": "string",
+      "derived": "slug(target_workflow)"
+    },
+    "symptom": {
+      "type": "string",
+      "default": "dashboard loading is slow after long workflow runs"
+    },
+    "benchmark_command": {
+      "type": "string",
+      "default": "loopplane dashboard benchmark --json"
+    },
+    "latency_budget_ms": {
+      "type": "integer",
+      "default": 1500,
+      "minimum": 1
+    },
+    "payload_budget_bytes": {
+      "type": "integer",
+      "default": 5000000,
+      "minimum": 1
+    },
+    "maxrss_budget_kb": {
+      "type": "integer",
+      "default": 358400,
+      "minimum": 1
+    },
+    "final_report_path": {
+      "type": "string",
+      "default": "reports/{{target_slug}}_dashboard_performance.md"
+    }
+  },
+  "renders": {
+    "project_brief": "PROJECT_BRIEF.md.tpl",
+    "plan_draft": "PLAN_DRAFT.md.tpl",
+    "shared_context": "SHARED_CONTEXT.md.tpl"
+  },
+  "locked_sections": ["phase_structure", "task_ids", "objective_gates"],
+  "default_policy": {
+    "planner_mode": "deterministic",
+    "activation_required": true,
+    "self_expansion": "bounded",
+    "validation_strictness": "high",
+    "final_review": true
+  }
+}

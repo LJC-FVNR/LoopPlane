@@ -15,6 +15,7 @@ from runtime.planning import acknowledge_active_plan_change
 from runtime.prompt_builder import build_prompt_for_prepared_run
 from runtime.scheduler import load_scheduler_snapshot, prepare_run, run_scheduler, select_next_action
 from runtime.self_expansion import expansion_candidate, load_expansion_status
+from tests.test_human_summaries import configure_fake_summary_agent, disable_summary_agent
 
 
 def write_json(path: Path, data: dict[str, object]) -> None:
@@ -272,6 +273,7 @@ def set_runner_enabled(project: Path, runner_id: str, enabled: bool) -> None:
 
 def write_objective_plan(project: Path, *, first_status: str = "x", second_status: str = " ", max_expansions: int = 2) -> None:
     set_runner_enabled(project, "final_reviewer", False)
+    disable_summary_agent(project)
     wid = workflow_id(project)
     blocked_fields = (
         "  - blocked_reason: Fixture blocked terminal state.\n"
@@ -505,6 +507,7 @@ class ObjectiveGateTest(unittest.TestCase):
             project = Path(tmp)
             init_project(project, "Objective summary refresh fixture")
             write_objective_plan(project)
+            configure_fake_summary_agent(project)
             wid = workflow_id(project)
             paths = WorkflowPaths.from_config(project, load_workflow_config(project))
 

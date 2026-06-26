@@ -1,0 +1,21 @@
+{
+  "schema_version": "1.0",
+  "kind": "loopplane.workflow_preset",
+  "name": "publication-grade-research-example",
+  "template": "research-topic-exploration",
+  "template_version": "0.1.0",
+  "inputs": {
+    "topic": "topic_3",
+    "target_standard": "publication_grade",
+    "max_exploration_runs": 80,
+    "final_report_path": "reports/topic_3_final.md",
+    "enable_literature_review": true,
+    "enable_ablation": true
+  },
+  "policy": {
+    "planner_mode": "deterministic",
+    "self_expansion": "bounded",
+    "validation_strictness": "high",
+    "final_review": true
+  }
+}

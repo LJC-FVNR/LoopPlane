@@ -114,6 +114,7 @@ class CliSurfaceHelpTest(unittest.TestCase):
             "dashboard",
             "workspace",
             "workflow",
+            "template",
             "ask",
             "change-request",
             "approvals",
@@ -172,6 +173,13 @@ class CliSurfaceHelpTest(unittest.TestCase):
             ("workflow", "archive"),
             ("workflow", "restore"),
             ("workflow", "fork"),
+            ("template",),
+            ("template", "list"),
+            ("template", "show"),
+            ("template", "doctor"),
+            ("template", "render"),
+            ("template", "instance", "show"),
+            ("template", "extract-preset"),
             ("ask",),
             ("change-request",),
             ("change-request", "submit"),
@@ -475,6 +483,10 @@ class CliExitCodeContractTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             project = Path(tmp) / "project"
             init_project(project, "Failure budget exhausted fixture.")
+            workflow_path = project / ".loopplane" / "config" / "workflow.json"
+            workflow = json.loads(workflow_path.read_text(encoding="utf-8"))
+            workflow["self_expansion"]["enabled"] = False
+            write_json(workflow_path, workflow)
             write_active_plan(project, task_status="x")
             write_json(
                 project / ".loopplane" / "runtime" / "failure_registry.json",

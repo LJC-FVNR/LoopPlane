@@ -5085,6 +5085,7 @@ def _write_version_control_status(
         "workflow_id": checkpoint_record["workflow_id"],
         "status": "ok",
         "generated_at": _utc_now(),
+        "source_hashes": {},
         "provider": "git",
         "git_available": True,
         "repository": {

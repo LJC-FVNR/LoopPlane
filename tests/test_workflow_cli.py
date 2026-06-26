@@ -12,12 +12,16 @@ from pathlib import Path
 
 from runtime.exit_codes import EXIT_INVALID_CONFIG, EXIT_SUCCESS
 from runtime.init_workflow import LAYOUT_CANONICAL_V16, LAYOUT_COMPATIBILITY_FLAT, init_project
+from runtime.schema_validation import validate_project_schemas
 from runtime.scheduler import AtomicOwnerLock
 from runtime.workflow_lifecycle import archive_workflow, create_workflow_record, import_workflow_record
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 LoopPlane = REPO_ROOT / "scripts" / "loopplane"
+RESEARCH_MINIMAL_PRESET = (
+    REPO_ROOT / "templates" / "workflows" / "research-topic-exploration" / "examples" / "minimal.preset.json"
+)
 
 
 def run_loopplane(*args: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
@@ -1140,6 +1144,73 @@ class WorkflowCommandGroupCliTest(unittest.TestCase):
             self.assertIn("workflow_root: .loopplane/workflows/", text.stdout)
             self.assertIn("mutation_boundary:", text.stdout)
 
+    def test_workflow_create_from_template_preset_supports_activation_and_preset_extraction(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            initialized = init_project(project, "Initial template preset fixture.", layout=LAYOUT_CANONICAL_V16)
+
+            created = run_loopplane(
+                "workflow",
+                "create",
+                "--preset",
+                str(RESEARCH_MINIMAL_PRESET),
+                "--project",
+                str(project),
+                "--json",
+            )
+
+            self.assertEqual(created.returncode, EXIT_SUCCESS, created.stderr + created.stdout)
+            payload = json.loads(created.stdout)
+            self.assertTrue(payload["ok"], json.dumps(payload, indent=2, sort_keys=True))
+            self.assertEqual(payload["status"], "created_from_template")
+            self.assertNotEqual(payload["workflow_id"], initialized.workflow_id)
+            self.assertEqual(payload["current_workflow_id"], payload["workflow_id"])
+            self.assertEqual(payload["readiness_report"]["status"], "ready_for_activation")
+            self.assertIn("plan_readiness_report.json", "\n".join(payload["created"]))
+
+            workflow_root = project / payload["workflow_root"]
+            instance = read_json(workflow_root / "template_instance.json")
+            self.assertEqual(instance["template"]["id"], "research-topic-exploration")
+            self.assertEqual(
+                instance["preset"]["path"],
+                "templates/workflows/research-topic-exploration/examples/minimal.preset.json",
+            )
+            self.assertNotIn(REPO_ROOT.as_posix(), json.dumps(instance))
+            self.assertIn("- active: false", (workflow_root / "PLAN.md").read_text(encoding="utf-8"))
+
+            shown = run_loopplane("template", "instance", "show", "--project", str(project), "--json")
+            self.assertEqual(shown.returncode, EXIT_SUCCESS, shown.stderr + shown.stdout)
+            shown_payload = json.loads(shown.stdout)
+            self.assertEqual(shown_payload["instance"]["workflow_id"], payload["workflow_id"])
+
+            extracted_path = project / ".loopplane" / "presets" / "from-instance.preset.json"
+            extracted = run_loopplane(
+                "template",
+                "extract-preset",
+                "--project",
+                str(project),
+                "--output",
+                str(extracted_path),
+                "--json",
+            )
+            self.assertEqual(extracted.returncode, EXIT_SUCCESS, extracted.stderr + extracted.stdout)
+            self.assertTrue(extracted_path.is_file())
+            self.assertEqual(read_json(extracted_path)["template"], "research-topic-exploration")
+
+            schema_result = validate_project_schemas(project)
+            self.assertTrue(schema_result["ok"], json.dumps(schema_result, indent=2, sort_keys=True))
+            self.assertIn(".loopplane/presets/from-instance.preset.json", schema_result["checked_files"])
+
+            activated = run_loopplane("activate-plan", "--project", str(project), "--json")
+
+            self.assertEqual(activated.returncode, EXIT_SUCCESS, activated.stderr + activated.stdout)
+            activated_payload = json.loads(activated.stdout)
+            self.assertTrue(activated_payload["ok"], json.dumps(activated_payload, indent=2, sort_keys=True))
+            self.assertEqual(activated_payload["status"], "activated")
+            self.assertIn("- active: true", (workflow_root / "PLAN.md").read_text(encoding="utf-8"))
+            post_activation_schema = validate_project_schemas(project)
+            self.assertTrue(post_activation_schema["ok"], json.dumps(post_activation_schema, indent=2, sort_keys=True))
+
     def test_workflow_create_truncates_long_names_at_word_boundary(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             project = Path(tmp) / "project"
@@ -1201,6 +1272,17 @@ class WorkflowCommandGroupCliTest(unittest.TestCase):
                 "--json",
             )
             empty = run_loopplane("workflow", "create", "--brief", "   ", "--project", str(initialized_project), "--json")
+            template_brief = run_loopplane(
+                "workflow",
+                "create",
+                "--preset",
+                str(RESEARCH_MINIMAL_PRESET),
+                "--brief",
+                "Template inputs should use --set.",
+                "--project",
+                str(initialized_project),
+                "--json",
+            )
 
             self.assertEqual(missing.returncode, EXIT_INVALID_CONFIG, missing.stderr + missing.stdout)
             self.assertEqual(json.loads(missing.stdout)["status"], "missing_project")
@@ -1214,6 +1296,11 @@ class WorkflowCommandGroupCliTest(unittest.TestCase):
             empty_payload = json.loads(empty.stdout)
             self.assertEqual(empty_payload["status"], "invalid_brief")
             self.assertIn("--brief", "\n".join(empty_payload["errors"]))
+
+            self.assertEqual(template_brief.returncode, EXIT_INVALID_CONFIG, template_brief.stderr + template_brief.stdout)
+            template_brief_payload = json.loads(template_brief.stdout)
+            self.assertEqual(template_brief_payload["status"], "template_brief_unsupported")
+            self.assertIn("--set", "\n".join(template_brief_payload["recovery_actions"]))
 
     def test_workflow_create_recreates_missing_current_pointer_after_safety_checks(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

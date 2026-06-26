@@ -140,6 +140,14 @@ and diagnostic commands are implemented. `LOOPPLANE_HOME` resolves from the
 implemented. `loopplane workflow create --brief "..."` allocates a new canonical
 `.loopplane/workflows/<workflow_id>/` root, appends the workspace-local registry,
 and moves the current pointer only after runtime safety checks pass.
+`loopplane template list` and `loopplane template show <template_id>` expose
+deterministic workflow templates for repeatable workflow shapes, while
+`loopplane workflow create --preset <preset.json>` creates a new canonical
+workflow from a small JSON preset. Template-created workflows write rendered
+`PROJECT_BRIEF.md`, `SHARED_CONTEXT.md`, and `planning/PLAN_DRAFT.md`, preserve
+the inactive `PLAN.md`, record portable provenance in `template_instance.json`,
+and still require `loopplane activate-plan` before the draft becomes
+authoritative.
 `loopplane workflow archive <workflow_id>` marks only the selected project-local
 registry record archived, preserves workflow roots and prior history, rejects
 read-only, already archived, malformed, and active/running workflow states, and

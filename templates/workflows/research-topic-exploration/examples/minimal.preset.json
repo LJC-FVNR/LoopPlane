@@ -1,0 +1,20 @@
+{
+  "schema_version": "1.0",
+  "kind": "loopplane.workflow_preset",
+  "name": "minimal-research-example",
+  "template": "research-topic-exploration",
+  "template_version": "0.1.0",
+  "inputs": {
+    "topic": "sample topic",
+    "target_standard": "internal_report",
+    "max_exploration_runs": 10,
+    "enable_literature_review": false,
+    "enable_ablation": false
+  },
+  "policy": {
+    "planner_mode": "deterministic",
+    "self_expansion": "bounded",
+    "validation_strictness": "medium",
+    "final_review": true
+  }
+}
