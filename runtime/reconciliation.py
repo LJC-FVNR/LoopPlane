@@ -586,6 +586,7 @@ def _reconcile_pass(
 
     updated_plan_task_ids: list[str] = []
     latest_updates: list[dict[str, Any]] = []
+    recovered_failure_updates: list[dict[str, Any]] = []
     projection_sync: dict[str, Any] | None = None
     if write and not errors:
         updated_plan, updated_plan_task_ids = _mark_plan_tasks_complete(plan_text, tasks, writable_task_ids)
@@ -641,6 +642,30 @@ def _reconcile_pass(
                     "validation_path": _path_for_record(project, validation_path),
                 },
             )
+        recovered_failure_updates = _mark_accepted_validation_failures_recovered(
+            project=project,
+            paths=paths,
+            workflow_id=workflow_id,
+            accepted_task_ids=writable_task_ids,
+            run_id=str(validation.get("run_id") or run_dir.name),
+            validation_path=validation_path,
+            recovered_at=now,
+        )
+        if recovered_failure_updates:
+            append_event(
+                paths,
+                workflow_id=workflow_id,
+                run_id=str(validation.get("run_id") or run_dir.name),
+                event_type="failure_registry_updated",
+                data={
+                    "source": "reconciler",
+                    "status": "recovered",
+                    "recovered_failure_ids": [
+                        str(failure.get("failure_id") or "") for failure in recovered_failure_updates
+                    ],
+                    "accepted_task_ids": list(writable_task_ids),
+                },
+            )
         _update_runtime_state(
             paths,
             status="reconciled",
@@ -650,6 +675,9 @@ def _reconcile_pass(
                 "last_task_id": primary_task_id,
                 "last_run_id": validation.get("run_id") or run_dir.name,
                 "last_accepted_task_ids": list(writable_task_ids),
+                "last_recovered_failure_ids": [
+                    str(failure.get("failure_id") or "") for failure in recovered_failure_updates
+                ],
             },
         )
         _request_read_model_rebuild(
@@ -682,6 +710,10 @@ def _reconcile_pass(
         "blocked_task_ids": blocked_task_ids,
         "updated_plan_task_ids": updated_plan_task_ids,
         "latest_updates": latest_updates,
+        "failure_registry_updates": recovered_failure_updates,
+        "recovered_failure_ids": [
+            str(failure.get("failure_id") or "") for failure in recovered_failure_updates
+        ],
         "projection_sync": projection_sync,
         "warnings": list(warnings),
         "errors": errors,
@@ -1113,6 +1145,54 @@ def _record_validation_failure(
 
     _update_failure_registry_locked(paths, workflow_id=workflow_id, update=update)
     return changed or candidate
+
+
+def _mark_accepted_validation_failures_recovered(
+    *,
+    project: Path,
+    paths: WorkflowPaths,
+    workflow_id: str,
+    accepted_task_ids: Sequence[str],
+    run_id: str,
+    validation_path: Path,
+    recovered_at: str,
+) -> list[dict[str, Any]]:
+    accepted = {str(task_id) for task_id in accepted_task_ids if str(task_id)}
+    if not accepted:
+        return []
+    recovered: list[dict[str, Any]] = []
+    validation_record_path = _path_for_record(project, validation_path)
+
+    def update(registry: dict[str, Any]) -> None:
+        failures = registry.setdefault("failures", [])
+        if not isinstance(failures, list):
+            failures = []
+            registry["failures"] = failures
+        for failure in failures:
+            if not isinstance(failure, dict):
+                continue
+            if str(failure.get("task_id") or "") not in accepted:
+                continue
+            if str(failure.get("failure_class") or "") != "validation_failed":
+                continue
+            if str(failure.get("status") or "unrecovered") in {"recovered", "waived"}:
+                continue
+            failure["status"] = "recovered"
+            failure["recoverable"] = False
+            failure["budget_remaining"] = False
+            failure["recovered_at"] = recovered_at
+            failure["resolved_at"] = recovered_at
+            failure["recovered_by"] = RECONCILER_NAME
+            failure["recovered_by_run_id"] = run_id
+            failure["recovered_by_validation_path"] = validation_record_path
+            failure["last_seen_at"] = recovered_at
+            failure.pop("active_recovery_run_id", None)
+            failure.pop("exhausted_reason", None)
+            failure.pop("needs_human_reason", None)
+            recovered.append(dict(failure))
+
+    _update_failure_registry_locked(paths, workflow_id=workflow_id, update=update)
+    return recovered
 
 
 def _upsert_failure(registry: dict[str, Any], candidate: Mapping[str, Any]) -> dict[str, Any]:

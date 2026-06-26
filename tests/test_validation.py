@@ -411,6 +411,20 @@ class AuthoritativeValidatorTest(unittest.TestCase):
             self.assertEqual(len(checks), 2)
             self.assertTrue(all(check["status"] == "pass" for check in checks))
 
+    def test_file_exists_accepts_run_root_task_specific_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "Validate task-specific run-root evidence.")
+            write_plan(project, validation="file_exists: custom_audit.json")
+            run_dir = write_worker_run(project, create_artifact=True)
+            (run_dir / "custom_audit.json").write_text(json.dumps({"ok": True}) + "\n", encoding="utf-8")
+
+            validation = run_validator(project, task_id="T001", run_dir=run_dir)
+
+            self.assertEqual(validation["status"], "pass", json.dumps(validation, indent=2, sort_keys=True))
+            check = next(check for check in validation["task_results"][0]["checks"] if check["name"] == "file_exists")
+            self.assertEqual(check["status"], "pass")
+
     def test_command_exit_code_named_command_ignores_unrelated_negative_checks(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             project = Path(tmp) / "project"

@@ -2178,6 +2178,9 @@ def _resolve_run_path(project: Path, run_dir: Path, value: str) -> Path:
         "node_summary.json",
     }:
         return (run_dir / normalized).resolve()
+    run_local = (run_dir / normalized).resolve()
+    if run_local.is_file():
+        return run_local
     return (project / normalized).resolve()
 
 

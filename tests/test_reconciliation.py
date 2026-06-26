@@ -154,6 +154,36 @@ class ReconcilerTest(unittest.TestCase):
             self.assertIn("validation_failed", [event["event_type"] for event in events])
             self.assertIn("failure_registry_updated", [event["event_type"] for event in events])
 
+    def test_reconcile_pass_recovers_prior_validation_failure_for_accepted_task(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "Reconcile passing validation after a failed validation.")
+            configure_fake_summary_agent(project)
+            write_plan(project)
+            run_dir = write_worker_run(project)
+            run_validator(project, task_id="T001", run_dir=run_dir)
+            failed = run_reconciler(project, task_id="T001", run_dir=run_dir)
+
+            self.assertEqual(failed["status"], "validation_failed")
+            registry_path = project / ".loopplane" / "runtime" / "failure_registry.json"
+            registry = json.loads(registry_path.read_text(encoding="utf-8"))
+            failure_id = registry["failures"][0]["failure_id"]
+            self.assertEqual(registry["failures"][0]["status"], "unrecovered")
+
+            (run_dir / "artifacts" / "result.txt").write_text("result\n", encoding="utf-8")
+            run_validator(project, task_id="T001", run_dir=run_dir)
+            passed = run_reconciler(project, task_id="T001", run_dir=run_dir)
+
+            self.assertTrue(passed["ok"])
+            self.assertEqual(passed["status"], "reconciled")
+            self.assertEqual(passed["recovered_failure_ids"], [failure_id])
+            registry = json.loads(registry_path.read_text(encoding="utf-8"))
+            self.assertEqual(registry["failures"][0]["failure_id"], failure_id)
+            self.assertEqual(registry["failures"][0]["status"], "recovered")
+            self.assertFalse(registry["failures"][0]["budget_remaining"])
+            self.assertIn("recovered_by_validation_path", registry["failures"][0])
+            self.assertIn("- [x] T001: Produce result artifact", (project / "PLAN.md").read_text(encoding="utf-8"))
+
     def test_reconcile_human_approval_strategy_auto_authorizes_without_pending_approval(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             project = Path(tmp) / "project"

@@ -204,6 +204,80 @@ time.sleep(3)
 
 
 class HumanSummaryTest(unittest.TestCase):
+    def test_phase_summary_loads_legacy_highlight_report_task_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "Human summary legacy compatibility.")
+            disable_summary_agent(project)
+            workflow = json.loads((project / ".loopplane" / "config" / "workflow.json").read_text(encoding="utf-8"))
+            (project / "PLAN.md").write_text(
+                f"""# Project Plan
+
+## Metadata
+
+- workflow_id: {workflow["workflow_id"]}
+- workflow_title: Human Summary Legacy Fixture
+- plan_version: 1
+- generated_from: PROJECT_BRIEF.md
+- active: true
+
+## Phase P0: Legacy Summary Fixture
+
+- [x] T001: Existing legacy highlight report
+  - evidence: .loopplane/results/T001/
+  - latest: .loopplane/results/T001/latest.json
+  - depends_on: []
+  - validation: file_exists: artifacts/result.txt
+
+- [x] T002: New terminal task
+  - evidence: .loopplane/results/T002/
+  - latest: .loopplane/results/T002/latest.json
+  - depends_on: []
+  - validation: file_exists: artifacts/result.txt
+""",
+                encoding="utf-8",
+            )
+            paths = WorkflowPaths.from_config(project, load_workflow_config(project))
+            legacy_dir = paths.results_dir / "T001"
+            legacy_dir.mkdir(parents=True)
+            (legacy_dir / "human_summary.md").write_text("# Legacy Summary\n\nLegacy summary excerpt.\n", encoding="utf-8")
+            (legacy_dir / "human_summary.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "1.0",
+                        "kind": "highlight_report",
+                        "status": "ready",
+                        "workflow_id": workflow["workflow_id"],
+                        "target_id": "T001",
+                        "summary_title": "Legacy highlight report",
+                        "summary_excerpt": "Legacy summary excerpt.",
+                        "markdown_path": ".loopplane/results/T001/human_summary.md",
+                        "tables": [
+                            {
+                                "title": "Legacy Table",
+                                "columns": ["Metric", "Value"],
+                                "rows": [["signal", "present"]],
+                            }
+                        ],
+                        "figures": [],
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            result = ensure_human_summaries(project, task_ids=["T002"], blocking=False, max_agent_summaries=0)
+
+            self.assertTrue(result["ok"], json.dumps(result, indent=2, sort_keys=True))
+            self.assertEqual(result["status"], "summaries_updated")
+            phase_json = paths.results_dir / "phases" / "P0" / "human_summary.json"
+            phase_record = json.loads(phase_json.read_text(encoding="utf-8"))
+            task_outcomes = phase_record["tables"]["task_outcomes"]
+            self.assertEqual(task_outcomes[0]["Task"], "T001")
+            self.assertIn("Legacy summary excerpt", task_outcomes[0]["Summary"])
+
     def test_reconciler_can_defer_human_summaries_for_on_demand_generation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             project = Path(tmp) / "project"

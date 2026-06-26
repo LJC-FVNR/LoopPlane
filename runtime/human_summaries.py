@@ -1459,21 +1459,22 @@ def _load_summary_record(project: Path, path: Path) -> dict[str, Any]:
     content = str(data.get("content") or "")
     if not content and markdown_path is not None:
         content = _read_text(markdown_path)
+    source_hashes = data.get("source_hashes")
     return {
         "status": SUMMARY_READY_STATUS,
         "kind": data.get("kind"),
-        "task_id": data.get("task_id"),
-        "phase_id": data.get("phase_id"),
+        "task_id": data.get("task_id") or data.get("target_id"),
+        "phase_id": data.get("phase_id") or data.get("target_id"),
         "phase_title": data.get("phase_title"),
         "title": data.get("summary_title"),
         "excerpt": data.get("summary_excerpt"),
         "markdown_path": data.get("markdown_path"),
         "json_path": _path_for_record(project, path),
         "generated_at": data.get("generated_at"),
-        "source_hashes": dict(data.get("source_hashes") or {}),
+        "source_hashes": dict(source_hashes) if isinstance(source_hashes, Mapping) else {},
         "content": content,
         "key_data": list(data.get("key_data") or []),
-        "tables": dict(data.get("tables") or {}),
+        "tables": _loaded_summary_tables(data.get("tables")),
         "figures": [dict(item) for item in data.get("figures") or [] if isinstance(item, Mapping)],
         "executive_summary": data.get("executive_summary"),
         "delivered_progress": list(data.get("delivered_progress") or []),
@@ -1482,6 +1483,16 @@ def _load_summary_record(project: Path, path: Path) -> dict[str, Any]:
         "leadership_attention": list(data.get("leadership_attention") or []),
         "control_points": list(data.get("control_points") or []),
     }
+
+
+def _loaded_summary_tables(value: Any) -> dict[str, list[dict[str, str]]]:
+    if isinstance(value, Mapping):
+        return {
+            str(key): [dict(row) for row in rows if isinstance(row, Mapping)]
+            for key, rows in value.items()
+            if isinstance(rows, Sequence) and not isinstance(rows, (str, bytes))
+        }
+    return _agent_summary_tables({"tables": value})
 
 
 def _task_source_hash(project: Path, paths: WorkflowPaths, task: PlanTask) -> str:
