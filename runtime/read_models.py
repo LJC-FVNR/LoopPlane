@@ -2390,6 +2390,9 @@ def _run_index_record(paths: WorkflowPaths, record: Mapping[str, Any]) -> dict[s
     run_id = str(record.get("run_id") or "")
     details = _mapping_or_empty(record.get("details"))
     index = {str(key): value for key, value in record.items() if key != "details"}
+    for key in ("generated_at", "started_at", "ended_at", "heartbeat_at", "lease_expires_at"):
+        if key in index:
+            index[key] = _read_model_timestamp(index[key])
     if run_id and record.get("detail_status") == "available":
         index["detail_path"] = _path_for_record(paths.project_root, _run_detail_path(paths, run_id))
         index["detail_status"] = "available"
@@ -5666,6 +5669,15 @@ def _parse_timestamp(value: Any) -> datetime | None:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=UTC)
     return parsed.astimezone(UTC)
+
+
+def _read_model_timestamp(value: Any) -> Any:
+    if value is None:
+        return None
+    parsed = _parse_timestamp(value)
+    if parsed is None:
+        return value
+    return parsed.replace(microsecond=0).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _mapping_value(value: Any, key: str) -> Any:

@@ -503,6 +503,26 @@ class ReadModelBuilderIntegrationTest(unittest.TestCase):
             detail_files = sorted((paths.read_models_dir / "run_details").glob("*.json"))
             self.assertEqual(len(detail_files), 1)
 
+    def test_run_index_record_normalizes_fractional_utc_timestamps(self) -> None:
+        record = {
+            "schema_version": "1.5",
+            "workflow_id": "wf_fixture",
+            "generated_at": "2026-06-23T01:51:25.888998+00:00",
+            "source_hashes": {},
+            "run_id": "run_fixture",
+            "node_id": "node_worker_fixture",
+            "detail_status": "not_built",
+            "started_at": "2026-06-23T01:51:25.888998+00:00",
+            "ended_at": "2026-06-23T01:54:25.123456Z",
+            "details": {"available_sections": [], "missing_sections": []},
+        }
+
+        index = read_models_module._run_index_record(object(), record)  # type: ignore[arg-type]
+
+        self.assertEqual(index["generated_at"], "2026-06-23T01:51:25Z")
+        self.assertEqual(index["started_at"], "2026-06-23T01:51:25Z")
+        self.assertEqual(index["ended_at"], "2026-06-23T01:54:25Z")
+
     def test_rebuild_uses_fast_event_source_refs_without_full_event_hash(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             project = Path(tmp) / "project"
