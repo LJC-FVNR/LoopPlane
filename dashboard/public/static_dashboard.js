@@ -2152,15 +2152,13 @@
   }
 
   function readModelLiveRefreshExpected(payload, rebuild) {
-    var freshness = payload && payload.read_model_freshness && typeof payload.read_model_freshness === "object" ? payload.read_model_freshness : {};
-    var status = text(freshness.status || "");
     return Boolean(
       payload &&
       payload.server_mode &&
-      rebuild &&
-      rebuild.mutation_allowed === true &&
-      !readModelRebuildInProgress(rebuild) &&
-      (status === "stale" || status === "unknown")
+      (
+        payload.read_model_live_refresh_expected === true ||
+        (rebuild && rebuild.live_refresh_expected === true)
+      )
     );
   }
 
