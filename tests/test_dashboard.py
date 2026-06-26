@@ -4237,7 +4237,7 @@ class StaticDashboardTest(unittest.TestCase):
                 if process.stderr is not None:
                     process.stderr.close()
 
-    def test_dashboard_server_records_stale_read_model_rebuild_request_without_rebuilding(self) -> None:
+    def test_dashboard_server_auto_rebuilds_stale_read_models(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             project = Path(tmp) / "project"
             paths, run_dir = prepare_dashboard_project(project)
@@ -4250,16 +4250,15 @@ class StaticDashboardTest(unittest.TestCase):
                 data={"task_id": "T001"},
                 snapshot_interval=None,
             )
-            protected_paths = [
+            read_model_paths = [paths.read_models_dir / filename for filename in READ_MODEL_FILES]
+            authoritative_paths = [
                 project / "PLAN.md",
                 paths.runtime_dir / "state.json",
                 paths.runtime_dir / "events" / "events_000001.jsonl",
                 paths.results_dir / "T001" / "latest.json",
                 run_dir / "validation.json",
-                *(paths.read_models_dir / filename for filename in READ_MODEL_FILES),
             ]
-            authoritative_paths = protected_paths[:5]
-            before = file_hashes(project, protected_paths)
+            read_models_before = file_hashes(project, read_model_paths)
             authoritative_before = file_hashes(project, authoritative_paths)
             port = free_local_port()
             process = subprocess.Popen(
@@ -4294,9 +4293,11 @@ class StaticDashboardTest(unittest.TestCase):
                 self.assertEqual(payload["read_model_rebuild"]["endpoint"], f"/api/workflows/{workflow_id}/rebuild-read-models")
 
                 dashboard_data = request_json(f"{base}/api/workflows/{workflow_id}/dashboard-data", token)
-                self.assertEqual(dashboard_data["read_model_freshness"]["status"], "stale")
+                self.assertEqual(dashboard_data["read_model_freshness"]["status"], "current")
                 self.assertEqual(dashboard_data["read_model_freshness"]["event_log"]["source_event_id"], stale_event["event_id"])
                 self.assertEqual(dashboard_data["read_model_freshness"]["event_log"]["freshness_mode"], "event_manifest")
+                self.assertTrue(dashboard_data["rebuild_read_models"]["ok"])
+                self.assertEqual(dashboard_data["rebuild_read_models"]["status"], "rebuilt")
                 self.assertTrue(dashboard_data["read_model_rebuild"]["mutation_allowed"])
                 self.assertTrue(dashboard_data["read_model_rebuild"]["request_allowed"])
                 self.assertFalse(dashboard_data["read_model_rebuild"]["rebuild_in_progress"])
@@ -4304,39 +4305,16 @@ class StaticDashboardTest(unittest.TestCase):
                     dashboard_data["read_model_rebuild"]["endpoint"],
                     f"/api/workflows/{workflow_id}/rebuild-read-models",
                 )
+                self.assertNotEqual(file_hashes(project, read_model_paths), read_models_before)
+                self.assertEqual(file_hashes(project, authoritative_paths), authoritative_before)
 
                 status_code, unauthorized = request_json_status(endpoint, body={"reason": "missing token"})
                 self.assertEqual(status_code, 401)
                 self.assertEqual(unauthorized["status"], "unauthorized")
-
-                status_code, result = request_json_status(
-                    endpoint,
-                    token=token,
-                    body={"reason": "dashboard stale read model smoke", "source": "dashboard_ui"},
-                    headers={"Origin": base},
-                )
-                self.assertEqual(status_code, 202)
-                self.assertEqual(result["status"], "pending")
-                self.assertTrue(result["read_model_rebuild_request_only"])
-                self.assertEqual(result["request"]["type"], "rebuild_read_models")
-                self.assertEqual(result["request"]["payload"]["freshness"]["status"], "stale")
-                self.assertEqual(result["request"]["payload"]["freshness"]["event_log"]["source_event_id"], stale_event["event_id"])
-
-                after = file_hashes(project, protected_paths)
-                self.assertEqual(after, before)
-
-                control_requests = read_jsonl(paths.runtime_dir / "control_requests.jsonl")
-                self.assertEqual(control_requests[-1]["type"], "rebuild_read_models")
-                self.assertEqual(control_requests[-1]["source"], "dashboard_api")
-                self.assertEqual(control_requests[-1]["payload"]["reason"], "dashboard stale read model smoke")
-                dashboard_data = request_json(f"{base}/api/workflows/{workflow_id}/dashboard-data", token)
-                self.assertEqual(dashboard_data["read_model_freshness"]["status"], "stale")
-                self.assertTrue(dashboard_data["rebuild_read_models"]["ok"])
-                self.assertEqual(dashboard_data["rebuild_read_models"]["status"], "rebuild_not_started")
-                self.assertEqual(dashboard_data["read_model_rebuild"]["pending_count"], 1)
-                self.assertEqual(dashboard_data["read_model_rebuild"]["recent"][-1]["type"], "rebuild_read_models")
+                control_requests_path = paths.runtime_dir / "control_requests.jsonl"
+                if control_requests_path.exists():
+                    self.assertFalse(any(record.get("type") == "rebuild_read_models" for record in read_jsonl(control_requests_path)))
                 self.assertFalse((paths.requests_dir / "dashboard_requests.jsonl").exists())
-                self.assertEqual(file_hashes(project, authoritative_paths), authoritative_before)
             finally:
                 process.terminate()
                 try:

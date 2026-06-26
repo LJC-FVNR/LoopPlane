@@ -6162,14 +6162,21 @@ def _load_live_read_models(
     rebuild_result: Mapping[str, Any] | None = None
     should_rebuild = bool(models["errors"]) or str(freshness.get("status") or "") in {"stale", "unknown"}
     if allow_rebuild and should_rebuild:
-        rebuild_result = {
-            "schema_version": SCHEMA_VERSION,
-            "ok": True,
-            "status": "rebuild_not_started",
-            "workflow_id": workflow_id,
-            "message": "Live dashboard refresh does not rebuild read models synchronously.",
-            "max_dashboard_events": max_dashboard_events,
-        }
+        rebuild_result = rebuild_read_models(
+            project,
+            write=True,
+            workflow_id=workflow_id,
+            max_dashboard_events=max_dashboard_events,
+        )
+        if rebuild_result.get("ok"):
+            models = _load_read_models(
+                paths.read_models_dir,
+                cache=cache,
+                cache_scope=_read_model_cache_scope(project, paths, workflow_id),
+                include_legacy_run_summaries=include_legacy_run_summaries,
+                read_model_files=DASHBOARD_LIVE_READ_MODEL_FILES,
+            )
+            freshness = _read_model_freshness(project, paths, models["json"]) if not models["errors"] else {}
     return models, freshness, rebuild_result
 
 
