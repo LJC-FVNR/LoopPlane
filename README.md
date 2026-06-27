@@ -1,5 +1,9 @@
 <p align="center">
-  <img src="artifacts/showcase/loopplane_logo_light.png" alt="LoopPlane logo" width="64" />
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="artifacts/showcase/loopplane_logo_dark.png" />
+    <source media="(prefers-color-scheme: light)" srcset="artifacts/showcase/loopplane_logo_light.png" />
+    <img src="artifacts/showcase/loopplane_logo_dark.png" alt="LoopPlane logo" width="64" />
+  </picture>
 </p>
 
 <h1 align="center">LoopPlane</h1>
