@@ -1796,19 +1796,23 @@
       "completed_at",
       "finished_at",
       "validated_at",
+      "last_updated_at",
       "updated_at",
       "heartbeat_at",
       "started_at",
+      "prepared_at",
       "ts",
       "timestamp",
+      "generated_at",
       "created_at"
     ].forEach(function (key) {
       var raw = value && value[key];
-      if (typeof raw === "string" && raw) {
-        timestamps.push(raw);
+      var parsed = parseTimestamp(raw);
+      if (parsed !== null) {
+        timestamps.push(parsed);
       }
     });
-    return timestamps.length ? timestamps.sort().pop() : "";
+    return timestamps.length ? timestampIso(Math.max.apply(null, timestamps)) : "";
   }
 
   function compareGraphTimeDesc(leftTime, rightTime) {

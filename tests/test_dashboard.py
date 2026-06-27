@@ -1276,6 +1276,45 @@ class StaticDashboardTest(unittest.TestCase):
         self.assertLess(html.index('data-task-id="P1.T002"'), html.index('data-task-id="P1.T001"'))
         self.assertLess(html.index('data-node-id="run_active_older"'), html.index('data-node-id="run_completed_later"'))
 
+    def test_dashboard_graph_phase_activity_ignores_pending_time_placeholders(self) -> None:
+        plan_index = {
+            "objectives": [],
+            "phases": [
+                {
+                    "phase_id": "P0",
+                    "title": "Phase P0: Research Contract",
+                    "status": "completed",
+                    "tasks": [
+                        {
+                            "task_id": "P0.T001",
+                            "title": "Establish source-grounded research contract",
+                            "status": "completed",
+                            "completed_at": "2026-06-26T18:55:00Z",
+                        }
+                    ],
+                },
+            ],
+        }
+        workflow_graph = {
+            "nodes": [
+                {
+                    "node_id": "event_without_time",
+                    "type": "event",
+                    "status": "applied",
+                    "phase_id": "P0",
+                    "title": "Objective Verifier Applied",
+                    "started_at": "pending",
+                    "ended_at": "pending",
+                }
+            ],
+            "edges": [],
+        }
+
+        html = _render_graph_panel(workflow_graph, plan_index)
+
+        self.assertNotIn("last pending", html)
+        self.assertIn("1 task \u00b7 last 06-26 18:55", html)
+
     def test_dashboard_graph_phase_fallback_uses_natural_order(self) -> None:
         plan_index = {
             "objectives": [],

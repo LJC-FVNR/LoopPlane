@@ -87,18 +87,7 @@ while invoking the process as `codex exec` for non-interactive runs. It sends
 the LoopPlane prompt on stdin, adds `--ask-for-approval never` and
 `--skip-git-repo-check`, and chooses a Codex sandbox from the runner permission
 policy. Non-read-only roles default to `danger-full-access`; read-only runners
-keep `read-only` unless configuration overrides it. It also injects `--json`
-by default and pipes stdout through `CodexJsonRenderer`, which keeps assistant
-messages, command/tool starts, clipped command-output previews, patch/diff
-markers, errors, and a closing `✓ done` marker while dropping token deltas,
-raw reasoning deltas, repeated diff bodies, and advisory warnings. This makes
-dashboard log tails closer to Claude's compact stream logs instead of showing
-raw CLI noise and code-sized payloads. Lines that are not JSON pass through
-verbatim. Tuning knobs in `adapter_options`: set `codex_stream_logs: false` to
-avoid injecting `--json` and disable the renderer; set
-`codex_log_result_preview_chars` to change output preview length (set `0` to
-keep only byte counts); set `codex_log_include_warnings: true` to show Codex
-warning events in the rendered log.
+keep `read-only` unless configuration overrides it.
 
 `interactive_terminal` is not representable by these captured subprocess
 adapters. Their doctor checks report `waiting_config` for that mode until the

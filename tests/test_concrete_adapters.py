@@ -14,7 +14,7 @@ from unittest.mock import patch
 
 from runtime.adapters.base import AdapterInput, AdapterOutput
 from runtime.adapters.claude_code_cli_adapter import ClaudeCodeCliAdapter, ClaudeStreamRenderer
-from runtime.adapters.codex_cli_adapter import CodexCliAdapter, CodexJsonRenderer
+from runtime.adapters.codex_cli_adapter import CodexCliAdapter
 from runtime.adapters.noop_adapter import NoopAdapter
 from runtime.adapters.registry import (
     ADAPTER_CLASSES,
@@ -1083,100 +1083,21 @@ class ConcreteAdapterTest(unittest.TestCase):
             saved = AdapterOutput.read_json(result.adapter_result_path)
             self.assertEqual(saved.to_dict(), result.to_dict())
 
-    def test_codex_cli_injects_json_log_flag(self) -> None:
+    def test_codex_cli_does_not_inject_json_log_flag(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             config = runner_config(adapter="codex_cli", command="codex")
             invocation, _stdin = CodexCliAdapter().build_invocation(adapter_input(root, config))
 
-            self.assertIn("--json", invocation)
-            self.assertEqual(invocation.count("--json"), 1)
-            self.assertLess(invocation.index("exec"), invocation.index("--json"))
-
-    def test_codex_cli_json_logs_can_be_disabled(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            config = runner_config(
-                adapter="codex_cli",
-                command="codex",
-                adapter_options={"codex_stream_logs": False},
-            )
-            invocation, _stdin = CodexCliAdapter().build_invocation(adapter_input(root, config))
-
             self.assertNotIn("--json", invocation)
 
-    def test_codex_cli_respects_explicit_json_log_flag(self) -> None:
+    def test_codex_cli_preserves_explicit_json_flag(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             config = runner_config(adapter="codex_cli", command="codex", args=("--json",))
             invocation, _stdin = CodexCliAdapter().build_invocation(adapter_input(root, config))
 
             self.assertEqual(invocation.count("--json"), 1)
-
-    def test_codex_json_renderer_compacts_events_and_captures_final(self) -> None:
-        renderer = CodexJsonRenderer(result_preview_chars=40)
-        events = [
-            {"method": "turn/started", "params": {"model": "gpt-5.1-codex"}},
-            {"method": "warning", "params": {"message": "startup warning that should not dominate logs"}},
-            {"method": "item/agentMessage/delta", "params": {"itemId": "m1", "delta": "Reading "}},
-            {"method": "item/agentMessage/delta", "params": {"itemId": "m1", "delta": "the logs."}},
-            {"method": "item/completed", "params": {"itemId": "m1", "item": {"type": "agent_message"}}},
-            {
-                "method": "item/commandExecution/terminalInteraction",
-                "params": {"itemId": "cmd1", "command": "rg warnings LoopPlane"},
-            },
-            {"method": "item/commandExecution/outputDelta", "params": {"itemId": "cmd1", "delta": "X" * 8000}},
-            {"method": "process/exited", "params": {"itemId": "cmd1", "exitCode": 0}},
-            {"method": "turn/diff/updated", "params": {"unifiedDiff": "diff --git a/app.py b/app.py\n" + "Y" * 4000}},
-            {
-                "method": "turn/completed",
-                "params": {"finalMessage": "Logs are readable.", "tokenUsage": {"totalTokens": 123}},
-            },
-        ]
-        raw = "\n".join(json.dumps(event) for event in events)
-        rendered = "\n".join(
-            line for line in (renderer.render_line(line) for line in raw.splitlines()) if line is not None
-        )
-
-        self.assertIn("▶ turn start · model=gpt-5.1-codex", rendered)
-        self.assertIn("Reading the logs.", rendered)
-        self.assertIn("$ rg warnings LoopPlane", rendered)
-        self.assertIn("↳ output (8000b):", rendered)
-        self.assertIn("↳ command exited 0", rendered)
-        self.assertIn("diff updated", rendered)
-        self.assertIn("✓ done · 123 tokens", rendered)
-        self.assertNotIn("startup warning", rendered)
-        self.assertLess(len(rendered), len(raw) / 10)
-        self.assertEqual(renderer.final_output(), "Logs are readable.")
-
-    def test_codex_json_renderer_can_include_warnings(self) -> None:
-        renderer = CodexJsonRenderer(include_warnings=True)
-
-        line = renderer.render_line(json.dumps({"method": "warning", "params": {"message": "config warning"}}))
-
-        self.assertEqual(line, "warning: config warning")
-
-    def test_codex_json_renderer_passes_through_non_json(self) -> None:
-        renderer = CodexJsonRenderer()
-
-        self.assertEqual(renderer.render_line("Codex runtime error"), "Codex runtime error")
-        self.assertIsNone(renderer.render_line("   "))
-        self.assertEqual(renderer.final_output(), "Codex runtime error")
-
-    def test_codex_adapter_makes_transform_only_when_json_logs_enabled(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            enabled = runner_config(adapter="codex_cli", command="codex")
-            self.assertIsInstance(
-                CodexCliAdapter().make_stdout_transform(adapter_input(root, enabled)),
-                CodexJsonRenderer,
-            )
-            disabled = runner_config(
-                adapter="codex_cli",
-                command="codex",
-                adapter_options={"codex_stream_logs": False},
-            )
-            self.assertIsNone(CodexCliAdapter().make_stdout_transform(adapter_input(root, disabled)))
 
     def test_claude_code_cli_doctor_inspects_configuration_without_task_execution(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

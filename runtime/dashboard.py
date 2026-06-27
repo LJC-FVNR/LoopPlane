@@ -9160,23 +9160,26 @@ def _latest_graph_node_timestamp(node: Mapping[str, Any]) -> str:
 
 
 def _latest_graph_mapping_timestamp(value: Mapping[str, Any]) -> str:
-    timestamps: list[str] = []
+    timestamps: list[datetime] = []
     for key in (
         "ended_at",
         "completed_at",
         "finished_at",
         "validated_at",
+        "last_updated_at",
         "updated_at",
         "heartbeat_at",
         "started_at",
+        "prepared_at",
         "ts",
         "timestamp",
+        "generated_at",
         "created_at",
     ):
-        raw = value.get(key)
-        if isinstance(raw, str) and raw:
-            timestamps.append(raw)
-    return max(timestamps) if timestamps else ""
+        parsed = _parse_dashboard_timestamp(value.get(key))
+        if parsed is not None:
+            timestamps.append(parsed)
+    return _dashboard_timestamp_iso(max(timestamps)) if timestamps else ""
 
 
 def _reverse_sort_text(value: str) -> str:
