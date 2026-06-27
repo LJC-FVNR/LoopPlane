@@ -1371,18 +1371,7 @@
       return '<p class="empty-state">No graph nodes are present.</p>';
     }
     var groups = graphPhaseGroups(planIndex, nodes);
-    var phaseHtml = groups.map(function (group) {
-      var groupStatus = text(group.status || "runtime");
-      var groupTitle = renderHumanSummaryTrigger(group.title || "Workflow Events", group.human_summary || {}, "graph-summary-link");
-      return '<section class="graph-phase-lane graph-phase-group" data-phase-key="' + escapeHtml(group.phase_key || "") + '" ' + statusAttributes(groupStatus) + expandedAttribute(group) + ">" +
-        '<div class="graph-phase-heading"><div>' +
-        "<strong>" + groupTitle + "</strong>" +
-        expansionNote(group, "Phase") +
-        "<small>" + escapeHtml(group.subtitle || "") + "</small>" +
-        "</div>" + statusPill(groupStatus) + "</div>" +
-        '<div class="graph-task-rail">' + renderGraphTaskCards(group) + "</div>" +
-        "</section>";
-    }).join("");
+    var phaseHtml = groups.map(renderGraphPhaseLane).join("");
     var edgeRows = edges.slice(0, 12).map(function (edge) {
       return "<li>" + escapeHtml(edge.source) + " to " + escapeHtml(edge.target) +
         " <span>" + escapeHtml(edge.type || "edge") + "</span></li>";
@@ -1401,6 +1390,19 @@
       "</div>" +
       '<details class="graph-edge-summary"><summary><strong>Runtime Relations</strong><span>' + escapeHtml(edges.length) +
       '</span></summary><ul class="edge-list">' + edgeRows + "</ul></details>";
+  }
+
+  function renderGraphPhaseLane(group) {
+    var groupStatus = text(group.status || "runtime");
+    var groupTitle = renderHumanSummaryTrigger(group.title || "Workflow Events", group.human_summary || {}, "graph-summary-link");
+    return '<section class="graph-phase-lane graph-phase-group" data-phase-key="' + escapeHtml(group.phase_key || "") + '" ' + statusAttributes(groupStatus) + expandedAttribute(group) + ">" +
+      '<div class="graph-phase-heading"><div>' +
+      "<strong>" + groupTitle + "</strong>" +
+      expansionNote(group, "Phase") +
+      "<small>" + escapeHtml(graphGroupSubtitle(group)) + "</small>" +
+      "</div>" + statusPill(groupStatus) + "</div>" +
+      '<div class="graph-task-rail">' + renderGraphTaskCards(group) + "</div>" +
+      "</section>";
   }
 
   function renderGraphOverview(groups, nodes, edges, workflowGraph) {
@@ -1433,6 +1435,16 @@
       "<span><strong>" + escapeHtml(checkCount) + "</strong> checks</span>" +
       '<span data-status-tier="' + escapeHtml(attentionCount ? "warning" : "muted") + '"><strong>' + escapeHtml(attentionCount) + "</strong> attention</span>" +
       "</div>";
+  }
+
+  function graphGroupSubtitle(group) {
+    var subtitle = text(group && group.subtitle || "");
+    var latest = cleanText(group && group.last_activity_at);
+    if (!latest) {
+      return subtitle;
+    }
+    var latestLabel = "last " + compactTimestamp(latest);
+    return subtitle ? (subtitle + " · " + latestLabel) : latestLabel;
   }
 
   function renderGraphTaskCards(group) {
@@ -1762,15 +1774,13 @@
   }
 
   function graphNodePriority(left, right) {
-    var ranks = {active: 0, danger: 1, warning: 2, info: 3, success: 4, muted: 5};
+    var bucketCompare = graphNodeBucket(left) - graphNodeBucket(right);
+    if (bucketCompare) {
+      return bucketCompare;
+    }
     var timeCompare = compareGraphTimeDesc(latestGraphNodeTime(left), latestGraphNodeTime(right));
     if (timeCompare) {
       return timeCompare;
-    }
-    var leftRank = Object.prototype.hasOwnProperty.call(ranks, statusTier(left.status)) ? ranks[statusTier(left.status)] : 6;
-    var rightRank = Object.prototype.hasOwnProperty.call(ranks, statusTier(right.status)) ? ranks[statusTier(right.status)] : 6;
-    if (leftRank !== rightRank) {
-      return leftRank - rightRank;
     }
     return text(left.node_id || "").localeCompare(text(right.node_id || ""));
   }
@@ -1816,6 +1826,10 @@
 
   function graphTaskPriority(nodes) {
     return function (left, right) {
+      var bucketCompare = graphTaskBucket(left, nodes) - graphTaskBucket(right, nodes);
+      if (bucketCompare) {
+        return bucketCompare;
+      }
       var timeCompare = compareGraphTimeDesc(graphTaskLatestTime(left, nodes), graphTaskLatestTime(right, nodes));
       if (timeCompare) {
         return timeCompare;
@@ -1848,6 +1862,23 @@
   }
 
   function graphGroupPriority(left, right) {
+    var leftBucket = graphGroupBucket(left);
+    var rightBucket = graphGroupBucket(right);
+    if (leftBucket !== rightBucket) {
+      return leftBucket - rightBucket;
+    }
+    var leftOrder = Number.isFinite(Number(left && left.order_index)) ? Number(left.order_index) : 0;
+    var rightOrder = Number.isFinite(Number(right && right.order_index)) ? Number(right.order_index) : 0;
+    if (leftBucket === 1) {
+      if (leftOrder !== rightOrder) {
+        return leftOrder - rightOrder;
+      }
+      var pendingNatural = naturalCompare(graphGroupLabel(left), graphGroupLabel(right));
+      if (pendingNatural) {
+        return pendingNatural;
+      }
+      return text(left && left.phase_key || "").localeCompare(text(right && right.phase_key || ""));
+    }
     var timeCompare = compareGraphTimeDesc(graphGroupActivityTime(left), graphGroupActivityTime(right));
     if (timeCompare) {
       return timeCompare;
@@ -1856,12 +1887,81 @@
     if (natural) {
       return natural;
     }
-    var leftOrder = Number.isFinite(Number(left && left.order_index)) ? Number(left.order_index) : 0;
-    var rightOrder = Number.isFinite(Number(right && right.order_index)) ? Number(right.order_index) : 0;
     if (leftOrder !== rightOrder) {
       return leftOrder - rightOrder;
     }
     return text(left && left.phase_key || "").localeCompare(text(right && right.phase_key || ""));
+  }
+
+  function graphGroupBucket(group) {
+    if (graphGroupHasActiveWork(group)) {
+      return 0;
+    }
+    if (statusTier(group && group.status) === "success") {
+      return 2;
+    }
+    if (graphGroupAllWorkSuccess(group)) {
+      return 2;
+    }
+    return 1;
+  }
+
+  function graphGroupHasActiveWork(group) {
+    if (statusBucket(group && group.status) === 0) {
+      return true;
+    }
+    var tasks = Array.isArray(group && group.tasks) ? group.tasks : [];
+    for (var taskIndex = 0; taskIndex < tasks.length; taskIndex += 1) {
+      if (statusBucket(tasks[taskIndex] && tasks[taskIndex].status) === 0) {
+        return true;
+      }
+    }
+    var nodes = Array.isArray(group && group.nodes) ? group.nodes : [];
+    for (var nodeIndex = 0; nodeIndex < nodes.length; nodeIndex += 1) {
+      if (graphNodeBucket(nodes[nodeIndex]) === 0) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  function graphGroupAllWorkSuccess(group) {
+    var tasks = Array.isArray(group && group.tasks) ? group.tasks : [];
+    if (tasks.length) {
+      return tasks.every(function (task) {
+        return statusTier(task && task.status) === "success";
+      });
+    }
+    var nodes = (Array.isArray(group && group.nodes) ? group.nodes : []).filter(isGraphAgentNode);
+    return nodes.length > 0 && nodes.every(function (node) {
+      return statusTier(node && node.status) === "success";
+    });
+  }
+
+  function graphTaskBucket(task, nodes) {
+    var taskId = text(task && task.task_id || "");
+    var bucket = statusBucket(task && task.status);
+    (Array.isArray(nodes) ? nodes : []).forEach(function (node) {
+      if (text(node && node.task_id || "") === taskId) {
+        bucket = Math.min(bucket, graphNodeBucket(node));
+      }
+    });
+    return bucket;
+  }
+
+  function graphNodeBucket(node) {
+    return statusBucket(node && node.status);
+  }
+
+  function statusBucket(status) {
+    var tier = statusTier(status);
+    if (tier === "active") {
+      return 0;
+    }
+    if (tier === "success") {
+      return 2;
+    }
+    return 1;
   }
 
   function graphGroupActivityTime(group) {

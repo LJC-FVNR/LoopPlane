@@ -8631,30 +8631,7 @@ def _render_graph_panel(workflow_graph: Mapping[str, Any], plan_index: Mapping[s
     if not nodes:
         return '<p class="empty-state">No graph nodes are present.</p>'
     phase_groups = _graph_phase_groups(plan_index, nodes)
-    lane_html = []
-    for group in phase_groups:
-        task_cards = _render_graph_task_cards(group)
-        group_status = _text(group.get("status") or "runtime")
-        group_title = _render_human_summary_trigger(
-            _text(group.get("title") or "Workflow Events"),
-            _mapping(group.get("human_summary")),
-            css_class="graph-summary-link",
-        )
-        lane_html.append(
-            f"""<section class="graph-phase-lane graph-phase-group" data-phase-key="{_escape(_text(group.get("phase_key")))}" {_status_attrs(group_status)}{_expanded_attr(group)}>
-  <div class="graph-phase-heading">
-    <div>
-      <strong>{group_title}</strong>
-      {_expansion_note_html(group, entity_label="Phase")}
-      <small>{_escape(_text(group.get("subtitle") or ""))}</small>
-    </div>
-    {_status_pill(group_status)}
-  </div>
-  <div class="graph-task-rail">
-    {task_cards}
-  </div>
-</section>"""
-        )
+    lane_html = [_render_graph_phase_lane(_mapping(group)) for group in phase_groups]
     edge_rows = []
     for edge in edges[:12]:
         item = _mapping(edge)
@@ -8686,6 +8663,29 @@ def _render_graph_panel(workflow_graph: Mapping[str, Any], plan_index: Mapping[s
     {''.join(edge_rows)}{overflow}
   </ul>
 </details>"""
+
+
+def _render_graph_phase_lane(group: Mapping[str, Any]) -> str:
+    task_cards = _render_graph_task_cards(group)
+    group_status = _text(group.get("status") or "runtime")
+    group_title = _render_human_summary_trigger(
+        _text(group.get("title") or "Workflow Events"),
+        _mapping(group.get("human_summary")),
+        css_class="graph-summary-link",
+    )
+    return f"""<section class="graph-phase-lane graph-phase-group" data-phase-key="{_escape(_text(group.get("phase_key")))}" {_status_attrs(group_status)}{_expanded_attr(group)}>
+  <div class="graph-phase-heading">
+    <div>
+      <strong>{group_title}</strong>
+      {_expansion_note_html(group, entity_label="Phase")}
+      <small>{_escape(_graph_group_subtitle(group))}</small>
+    </div>
+    {_status_pill(group_status)}
+  </div>
+  <div class="graph-task-rail">
+    {task_cards}
+  </div>
+</section>"""
 
 
 def _render_graph_overview(
@@ -8724,6 +8724,15 @@ def _render_graph_overview(
   <span><strong>{check_count}</strong> checks</span>
   <span data-status-tier="{_escape('warning' if hot_nodes else 'muted')}"><strong>{len(hot_nodes)}</strong> attention</span>
 </div>"""
+
+
+def _graph_group_subtitle(group: Mapping[str, Any]) -> str:
+    subtitle = _text(group.get("subtitle") or "")
+    latest = _text(group.get("last_activity_at") or "")
+    if latest:
+        latest_label = f"last {_compact_dashboard_time(latest)}"
+        return f"{subtitle} · {latest_label}" if subtitle else latest_label
+    return subtitle
 
 
 def _render_graph_task_cards(group: Mapping[str, Any]) -> str:
@@ -9035,24 +9044,16 @@ def _truncate_text(value: str, limit: int) -> str:
 
 
 def _graph_node_priority(node: Mapping[str, Any]) -> tuple[int, str, int, str]:
-    tier_rank = {
-        "active": 0,
-        "danger": 1,
-        "warning": 2,
-        "info": 3,
-        "success": 4,
-        "muted": 5,
-    }
     timestamp = _latest_graph_node_timestamp(node)
     return (
-        0 if timestamp else 1,
+        _graph_node_bucket(node),
         _reverse_sort_text(timestamp),
-        tier_rank.get(_status_tier(node.get("status")), 6),
+        0 if timestamp else 1,
         _text(node.get("node_id") or ""),
     )
 
 
-def _graph_task_priority(task: Mapping[str, Any], nodes: Sequence[Mapping[str, Any]]) -> tuple[int, str, int, str]:
+def _graph_task_priority(task: Mapping[str, Any], nodes: Sequence[Mapping[str, Any]]) -> tuple[int, str, int, str, str]:
     task_id = _text(task.get("task_id") or "")
     timestamps = [
         _latest_graph_node_timestamp(node)
@@ -9068,17 +9069,72 @@ def _graph_task_priority(task: Mapping[str, Any], nodes: Sequence[Mapping[str, A
         order = int(order_index)
     except (TypeError, ValueError):
         order = 0
-    return (0 if latest else 1, _reverse_sort_text(latest), order, task_id)
+    return (_graph_task_bucket(task, nodes), _reverse_sort_text(latest), 0 if latest else 1, order, task_id)
 
 
-def _graph_group_priority(group: Mapping[str, Any]) -> tuple[int, str, tuple[tuple[int, Any], ...], int]:
+def _graph_group_priority(group: Mapping[str, Any]) -> tuple[int, int, str, int, tuple[tuple[int, Any], ...], str]:
+    bucket = _graph_group_bucket(group)
     latest = _text(group.get("last_activity_at") or "") or _graph_group_latest_timestamp(group)
     try:
         order = int(group.get("order_index"))
     except (TypeError, ValueError):
         order = 0
     label = _text(group.get("phase_key") or group.get("title") or "")
-    return (0 if latest else 1, _reverse_sort_text(latest), _natural_sort_key(label), order)
+    if bucket == 1:
+        return (bucket, 0, "", order, _natural_sort_key(label), label)
+    return (bucket, 0 if latest else 1, _reverse_sort_text(latest), order, _natural_sort_key(label), label)
+
+
+def _graph_group_bucket(group: Mapping[str, Any]) -> int:
+    if _graph_group_has_active_work(group):
+        return 0
+    if _status_tier(group.get("status")) == "success":
+        return 2
+    if _graph_group_all_work_success(group):
+        return 2
+    return 1
+
+
+def _graph_group_has_active_work(group: Mapping[str, Any]) -> bool:
+    if _status_bucket(group.get("status")) == 0:
+        return True
+    for task in _sequence(group.get("tasks")):
+        if _status_bucket(_mapping(task).get("status")) == 0:
+            return True
+    for node in _sequence(group.get("nodes")):
+        if _graph_node_bucket(_mapping(node)) == 0:
+            return True
+    return False
+
+
+def _graph_group_all_work_success(group: Mapping[str, Any]) -> bool:
+    tasks = [_mapping(task) for task in _sequence(group.get("tasks"))]
+    if tasks:
+        return all(_status_tier(task.get("status")) == "success" for task in tasks)
+    agent_nodes = [_mapping(node) for node in _sequence(group.get("nodes")) if _is_graph_agent_node(_mapping(node))]
+    return bool(agent_nodes) and all(_status_tier(node.get("status")) == "success" for node in agent_nodes)
+
+
+def _graph_task_bucket(task: Mapping[str, Any], nodes: Sequence[Mapping[str, Any]]) -> int:
+    task_id = _text(task.get("task_id") or "")
+    bucket = _status_bucket(task.get("status"))
+    for node in nodes:
+        if _text(_mapping(node).get("task_id") or "") == task_id:
+            bucket = min(bucket, _graph_node_bucket(_mapping(node)))
+    return bucket
+
+
+def _graph_node_bucket(node: Mapping[str, Any]) -> int:
+    return _status_bucket(node.get("status"))
+
+
+def _status_bucket(status: Any) -> int:
+    tier = _status_tier(status)
+    if tier == "active":
+        return 0
+    if tier == "success":
+        return 2
+    return 1
 
 
 def _graph_group_latest_timestamp(group: Mapping[str, Any]) -> str:
