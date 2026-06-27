@@ -40,7 +40,7 @@ def main(argv: list[str]) -> int:
         print("usage: write_smoke_plan.py <project>", file=sys.stderr)
         return 2
     project = Path(argv[1]).expanduser().resolve()
-    workflow, _workflow_path = _load_workflow(project)
+    workflow, workflow_path = _load_workflow(project)
     workflow_id = workflow["workflow_id"]
     plan_file = str(workflow.get("plan_file") or "PLAN.md")
     runtime_dir = str(workflow.get("runtime_dir") or ".loopplane/runtime")
@@ -67,6 +67,24 @@ def main(argv: list[str]) -> int:
   - max_attempts: 3
   - approval: not_required
   - deliverables: artifacts/result.txt and report.md
+
+### Phase Objective Checklist
+
+- [ ] `PO1` The minimal release smoke artifact is present and reviewable.
+  - evidence_scope: {results_dir}/T001/
+  - judgment_guidance: Confirm the latest T001 evidence points to the result artifact and completion report.
+  - verifier: objective_verifier
+  - unmet_action: self_expand
+  - max_expansions: 1
+
+## Final Objective Checklist
+
+- [ ] `FO1` The minimal smoke workflow is complete enough for handoff.
+  - evidence_scope: {results_dir}/T001/
+  - judgment_guidance: Confirm T001 is complete, validated, and backed by durable evidence.
+  - verifier: objective_verifier
+  - unmet_action: self_expand
+  - max_expansions: 1
 """
     plan_path = _project_path(project, plan_file, "PLAN.md")
     plan_path.write_text(plan, encoding="utf-8")
@@ -96,6 +114,14 @@ def main(argv: list[str]) -> int:
         "activated_at": updated_at,
     }
     state_path.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    runners_path = workflow_path.parent / "agent_runners.json"
+    if runners_path.is_file():
+        runners = json.loads(runners_path.read_text(encoding="utf-8"))
+        runner_map = runners.get("runners") if isinstance(runners.get("runners"), dict) else {}
+        final_reviewer = runner_map.get("final_reviewer") if isinstance(runner_map.get("final_reviewer"), dict) else None
+        if final_reviewer is not None:
+            final_reviewer["enabled"] = False
+            runners_path.write_text(json.dumps(runners, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     sync_active_workflow_projections(
         project,
         workflow,

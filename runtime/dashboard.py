@@ -9071,15 +9071,32 @@ def _graph_task_priority(task: Mapping[str, Any], nodes: Sequence[Mapping[str, A
     return (0 if latest else 1, _reverse_sort_text(latest), order, task_id)
 
 
-def _graph_group_priority(group: Mapping[str, Any]) -> tuple[int, str, int, str]:
-    timestamps = [_latest_graph_node_timestamp(_mapping(node)) for node in _sequence(group.get("nodes"))]
-    timestamps.extend(_latest_graph_mapping_timestamp(_mapping(task)) for task in _sequence(group.get("tasks")))
-    latest = max((timestamp for timestamp in timestamps if timestamp), default="")
+def _graph_group_priority(group: Mapping[str, Any]) -> tuple[int, str, tuple[tuple[int, Any], ...], int]:
+    latest = _text(group.get("last_activity_at") or "") or _graph_group_latest_timestamp(group)
     try:
         order = int(group.get("order_index"))
     except (TypeError, ValueError):
         order = 0
-    return (0 if latest else 1, _reverse_sort_text(latest), order, _text(group.get("phase_key") or ""))
+    label = _text(group.get("phase_key") or group.get("title") or "")
+    return (0 if latest else 1, _reverse_sort_text(latest), _natural_sort_key(label), order)
+
+
+def _graph_group_latest_timestamp(group: Mapping[str, Any]) -> str:
+    timestamps = [_latest_graph_node_timestamp(_mapping(node)) for node in _sequence(group.get("nodes"))]
+    timestamps.extend(_latest_graph_mapping_timestamp(_mapping(task)) for task in _sequence(group.get("tasks")))
+    return max((timestamp for timestamp in timestamps if timestamp), default="")
+
+
+def _natural_sort_key(value: str) -> tuple[tuple[int, Any], ...]:
+    parts: list[tuple[int, Any]] = []
+    for part in re.split(r"(\d+)", value.lower()):
+        if not part:
+            continue
+        if part.isdigit():
+            parts.append((0, int(part)))
+        else:
+            parts.append((1, part))
+    return tuple(parts)
 
 
 def _latest_graph_node_timestamp(node: Mapping[str, Any]) -> str:
@@ -9141,6 +9158,11 @@ def _graph_phase_groups(plan_index: Mapping[str, Any], nodes: Sequence[Any]) -> 
                     "title": _text(_mapping(task).get("title") or "Untitled task"),
                     "status": _text(_mapping(task).get("status") or "planned"),
                     "deliverables": _text(_mapping(task).get("deliverables") or ""),
+                    "last_updated_at": _text(_mapping(task).get("last_updated_at") or ""),
+                    "started_at": _text(_mapping(task).get("started_at") or ""),
+                    "ended_at": _text(_mapping(task).get("ended_at") or ""),
+                    "completed_at": _text(_mapping(task).get("completed_at") or ""),
+                    "validated_at": _text(_mapping(task).get("validated_at") or ""),
                     "human_summary": dict(_mapping(_mapping(task).get("human_summary"))),
                     "expanded": _mapping(task).get("expanded") is True,
                     "expansion_marker": _mapping(task).get("expansion_marker"),
@@ -9183,6 +9205,8 @@ def _graph_phase_groups(plan_index: Mapping[str, Any], nodes: Sequence[Any]) -> 
         if group is None:
             group = event_group
         group["nodes"].append(node)
+    for group in [*groups, event_group]:
+        group["last_activity_at"] = _graph_group_latest_timestamp(group)
     visible_groups = [group for group in groups if group.get("nodes") or group.get("task_ids")]
     if event_group["nodes"]:
         visible_groups.append(event_group)

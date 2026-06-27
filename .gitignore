@@ -32,3 +32,6 @@ dist/
 *.db
 *.log
 *.tmp
+
+# Internal productization and launch planning notes.
+PRODUCTIZATION_*.md

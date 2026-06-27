@@ -114,9 +114,9 @@ class ShellAdapter(AgentAdapter):
             )
 
         env = _process_env(adapter_input, paths)
-        # A stdout transform (e.g. the Claude adapter's stream-json renderer)
+        # A stdout transform (e.g. CLI adapter JSON renderers)
         # rewrites each line before it lands in stdout.log; absent one, stdout is
-        # redirected straight to the file with zero overhead (shell/codex path).
+        # redirected straight to the file with zero overhead (plain shell path).
         stdout_transform = self.make_stdout_transform(adapter_input)
         with acquire_runner_resource_lock(adapter_input) as runner_lock:
             process: subprocess.Popen[str] | None = None

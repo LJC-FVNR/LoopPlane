@@ -88,17 +88,23 @@ follow-up tasks and return control to the scheduler.
 
 ## Example Dashboard Surface
 
-![LoopPlane plan and dashboard overview](artifacts/showcase/dashboard_plan_surface.png)
+![LoopPlane dashboard showcase overview](artifacts/showcase/dashboard_showcase_overview.png)
 
-![LoopPlane selected node and expanded runtime graph](artifacts/showcase/dashboard_runtime_surface.png)
+![LoopPlane dashboard plan and workflow status review](artifacts/showcase/dashboard_plan_review.png)
+
+![LoopPlane dashboard monitoring an active workflow](artifacts/showcase/dashboard_midrun_graph.png)
+
+![LoopPlane dashboard evidence and gate monitoring](artifacts/showcase/dashboard_active_monitoring.png)
 
 The dashboard is intended for review and operation. It shows the current plan,
 objective states, task evidence, workflow graph, summary content, approvals,
-runtime health, and registered workflow histories. The first view pairs the
-active plan with the workflow dashboard. The second view pairs selected-node
-evidence with an expanded runtime graph so the agent pipeline is easier to
-inspect. The source of truth remains the project-local workflow records; the
-dashboard is a projection over those records.
+runtime health, and registered workflow histories. The first view shows the
+plan, workflow selector, and live status cards in one clean review surface. The
+second view emphasizes a mid-run workflow graph with selected-node state and
+objective-gate activity. The third view focuses on active monitoring: worker
+evidence, control/activity panels, checkpoints, and gate attention while work is
+still in progress. The source of truth remains the project-local workflow
+records; the dashboard is a projection over those records.
 
 ## Design Summary
 

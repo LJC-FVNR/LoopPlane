@@ -1848,9 +1848,13 @@
   }
 
   function graphGroupPriority(left, right) {
-    var timeCompare = compareGraphTimeDesc(graphGroupLatestTime(left), graphGroupLatestTime(right));
+    var timeCompare = compareGraphTimeDesc(graphGroupActivityTime(left), graphGroupActivityTime(right));
     if (timeCompare) {
       return timeCompare;
+    }
+    var natural = naturalCompare(graphGroupLabel(left), graphGroupLabel(right));
+    if (natural) {
+      return natural;
     }
     var leftOrder = Number.isFinite(Number(left && left.order_index)) ? Number(left.order_index) : 0;
     var rightOrder = Number.isFinite(Number(right && right.order_index)) ? Number(right.order_index) : 0;
@@ -1858,6 +1862,46 @@
       return leftOrder - rightOrder;
     }
     return text(left && left.phase_key || "").localeCompare(text(right && right.phase_key || ""));
+  }
+
+  function graphGroupActivityTime(group) {
+    return cleanText(group && group.last_activity_at) || graphGroupLatestTime(group);
+  }
+
+  function graphGroupLabel(group) {
+    return text(group && (group.phase_key || group.title) || "");
+  }
+
+  function naturalCompare(left, right) {
+    var leftParts = String(left || "").toLowerCase().split(/(\d+)/).filter(Boolean);
+    var rightParts = String(right || "").toLowerCase().split(/(\d+)/).filter(Boolean);
+    var length = Math.max(leftParts.length, rightParts.length);
+    for (var index = 0; index < length; index += 1) {
+      if (index >= leftParts.length) {
+        return -1;
+      }
+      if (index >= rightParts.length) {
+        return 1;
+      }
+      var leftPart = leftParts[index];
+      var rightPart = rightParts[index];
+      var leftNumber = /^\d+$/.test(leftPart) ? Number(leftPart) : null;
+      var rightNumber = /^\d+$/.test(rightPart) ? Number(rightPart) : null;
+      if (leftNumber !== null && rightNumber !== null && leftNumber !== rightNumber) {
+        return leftNumber - rightNumber;
+      }
+      if (leftNumber !== null && rightNumber === null) {
+        return -1;
+      }
+      if (leftNumber === null && rightNumber !== null) {
+        return 1;
+      }
+      var textCompare = leftPart.localeCompare(rightPart);
+      if (textCompare) {
+        return textCompare;
+      }
+    }
+    return 0;
   }
 
   function graphGroupLatestTime(group) {
@@ -1910,6 +1954,11 @@
           title: text(task.title || "Untitled task"),
           status: text(task.status || "planned"),
           deliverables: task.deliverables || "",
+          last_updated_at: text(task.last_updated_at || ""),
+          started_at: text(task.started_at || ""),
+          ended_at: text(task.ended_at || ""),
+          completed_at: text(task.completed_at || ""),
+          validated_at: text(task.validated_at || ""),
           human_summary: task.human_summary && typeof task.human_summary === "object" ? task.human_summary : {},
           expanded: task.expanded === true,
           expansion: task.expansion && typeof task.expansion === "object" ? task.expansion : null,
@@ -1953,6 +2002,9 @@
         group = eventGroup;
       }
       group.nodes.push(node);
+    });
+    groups.concat([eventGroup]).forEach(function (group) {
+      group.last_activity_at = graphGroupLatestTime(group);
     });
     var visible = groups.filter(function (group) {
       return group.nodes.length || group.task_ids.length;

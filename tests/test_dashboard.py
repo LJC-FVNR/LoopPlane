@@ -860,6 +860,8 @@ class StaticDashboardTest(unittest.TestCase):
             self.assertIn("markdown-table-wrap", static_js)
             self.assertIn("renderMarkdownFigure", static_js)
             self.assertIn("markdownAssetUrl", static_js)
+            self.assertIn("naturalCompare", static_js)
+            self.assertIn("last_activity_at", static_js)
             self.assertNotIn("markdown-plain-link", static_js)
             self.assertLess(
                 static_js.index('\'<ol class="task-list">\' + taskRows'),
@@ -1125,6 +1127,121 @@ class StaticDashboardTest(unittest.TestCase):
         self.assertNotIn("06-18 10:00 -&gt; 06-18 10:01", graph_html)
         self.assertIn("<strong>2</strong> recent events<small>of 300</small>", graph_html)
         self.assertIn("<strong>42</strong> self-expansion aggregated", graph_html)
+
+    def test_dashboard_orders_graph_phases_by_latest_activity_desc(self) -> None:
+        plan_index = {
+            "objectives": [],
+            "phases": [
+                {
+                    "phase_id": "P1",
+                    "title": "Phase P1",
+                    "status": "done",
+                    "tasks": [{"task_id": "P1.T001", "title": "P1 task"}],
+                },
+                {
+                    "phase_id": "P2",
+                    "title": "Phase P2",
+                    "status": "done",
+                    "tasks": [{"task_id": "P2.T001", "title": "P2 task"}],
+                },
+                {
+                    "phase_id": "P10",
+                    "title": "Phase P10",
+                    "status": "done",
+                    "tasks": [{"task_id": "P10.T001", "title": "P10 task"}],
+                },
+                {
+                    "phase_id": "P20",
+                    "title": "Phase P20",
+                    "status": "done",
+                    "tasks": [{"task_id": "P20.T001", "title": "P20 task"}],
+                },
+            ],
+        }
+        workflow_graph = {
+            "nodes": [
+                {
+                    "node_id": "run_p1",
+                    "type": "worker",
+                    "status": "done",
+                    "task_id": "P1.T001",
+                    "run_id": "run_p1",
+                    "ended_at": "2026-06-18T01:00:00Z",
+                },
+                {
+                    "node_id": "run_p2",
+                    "type": "worker",
+                    "status": "done",
+                    "task_id": "P2.T001",
+                    "run_id": "run_p2",
+                    "ended_at": "2026-06-18T04:00:00Z",
+                },
+                {
+                    "node_id": "run_p10",
+                    "type": "worker",
+                    "status": "done",
+                    "task_id": "P10.T001",
+                    "run_id": "run_p10",
+                    "ended_at": "2026-06-18T03:00:00Z",
+                },
+                {
+                    "node_id": "run_p20",
+                    "type": "worker",
+                    "status": "done",
+                    "task_id": "P20.T001",
+                    "run_id": "run_p20",
+                    "ended_at": "2026-06-18T05:00:00Z",
+                },
+            ],
+            "edges": [],
+        }
+
+        html = _render_graph_panel(workflow_graph, plan_index)
+
+        self.assertLess(html.index('data-phase-key="P20"'), html.index('data-phase-key="P2"'))
+        self.assertLess(html.index('data-phase-key="P2"'), html.index('data-phase-key="P10"'))
+        self.assertLess(html.index('data-phase-key="P10"'), html.index('data-phase-key="P1"'))
+
+    def test_dashboard_graph_phase_fallback_uses_natural_order(self) -> None:
+        plan_index = {
+            "objectives": [],
+            "phases": [
+                {
+                    "phase_id": "P1",
+                    "title": "Phase P1",
+                    "status": "pending",
+                    "tasks": [{"task_id": "P1.T001", "title": "P1 task"}],
+                },
+                {
+                    "phase_id": "P2",
+                    "title": "Phase P2",
+                    "status": "pending",
+                    "tasks": [{"task_id": "P2.T001", "title": "P2 task"}],
+                },
+                {
+                    "phase_id": "P10",
+                    "title": "Phase P10",
+                    "status": "pending",
+                    "tasks": [{"task_id": "P10.T001", "title": "P10 task"}],
+                },
+                {
+                    "phase_id": "P20",
+                    "title": "Phase P20",
+                    "status": "pending",
+                    "tasks": [{"task_id": "P20.T001", "title": "P20 task"}],
+                },
+            ],
+        }
+        workflow_graph = {
+            "nodes": [{"node_id": "event_1", "type": "event", "status": "scheduler_tick", "title": "Scheduler tick"}],
+            "edges": [],
+        }
+
+        html = _render_graph_panel(workflow_graph, plan_index)
+
+        self.assertLess(html.index('data-phase-key="P1"'), html.index('data-phase-key="P2"'))
+        self.assertLess(html.index('data-phase-key="P2"'), html.index('data-phase-key="P10"'))
+        self.assertLess(html.index('data-phase-key="P10"'), html.index('data-phase-key="P20"'))
 
     def test_static_dashboard_shows_ready_planning_draft_before_activation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
