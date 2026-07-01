@@ -12,6 +12,17 @@
   var logStreamTimer = null;
   var logStreamInFlight = false;
   var workflowHistoryShowAll = false;
+  var activeSelectedNodeId = "";
+  var activeGraphMode = "pipeline";
+  var cytoscapeLoadPromise = null;
+  var networkGraphInstance = null;
+  var networkGraphWorkflowId = "";
+  var networkGraphIncludeHiddenEdges = false;
+  var networkGraphSavedState = null;
+  var networkGraphLayoutReady = false;
+  var networkGraphLayoutMode = "temporal";
+  var CYTOSCAPE_VENDOR_SRC = "vendor/cytoscape.min.js";
+  var NETWORK_GRAPH_WHEEL_SENSITIVITY = 1.2;
 
   function readPayloadNode() {
     var node = document.getElementById("loopplane-read-models");
@@ -327,7 +338,7 @@
     var endCandidates = [];
     var status = workflowStatus && typeof workflowStatus === "object" ? workflowStatus : {};
     var graph = workflowGraph && typeof workflowGraph === "object" ? workflowGraph : {};
-    var nodes = Array.isArray(graph.nodes) ? graph.nodes : [];
+    var nodes = pipelineGraphNodes(Array.isArray(graph.nodes) ? graph.nodes : []);
     var feedRows = Array.isArray(feed) ? feed : [];
     [status.started_at, status.created_at, payload && payload.started_at].forEach(function (value) {
       var ms = parseTimestamp(value);
@@ -508,10 +519,13 @@
     var streamHtml = isLogPath(pathValue) ? '<button type="button" class="detail-file-button" data-log-stream-title="' +
       escapeHtml(title || "Log Stream") + '"' + dataPath + ">Follow log tail</button>" : "";
     var sizeRow = metadata && metadata.size_bytes !== undefined && metadata.size_bytes !== null ? row("Size", metadata.size_bytes + " bytes") : "";
+    var lastWritten = metadata && metadata.last_written_at ? fileWrittenLabel(metadata.last_written_at) : "";
+    var lastWrittenRow = isLogPath(pathValue) && lastWritten ? row("Last Written", lastWritten) : "";
     return '<div class="detail-file-card"' + truncatedAttr + ">" +
       '<dl class="detail-list compact-detail-list">' +
       (pathValue ? row("Path", pathValue) : "") +
       sizeRow +
+      lastWrittenRow +
       "</dl>" +
       '<div class="detail-file-actions">' +
       linkHtml +
@@ -648,6 +662,8 @@
       events_segment_manifest: true,
       content_sha256: true,
       source_hashes: true,
+      last_written_at: true,
+      mtime_ns: true,
       token: true,
       access_token: true,
       api_key: true,
@@ -670,9 +686,17 @@
     return result;
   }
 
+  function fileWrittenLabel(value) {
+    var parsed = parseTimestamp(value);
+    if (parsed !== null) {
+      return compactTimestamp(value);
+    }
+    return text(value || "");
+  }
+
   function buildPhaseTiming(phase, tasks, workflowGraph, referenceTime) {
     var graph = workflowGraph && typeof workflowGraph === "object" ? workflowGraph : {};
-    var nodes = Array.isArray(graph.nodes) ? graph.nodes : [];
+    var nodes = pipelineGraphNodes(Array.isArray(graph.nodes) ? graph.nodes : []);
     var taskIds = {};
     var starts = [];
     var ends = [];
@@ -1366,30 +1390,64 @@
 
   function renderGraphPanel(workflowGraph, planIndex) {
     var nodes = Array.isArray(workflowGraph.nodes) ? workflowGraph.nodes : [];
+    var pipelineNodes = pipelineGraphNodes(nodes);
     var edges = Array.isArray(workflowGraph.edges) ? workflowGraph.edges : [];
-    if (nodes.length === 0) {
-      return '<p class="empty-state">No graph nodes are present.</p>';
-    }
-    var groups = graphPhaseGroups(planIndex, nodes);
+    var groups = graphPhaseGroups(planIndex, pipelineNodes);
     var phaseHtml = groups.map(renderGraphPhaseLane).join("");
-    var edgeRows = edges.slice(0, 12).map(function (edge) {
-      return "<li>" + escapeHtml(edge.source) + " to " + escapeHtml(edge.target) +
-        " <span>" + escapeHtml(edge.type || "edge") + "</span></li>";
-    }).join("");
-    if (edges.length > 12) {
-      edgeRows += "<li>" + escapeHtml(edges.length - 12) + " more edges</li>";
-    }
-    return '<div class="graph-mode-toolbar">' +
-      '<div><span class="eyebrow">Graph Mode</span><strong>Agent Pipeline</strong></div>' +
+    var pipelineEmpty = pipelineNodes.length ? "" : '<p class="empty-state">No graph nodes are present.</p>';
+    return '<div class="graph-panel-root" data-graph-panel-root>' +
+      '<div class="graph-mode-toolbar">' +
+      '<div class="graph-mode-picker"><span class="eyebrow">Graph Mode</span><div class="graph-mode-switch" role="group" aria-label="Graph mode">' +
+      '<button type="button" class="is-active" data-graph-mode-choice="pipeline" aria-pressed="true">Agent Pipeline</button>' +
+      '<button type="button" data-graph-mode-choice="network" aria-pressed="false">Network Graph</button>' +
+      "</div></div>" +
       '<div class="graph-mode-actions"><small>Agent runs, lifecycle events, and validation checks.</small>' +
       '<button type="button" class="graph-expand-toggle" data-graph-expand-toggle aria-pressed="false">Expand All</button></div>' +
       "</div>" +
-      renderGraphOverview(groups, nodes, edges, workflowGraph) +
+      '<section data-graph-view="pipeline">' +
+      renderGraphOverview(groups, pipelineNodes, edges, workflowGraph) +
+      pipelineEmpty +
       '<div class="graph-pipeline-scroll" tabindex="0" aria-label="Scrollable phase pipeline">' +
       '<div class="graph-pipeline" data-graph-mode="phase_pipeline">' + phaseHtml + "</div>" +
       "</div>" +
       '<details class="graph-edge-summary"><summary><strong>Runtime Relations</strong><span>' + escapeHtml(edges.length) +
-      '</span></summary><ul class="edge-list">' + edgeRows + "</ul></details>";
+      '</span></summary><ul class="edge-list">' + renderGraphEdgeSummaryRows(edges) + "</ul></details>" +
+      "</section>" +
+      '<section data-graph-view="network" hidden>' +
+      '<div class="network-graph-controls" data-network-graph-controls hidden></div>' +
+      '<div class="network-graph-canvas" data-network-graph-canvas></div>' +
+      '<p class="network-graph-status" data-network-graph-status>Network graph is not loaded.</p>' +
+      "</section>" +
+      "</div>";
+  }
+
+  function pipelineGraphNodes(nodes) {
+    return (Array.isArray(nodes) ? nodes : []).filter(function (node) {
+      var type = cleanText(node && (node.type || node.kind)).toLowerCase();
+      return !(node && node.pipeline_visible === false && (type === "phase" || type === "task"));
+    });
+  }
+
+  function renderGraphEdgeSummaryRows(edges) {
+    var counts = {};
+    var hiddenCounts = {};
+    if (!Array.isArray(edges) || !edges.length) {
+      return "<li>No runtime relations are present.</li>";
+    }
+    edges.forEach(function (edge) {
+      var type = text(edge && edge.type || "edge");
+      counts[type] = (counts[type] || 0) + 1;
+      if (edge && edge.hidden_by_default === true) {
+        hiddenCounts[type] = (hiddenCounts[type] || 0) + 1;
+      }
+    });
+    return Object.keys(counts).sort().map(function (type) {
+      var hidden = hiddenCounts[type] || 0;
+      var suffix = hidden ? " (" + hidden + " hidden by default)" : "";
+      return "<li>" + escapeHtml(type.replace(/_/g, " ").replace(/\b\w/g, function (letter) {
+        return letter.toUpperCase();
+      })) + " <span>" + escapeHtml(counts[type] + suffix) + "</span></li>";
+    }).join("");
   }
 
   function renderGraphPhaseLane(group) {
@@ -1421,6 +1479,11 @@
     var aggregationHtml = aggregatedCount ?
       "<span><strong>" + escapeHtml(aggregatedCount) + "</strong> self-expansion aggregated</span>" :
       "";
+    var verifierAggregation = workflowGraph && workflowGraph.objective_verifier_aggregation && typeof workflowGraph.objective_verifier_aggregation === "object" ? workflowGraph.objective_verifier_aggregation : {};
+    var verifierAggregatedCount = positiveInteger(verifierAggregation.aggregated_node_count) || 0;
+    var verifierAggregationHtml = verifierAggregatedCount ?
+      "<span><strong>" + escapeHtml(verifierAggregatedCount) + "</strong> verifier runs aggregated</span>" :
+      "";
     var checkCount = nodes.filter(isGraphCheckNode).length;
     var attentionCount = nodes.filter(function (node) {
       var tier = statusTier(node.status);
@@ -1432,6 +1495,7 @@
       "<span><strong>" + escapeHtml(agentCount) + "</strong> agents</span>" +
       "<span><strong>" + escapeHtml(eventCount) + "</strong> " + escapeHtml(eventLabel) + eventSuffix + "</span>" +
       aggregationHtml +
+      verifierAggregationHtml +
       "<span><strong>" + escapeHtml(checkCount) + "</strong> checks</span>" +
       '<span data-status-tier="' + escapeHtml(attentionCount ? "warning" : "muted") + '"><strong>' + escapeHtml(attentionCount) + "</strong> attention</span>" +
       "</div>";
@@ -3111,42 +3175,1100 @@
     }
   }
 
-  function mountNodeDetails(payload, preferredNodeId) {
+  function destroyNetworkGraph(options) {
+    if (!options || options.rememberState !== false) {
+      rememberNetworkGraphState();
+    }
+    if (networkGraphInstance && typeof networkGraphInstance.destroy === "function") {
+      try {
+        networkGraphInstance.destroy();
+      } catch (error) {
+        networkGraphInstance = null;
+        networkGraphWorkflowId = "";
+        return;
+      }
+    }
+    networkGraphInstance = null;
+    networkGraphWorkflowId = "";
+    networkGraphLayoutReady = false;
+  }
+
+  function networkGraphStateKey(payload) {
+    var workflowId = cleanText(payload && payload.workflow_id) || cleanText(networkGraphWorkflowId) || "workflow";
+    return workflowId + "::" + networkGraphLayoutMode + "::" + (networkGraphIncludeHiddenEdges ? "events" : "main");
+  }
+
+  function networkGraphStateMatches(state, payload) {
+    return Boolean(state && state.key === networkGraphStateKey(payload));
+  }
+
+  function validNetworkPosition(position) {
+    return position &&
+      typeof position.x === "number" &&
+      typeof position.y === "number" &&
+      isFinite(position.x) &&
+      isFinite(position.y);
+  }
+
+  function captureNetworkGraphPositions() {
+    var positions = {};
+    var count = 0;
+    if (!networkGraphInstance || !networkGraphInstance.nodes) {
+      return {positions: positions, count: count};
+    }
+    networkGraphInstance.nodes().forEach(function (node) {
+      var position = node.position && node.position();
+      if (validNetworkPosition(position)) {
+        positions[node.id()] = {x: position.x, y: position.y};
+        count += 1;
+      }
+    });
+    return {positions: positions, count: count};
+  }
+
+  function rememberNetworkGraphState(options) {
+    var stateOptions = options || {};
+    if (!networkGraphInstance || !networkGraphInstance.zoom || !networkGraphInstance.pan) {
+      return networkGraphSavedState;
+    }
+    if (!networkGraphLayoutReady && !stateOptions.allowUnstable) {
+      return networkGraphSavedState;
+    }
+    var positionState = captureNetworkGraphPositions();
+    networkGraphSavedState = {
+      key: networkGraphStateKey(activePayload),
+      workflowId: cleanText(activePayload && activePayload.workflow_id) || cleanText(networkGraphWorkflowId),
+      includeHiddenEdges: networkGraphIncludeHiddenEdges,
+      layoutMode: networkGraphLayoutMode,
+      zoom: networkGraphInstance.zoom(),
+      pan: networkGraphInstance.pan(),
+      positions: positionState.positions,
+      positionCount: positionState.count
+    };
+    return networkGraphSavedState;
+  }
+
+  function rememberNetworkGraphViewport() {
+    if (!networkGraphInstance || !networkGraphInstance.zoom || !networkGraphInstance.pan) {
+      return;
+    }
+    if (!networkGraphLayoutReady) {
+      return;
+    }
+    if (!networkGraphSavedState || networkGraphSavedState.key !== networkGraphStateKey(activePayload)) {
+      rememberNetworkGraphState();
+      return;
+    }
+    networkGraphSavedState.zoom = networkGraphInstance.zoom();
+    networkGraphSavedState.pan = networkGraphInstance.pan();
+  }
+
+  function restoreNetworkGraphViewport(state) {
+    if (!networkGraphInstance || !state) {
+      return false;
+    }
+    if (typeof state.zoom === "number" && isFinite(state.zoom) && networkGraphInstance.zoom) {
+      networkGraphInstance.zoom(state.zoom);
+    }
+    if (state.pan && typeof state.pan.x === "number" && typeof state.pan.y === "number" && networkGraphInstance.pan) {
+      networkGraphInstance.pan({x: state.pan.x, y: state.pan.y});
+    }
+    rememberNetworkGraphViewport();
+    return true;
+  }
+
+  function applyNetworkGraphPositions(state) {
+    if (!networkGraphInstance || !networkGraphInstance.nodes || !state || !state.positions) {
+      return 0;
+    }
+    var applied = 0;
+    networkGraphInstance.nodes().forEach(function (node) {
+      var position = state.positions[node.id()];
+      if (validNetworkPosition(position) && node.position) {
+        node.position({x: position.x, y: position.y});
+        applied += 1;
+      }
+    });
+    if (applied > 0) {
+      networkGraphLayoutReady = true;
+    }
+    return applied;
+  }
+
+  function loadScript(src) {
+    return new Promise(function (resolve, reject) {
+      if (!document || !document.createElement) {
+        reject(new Error("Document cannot load scripts."));
+        return;
+      }
+      var script = document.createElement("script");
+      script.async = true;
+      script.src = src;
+      script.onload = function () {
+        resolve();
+      };
+      script.onerror = function () {
+        reject(new Error("Unable to load " + src));
+      };
+      (document.head || document.documentElement).appendChild(script);
+    });
+  }
+
+  function loadCytoscapeBundleOnce() {
+    if (window.cytoscape) {
+      return Promise.resolve(window.cytoscape);
+    }
+    if (!cytoscapeLoadPromise) {
+      cytoscapeLoadPromise = loadScript(CYTOSCAPE_VENDOR_SRC).then(function () {
+        if (!window.cytoscape) {
+          throw new Error("Cytoscape loaded without exposing a renderer.");
+        }
+        return window.cytoscape;
+      });
+    }
+    return cytoscapeLoadPromise;
+  }
+
+  function graphClassName(value) {
+    var cleaned = cleanText(value).toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "");
+    return cleaned || "unknown";
+  }
+
+  function networkGraphNodeType(node) {
+    return graphClassName(node && (node.kind || node.type || "node"));
+  }
+
+  function networkGraphNodeLayer(node) {
+    var explicit = graphClassName(node && node.layer);
+    var type = networkGraphNodeType(node);
+    if (explicit !== "unknown") {
+      return explicit;
+    }
+    if (type === "phase" || type === "task") {
+      return "plan";
+    }
+    if (type === "objective") {
+      return "objective";
+    }
+    if (type === "validation" || type === "check") {
+      return "validation";
+    }
+    if (type === "event") {
+      return "event";
+    }
+    return "runtime";
+  }
+
+  function networkGraphNodeLabel(node) {
+    var label = cleanText(node && (node.display_label || node.task_id || node.title || node.node_id));
+    return truncateText(label || "Node", 44);
+  }
+
+  function networkGraphNodeTimeMs(node) {
+    var item = node && typeof node === "object" ? node : {};
+    return firstTimestamp(item, [
+      "started_at",
+      "prepared_at",
+      "created_at",
+      "ts",
+      "timestamp"
+    ]);
+  }
+
+  function networkGraphNodeSize(node) {
+    var type = networkGraphNodeType(node);
+    var size = 34;
+    if (type === "phase") {
+      size = 58;
+    } else if (type === "task") {
+      size = 46;
+    } else if (type === "objective") {
+      size = 40;
+    } else if (type === "validation" || type === "check") {
+      size = 34;
+    } else if (type === "event") {
+      size = 24;
+    }
+    if (statusTier(node && node.status) === "active") {
+      size += 6;
+    }
+    return size;
+  }
+
+  function networkGraphNodeColor(node) {
+    var type = networkGraphNodeType(node);
+    if (type === "phase") {
+      return "#14b8a6";
+    }
+    if (type === "task") {
+      return "#38bdf8";
+    }
+    if (type === "objective") {
+      return "#f59e0b";
+    }
+    if (type === "validation" || type === "check") {
+      return "#22c55e";
+    }
+    if (type === "event") {
+      return "#94a3b8";
+    }
+    if (type === "worker") {
+      return "#60a5fa";
+    }
+    if (type === "recovery_worker") {
+      return "#38bdf8";
+    }
+    if (type === "expansion_planner") {
+      return "#fb923c";
+    }
+    if (type === "self_expansion_group") {
+      return "#f97316";
+    }
+    if (type === "objective_verifier") {
+      return "#f472b6";
+    }
+    if (type === "objective_verifier_group") {
+      return "#e879f9";
+    }
+    if (type === "planner") {
+      return "#818cf8";
+    }
+    if (type === "auditor") {
+      return "#c084fc";
+    }
+    if (type === "plan_activation") {
+      return "#22d3ee";
+    }
+    return "#a78bfa";
+  }
+
+  function networkGraphEdgeColor(edge) {
+    var type = graphClassName(edge && edge.type);
+    var layer = graphClassName(edge && edge.layer);
+    if (type.indexOf("validation") !== -1 || layer === "validation") {
+      return "#22c55e";
+    }
+    if (type.indexOf("objective") !== -1 || layer === "objective") {
+      return "#f59e0b";
+    }
+    if (type.indexOf("event") !== -1 || layer === "event") {
+      return "#64748b";
+    }
+    if (type.indexOf("phase") !== -1 || type.indexOf("task") !== -1 || layer === "plan") {
+      return "#38bdf8";
+    }
+    return "#8b9bb4";
+  }
+
+  function networkGraphEdgeLabel(edge) {
+    var type = graphClassName(edge && edge.type);
+    if (["phase_contains_task", "task_has_run", "validated_by", "run_supports_objective", "phase_has_objective"].indexOf(type) === -1) {
+      return "";
+    }
+    return truncateText(cleanText(edge && edge.label) || type.replace(/_/g, " "), 26);
+  }
+
+  function networkGraphElements(workflowGraph, includeHiddenEdges, savedState) {
+    var nodes = Array.isArray(workflowGraph.nodes) ? workflowGraph.nodes : [];
+    var edges = Array.isArray(workflowGraph.edges) ? workflowGraph.edges : [];
+    var metadata = workflowGraph.network && typeof workflowGraph.network === "object" ? workflowGraph.network : {};
+    var savedPositions = savedState && savedState.positions && typeof savedState.positions === "object" ? savedState.positions : {};
+    var visibleLayers = Array.isArray(metadata.default_visible_layers) && metadata.default_visible_layers.length ?
+      metadata.default_visible_layers.map(graphClassName) :
+      ["plan", "runtime", "validation", "objective"];
+    var nodeIds = {};
+    var hiddenNodeCount = 0;
+    var elements = [];
+    nodes.forEach(function (node) {
+      if (!node || !node.node_id) {
+        return;
+      }
+      var layer = networkGraphNodeLayer(node);
+      if (!includeHiddenEdges && visibleLayers.indexOf(layer) === -1) {
+        hiddenNodeCount += 1;
+        return;
+      }
+      var type = networkGraphNodeType(node);
+      var tier = statusTier(node.status);
+      var nodeId = text(node.node_id);
+      var size = networkGraphNodeSize(node);
+      var savedPosition = savedPositions[nodeId];
+      var temporalMs = networkGraphNodeTimeMs(node);
+      var element = {
+        group: "nodes",
+        data: {
+          id: nodeId,
+          label: networkGraphNodeLabel(node),
+          title: cleanText(node.title || node.node_id),
+          nodeType: type,
+          layer: layer,
+          statusTier: tier,
+          temporalMs: temporalMs === null ? "" : temporalMs,
+          temporalLabel: temporalMs === null ? "" : compactTimestamp(temporalMs),
+          color: networkGraphNodeColor(node),
+          size: size,
+          labelWidth: Math.max(76, size * 2)
+        },
+        classes: [
+          "node-type-" + type,
+          "layer-" + layer,
+          "status-tier-" + tier
+        ].join(" ")
+      };
+      if (validNetworkPosition(savedPosition)) {
+        element.position = {x: savedPosition.x, y: savedPosition.y};
+      }
+      nodeIds[nodeId] = true;
+      elements.push(element);
+    });
+    var timedNodeCount = 0;
+    var earliestMs = null;
+    var latestMs = null;
+    elements.forEach(function (element) {
+      if (element.group !== "nodes") {
+        return;
+      }
+      var ms = networkGraphTemporalMsValue(element.data.temporalMs);
+      if (ms === null) {
+        return;
+      }
+      timedNodeCount += 1;
+      earliestMs = earliestMs === null ? ms : Math.min(earliestMs, ms);
+      latestMs = latestMs === null ? ms : Math.max(latestMs, ms);
+    });
+    var hiddenEdgeCount = 0;
+    var missingEndpointCount = 0;
+    edges.forEach(function (edge) {
+      if (!edge || !edge.source || !edge.target) {
+        return;
+      }
+      if (!includeHiddenEdges && edge.hidden_by_default === true) {
+        hiddenEdgeCount += 1;
+        return;
+      }
+      var source = text(edge.source);
+      var target = text(edge.target);
+      if (!nodeIds[source] || !nodeIds[target]) {
+        missingEndpointCount += 1;
+        return;
+      }
+      var parallelCount = Number(edge.parallel_count || 1);
+      var parallelIndex = Number(edge.parallel_index || 0);
+      var offset = parallelCount > 1 ? Math.round((parallelIndex - ((parallelCount - 1) / 2)) * 28) : 0;
+      var type = graphClassName(edge.type || "edge");
+      var layer = graphClassName(edge.layer || "runtime");
+      elements.push({
+        group: "edges",
+        data: {
+          id: cleanText(edge.edge_id) || (source + "__" + target + "__" + type),
+          source: source,
+          target: target,
+          label: networkGraphEdgeLabel(edge),
+          edgeType: type,
+          layer: layer,
+          color: networkGraphEdgeColor(edge),
+          controlPointDistance: offset,
+          width: edge.hidden_by_default === true ? 1 : 1.8
+        },
+        classes: [
+          "edge-type-" + type,
+          "layer-" + layer,
+          edge.hidden_by_default === true ? "is-hidden-default" : ""
+        ].join(" ")
+      });
+    });
+    return {
+      elements: elements,
+      nodeCount: Object.keys(nodeIds).length,
+      totalNodeCount: nodes.length,
+      edgeCount: elements.filter(function (item) { return item.group === "edges"; }).length,
+      totalEdgeCount: edges.length,
+      hiddenNodeCount: hiddenNodeCount,
+      hiddenEdgeCount: hiddenEdgeCount,
+      missingEndpointCount: missingEndpointCount,
+      timedNodeCount: timedNodeCount,
+      earliestMs: earliestMs,
+      latestMs: latestMs,
+      metadata: metadata
+    };
+  }
+
+  function networkGraphStyle() {
+    return [
+      {
+        selector: "node",
+        style: {
+          "background-color": "data(color)",
+          "border-color": "#0f172a",
+          "border-width": 2,
+          "color": "#dbeafe",
+          "font-family": "Inter, ui-sans-serif, system-ui, sans-serif",
+          "font-size": 10,
+          "height": "data(size)",
+          "label": "data(label)",
+          "min-zoomed-font-size": 7,
+          "overlay-opacity": 0,
+          "text-halign": "center",
+          "text-margin-y": 7,
+          "text-max-width": "data(labelWidth)",
+          "text-outline-color": "#0b1020",
+          "text-outline-width": 2,
+          "text-valign": "bottom",
+          "text-wrap": "wrap",
+          "width": "data(size)"
+        }
+      },
+      {
+        selector: ".node-type-phase",
+        style: {
+          "font-size": 11,
+          "font-weight": 700,
+          "shape": "round-rectangle"
+        }
+      },
+      {
+        selector: ".node-type-task",
+        style: {
+          "shape": "diamond"
+        }
+      },
+      {
+        selector: ".node-type-objective",
+        style: {
+          "shape": "hexagon"
+        }
+      },
+      {
+        selector: ".node-type-event",
+        style: {
+          "background-opacity": 0.72,
+          "font-size": 8,
+          "height": 18,
+          "label": "",
+          "width": 18
+        }
+      },
+      {
+        selector: ".node-type-worker",
+        style: {
+          "shape": "ellipse"
+        }
+      },
+      {
+        selector: ".node-type-recovery_worker",
+        style: {
+          "shape": "round-rectangle"
+        }
+      },
+      {
+        selector: ".node-type-expansion_planner",
+        style: {
+          "shape": "triangle"
+        }
+      },
+      {
+        selector: ".node-type-self_expansion_group",
+        style: {
+          "shape": "triangle"
+        }
+      },
+      {
+        selector: ".node-type-objective_verifier",
+        style: {
+          "shape": "vee"
+        }
+      },
+      {
+        selector: ".node-type-objective_verifier_group",
+        style: {
+          "shape": "vee"
+        }
+      },
+      {
+        selector: ".node-type-planner",
+        style: {
+          "shape": "barrel"
+        }
+      },
+      {
+        selector: ".node-type-auditor",
+        style: {
+          "shape": "round-diamond"
+        }
+      },
+      {
+        selector: ".node-type-plan_activation",
+        style: {
+          "shape": "star"
+        }
+      },
+      {
+        selector: ".status-tier-active",
+        style: {
+          "border-color": "#60a5fa",
+          "border-width": 4
+        }
+      },
+      {
+        selector: ".status-tier-danger",
+        style: {
+          "border-color": "#fb7185",
+          "border-width": 4
+        }
+      },
+      {
+        selector: ".status-tier-warning",
+        style: {
+          "border-color": "#facc15",
+          "border-width": 3
+        }
+      },
+      {
+        selector: "edge",
+        style: {
+          "curve-style": "bezier",
+          "control-point-distances": "data(controlPointDistance)",
+          "control-point-weights": 0.5,
+          "font-size": 8,
+          "label": "data(label)",
+          "line-color": "data(color)",
+          "opacity": 0.78,
+          "target-arrow-color": "data(color)",
+          "target-arrow-shape": "triangle",
+          "text-background-color": "#101827",
+          "text-background-opacity": 0.82,
+          "text-background-padding": 2,
+          "text-outline-color": "#101827",
+          "text-outline-width": 1,
+          "width": "data(width)"
+        }
+      },
+      {
+        selector: ".is-hidden-default",
+        style: {
+          "line-style": "dashed",
+          "opacity": 0.46
+        }
+      },
+      {
+        selector: ".is-selected",
+        style: {
+          "border-color": "#f8fafc",
+          "border-width": 5,
+          "z-index": 10
+        }
+      },
+      {
+        selector: ".is-dimmed",
+        style: {
+          "opacity": 0.18
+        }
+      },
+      {
+        selector: ".is-neighborhood",
+        style: {
+          "opacity": 1,
+          "z-index": 8
+        }
+      }
+    ];
+  }
+
+  function networkGraphLayoutLabel() {
+    return networkGraphLayoutMode === "force" ? "Force" : "Temporal Force";
+  }
+
+  function networkGraphTemporalSpan(nodeCount) {
+    return Math.max(900, Math.min(12000, Math.sqrt(Math.max(1, nodeCount)) * 240));
+  }
+
+  function networkGraphTemporalMsFromNode(node) {
+    if (!node || !node.data) {
+      return null;
+    }
+    return networkGraphTemporalMsValue(node.data("temporalMs"));
+  }
+
+  function networkGraphTemporalMsValue(value) {
+    if (value === null || value === undefined) {
+      return null;
+    }
+    if (typeof value === "string" && value.trim() === "") {
+      return null;
+    }
+    var ms = Number(value);
+    return Number.isFinite(ms) ? ms : null;
+  }
+
+  function applyTemporalForcePositions(options) {
+    if (!networkGraphInstance || !networkGraphInstance.nodes) {
+      return {applied: 0, timed: 0};
+    }
+    var layoutOptions = options || {};
+    var nodes = [];
+    var timedNodes = [];
+    var pendingNodes = [];
+    networkGraphInstance.nodes().forEach(function (node) {
+      var ms = networkGraphTemporalMsFromNode(node);
+      nodes.push(node);
+      if (ms !== null) {
+        timedNodes.push({node: node, id: node.id(), label: cleanText(node.data("label") || node.id()), ms: ms});
+      } else {
+        pendingNodes.push({node: node, id: node.id(), label: cleanText(node.data("label") || node.id()), ms: null});
+      }
+    });
+    if (!nodes.length) {
+      return {applied: 0, timed: 0, pending: 0};
+    }
+    timedNodes.sort(function (left, right) {
+      if (left.ms !== right.ms) {
+        return left.ms - right.ms;
+      }
+      if (left.label !== right.label) {
+        return left.label < right.label ? -1 : 1;
+      }
+      return left.id < right.id ? -1 : (left.id > right.id ? 1 : 0);
+    });
+    pendingNodes.sort(function (left, right) {
+      if (left.label !== right.label) {
+        return left.label < right.label ? -1 : 1;
+      }
+      return left.id < right.id ? -1 : (left.id > right.id ? 1 : 0);
+    });
+    var orderedNodes = timedNodes.concat(pendingNodes);
+    var span = networkGraphTemporalSpan(nodes.length);
+    var minX = -span / 2;
+    var targets = {};
+    orderedNodes.forEach(function (entry, index) {
+      var rankRatio = orderedNodes.length > 1 ? index / (orderedNodes.length - 1) : 0.5;
+      targets[entry.id] = minX + (rankRatio * span);
+    });
+
+    var applied = 0;
+    nodes.forEach(function (node) {
+      var id = node.id();
+      var targetX = targets[id];
+      if (targetX === undefined || !node.position) {
+        return;
+      }
+      var position = node.position();
+      if (!validNetworkPosition(position)) {
+        return;
+      }
+      var currentX = Number(position.x);
+      var nextX = Number.isFinite(currentX) ? (targetX * 0.88) + (currentX * 0.12) : targetX;
+      node.position({x: nextX, y: position.y});
+      applied += 1;
+    });
+    if (applied > 0 && layoutOptions.fit !== false && networkGraphInstance.fit) {
+      networkGraphInstance.fit(networkGraphInstance.elements(), 52);
+    }
+    return {
+      applied: applied,
+      timed: timedNodes.length,
+      pending: pendingNodes.length,
+      earliestMs: timedNodes.length ? timedNodes[0].ms : null,
+      latestMs: timedNodes.length ? timedNodes[timedNodes.length - 1].ms : null,
+      temporalScale: "rank",
+      pendingPlacement: "end_alpha"
+    };
+  }
+
+  function networkGraphLayoutOptions(cy, options) {
+    var layoutOptions = options || {};
+    var nodeCount = cy && cy.nodes ? cy.nodes().length : 0;
+    return {
+      name: "cose",
+      animate: false,
+      componentSpacing: 130,
+      coolingFactor: 0.95,
+      edgeElasticity: 88,
+      fit: layoutOptions.fit !== false,
+      gravity: 0.14,
+      idealEdgeLength: 98,
+      initialTemp: 180,
+      nestingFactor: 1.18,
+      nodeDimensionsIncludeLabels: true,
+      nodeOverlap: 12,
+      nodeRepulsion: 9200,
+      numIter: Math.min(2600, Math.max(950, nodeCount * 7)),
+      padding: 52,
+      randomize: layoutOptions.randomize !== false
+    };
+  }
+
+  function runNetworkGraphLayout(options) {
+    if (!networkGraphInstance || typeof networkGraphInstance.layout !== "function") {
+      return;
+    }
+    var layoutOptions = options || {};
+    var layoutMode = layoutOptions.layoutMode || networkGraphLayoutMode;
+    var finishLayout = function () {
+      if (layoutMode === "temporal") {
+        applyTemporalForcePositions(layoutOptions);
+      }
+      networkGraphLayoutReady = true;
+      rememberNetworkGraphState({allowUnstable: true});
+      if (typeof layoutOptions.onComplete === "function") {
+        layoutOptions.onComplete();
+      }
+    };
+    networkGraphLayoutReady = false;
+    var layout = networkGraphInstance.layout(networkGraphLayoutOptions(networkGraphInstance, layoutOptions));
+    if (layout && layout.one) {
+      layout.one("layoutstop", function () {
+        finishLayout();
+      });
+    }
+    if (!layout || typeof layout.run !== "function") {
+      finishLayout();
+      return layout;
+    }
+    layout.run();
+    if (!layout || !layout.one) {
+      finishLayout();
+    }
+    return layout;
+  }
+
+  function syncNetworkGraphSelection(nodeId) {
+    if (!networkGraphInstance || !networkGraphInstance.nodes) {
+      return;
+    }
+    networkGraphInstance.nodes().removeClass("is-selected");
+    if (!nodeId) {
+      return;
+    }
+    var node = networkGraphInstance.getElementById(String(nodeId));
+    if (node && node.length) {
+      node.addClass("is-selected");
+    }
+  }
+
+  function focusNetworkGraphSelection() {
+    if (!networkGraphInstance || !activeSelectedNodeId) {
+      return false;
+    }
+    var node = networkGraphInstance.getElementById(String(activeSelectedNodeId));
+    if (!node || !node.length) {
+      return false;
+    }
+    if (typeof networkGraphInstance.center === "function") {
+      networkGraphInstance.center(node);
+    }
+    syncNetworkGraphSelection(activeSelectedNodeId);
+    return true;
+  }
+
+  function setNetworkGraphStatus(root, message) {
+    var status = root && root.querySelector ? root.querySelector("[data-network-graph-status]") : null;
+    if (status) {
+      status.textContent = message;
+    }
+  }
+
+  function renderNetworkGraphControls(graphData) {
+    var hiddenTotal = (graphData.hiddenNodeCount || 0) + (graphData.hiddenEdgeCount || 0);
+    var hiddenLabel = hiddenTotal ? "Events (" + hiddenTotal + ")" : "Events";
+    var countLabel = graphData.nodeCount + "/" + graphData.totalNodeCount + " nodes, " +
+      graphData.edgeCount + "/" + graphData.totalEdgeCount + " edges";
+    return '<div class="network-control-row">' +
+      '<div class="network-layout-switch" role="group" aria-label="Network layout">' +
+      '<button type="button" data-network-layout-choice="temporal" class="' +
+      (networkGraphLayoutMode === "temporal" ? "is-active" : "") +
+      '" aria-pressed="' + (networkGraphLayoutMode === "temporal" ? "true" : "false") + '">Temporal</button>' +
+      '<button type="button" data-network-layout-choice="force" class="' +
+      (networkGraphLayoutMode === "force" ? "is-active" : "") +
+      '" aria-pressed="' + (networkGraphLayoutMode === "force" ? "true" : "false") + '">Force</button>' +
+      "</div>" +
+      '<button type="button" data-network-action="fit">Fit</button>' +
+      '<button type="button" data-network-action="layout">Layout</button>' +
+      '<button type="button" data-network-action="focus">Focus</button>' +
+      '<label class="network-control-toggle"><input type="checkbox" data-network-hidden-edges' +
+      (networkGraphIncludeHiddenEdges ? " checked" : "") + "> " + escapeHtml(hiddenLabel) + "</label>" +
+      '<span class="network-control-count">' + escapeHtml(countLabel) + "</span>" +
+      "</div>";
+  }
+
+  function mountNetworkGraphControlEvents(root, payload) {
+    var controls = root && root.querySelector ? root.querySelector("[data-network-graph-controls]") : null;
+    if (!controls || !controls.querySelectorAll) {
+      return;
+    }
+    Array.prototype.slice.call(controls.querySelectorAll("[data-network-action]")).forEach(function (button) {
+      button.addEventListener("click", function () {
+        var action = button.getAttribute("data-network-action");
+        if (action === "fit" && networkGraphInstance) {
+          networkGraphInstance.fit(networkGraphInstance.elements(), 52);
+          networkGraphLayoutReady = true;
+          rememberNetworkGraphState({allowUnstable: true});
+        } else if (action === "layout") {
+          runNetworkGraphLayout({forceLayout: true, fit: true, randomize: true});
+        } else if (action === "focus") {
+          if (!focusNetworkGraphSelection()) {
+            setNetworkGraphStatus(root, "Select a node before focusing.");
+          }
+        }
+      });
+    });
+    Array.prototype.slice.call(controls.querySelectorAll("[data-network-layout-choice]")).forEach(function (button) {
+      button.addEventListener("click", function () {
+        var mode = button.getAttribute("data-network-layout-choice") === "force" ? "force" : "temporal";
+        if (mode === networkGraphLayoutMode) {
+          return;
+        }
+        rememberNetworkGraphState({allowUnstable: true});
+        networkGraphLayoutMode = mode;
+        ensureNetworkGraph(payload, {forceLayout: true});
+      });
+    });
+    var hiddenToggle = controls.querySelector("[data-network-hidden-edges]");
+    if (hiddenToggle) {
+      hiddenToggle.addEventListener("change", function () {
+        networkGraphIncludeHiddenEdges = hiddenToggle.checked;
+        ensureNetworkGraph(payload, {forceLayout: true});
+      });
+    }
+  }
+
+  function wireNetworkGraphInteractions(payload) {
+    if (!networkGraphInstance || !networkGraphInstance.on) {
+      return;
+    }
+    networkGraphInstance.on("tap", "node", function (event) {
+      selectGraphNodeById(activePayload || payload, event.target.id(), {source: "network"});
+    });
+    networkGraphInstance.on("mouseover", "node", function (event) {
+      var node = event.target;
+      var neighborhood = node.closedNeighborhood();
+      networkGraphInstance.elements().addClass("is-dimmed");
+      neighborhood.removeClass("is-dimmed").addClass("is-neighborhood");
+      node.removeClass("is-dimmed").addClass("is-neighborhood");
+      syncNetworkGraphSelection(activeSelectedNodeId);
+    });
+    networkGraphInstance.on("mouseout", "node", function () {
+      networkGraphInstance.elements().removeClass("is-dimmed is-neighborhood");
+      syncNetworkGraphSelection(activeSelectedNodeId);
+    });
+    networkGraphInstance.on("viewport", function () {
+      rememberNetworkGraphViewport();
+    });
+    networkGraphInstance.on("dragfree", "node", function () {
+      networkGraphLayoutReady = true;
+      rememberNetworkGraphState({allowUnstable: true});
+    });
+    networkGraphInstance.on("layoutstop", function () {
+      networkGraphLayoutReady = true;
+      rememberNetworkGraphState({allowUnstable: true});
+    });
+  }
+
+  function ensureNetworkGraph(payload, options) {
+    var root = document.querySelector ? document.querySelector("[data-graph-panel-root]") : null;
+    var canvas = root && root.querySelector ? root.querySelector("[data-network-graph-canvas]") : null;
+    var controls = root && root.querySelector ? root.querySelector("[data-network-graph-controls]") : null;
+    if (!root || !canvas) {
+      return Promise.resolve(false);
+    }
+    var workflowGraph = readModel(payload, "workflow_graph.json");
+    var nodes = Array.isArray(workflowGraph.nodes) ? workflowGraph.nodes : [];
+    if (!nodes.length) {
+      destroyNetworkGraph();
+      if (controls) {
+        controls.setAttribute("hidden", "hidden");
+      }
+      setNetworkGraphStatus(root, "No graph nodes are present.");
+      return Promise.resolve(false);
+    }
+    if (controls) {
+      controls.removeAttribute("hidden");
+    }
+    setNetworkGraphStatus(root, "Loading network graph renderer...");
+    return loadCytoscapeBundleOnce().then(function (cytoscapeFactory) {
+      var currentCanvas = document.querySelector ? document.querySelector("[data-network-graph-canvas]") : null;
+      if (currentCanvas !== canvas) {
+        return false;
+      }
+      var restoreState = networkGraphStateMatches(networkGraphSavedState, payload) ? networkGraphSavedState : null;
+      var forceLayout = Boolean(options && options.forceLayout);
+      var graphData = networkGraphElements(workflowGraph, networkGraphIncludeHiddenEdges, restoreState);
+      var restorePositionThreshold = Math.max(1, Math.floor(graphData.nodeCount * 0.55));
+      var canRestoreLayout = Boolean(
+        restoreState &&
+        !forceLayout &&
+        restoreState.positionCount >= restorePositionThreshold
+      );
+      if (controls) {
+        controls.innerHTML = renderNetworkGraphControls(graphData);
+      }
+      mountNetworkGraphControlEvents(root, payload);
+      if (!graphData.elements.length || graphData.nodeCount === 0) {
+        destroyNetworkGraph();
+        setNetworkGraphStatus(root, "No visible network nodes. Enable Events to include hidden event nodes.");
+        return false;
+      }
+      var workflowId = cleanText(payload && payload.workflow_id) || "workflow";
+      var existingCanvas = networkGraphInstance && typeof networkGraphInstance.container === "function" ?
+        networkGraphInstance.container() :
+        null;
+      if (existingCanvas && existingCanvas !== canvas) {
+        destroyNetworkGraph();
+      }
+      networkGraphLayoutReady = false;
+      if (!networkGraphInstance || networkGraphWorkflowId !== workflowId) {
+        destroyNetworkGraph();
+        networkGraphInstance = cytoscapeFactory({
+          container: canvas,
+          elements: graphData.elements,
+          maxZoom: 2.8,
+          minZoom: 0.18,
+          style: networkGraphStyle(),
+          wheelSensitivity: NETWORK_GRAPH_WHEEL_SENSITIVITY
+        });
+        networkGraphWorkflowId = workflowId;
+        wireNetworkGraphInteractions(payload);
+      } else {
+        networkGraphInstance.elements().remove();
+        networkGraphInstance.add(graphData.elements);
+      }
+      var restoredPositions = canRestoreLayout ? applyNetworkGraphPositions(restoreState) : 0;
+      var restoredLayout = canRestoreLayout && restoredPositions >= restorePositionThreshold;
+      if (restoredLayout) {
+        restoreNetworkGraphViewport(restoreState);
+        rememberNetworkGraphState({allowUnstable: true});
+      } else {
+        runNetworkGraphLayout({
+          forceLayout: forceLayout,
+          fit: true,
+          randomize: true
+        });
+      }
+      syncNetworkGraphSelection(activeSelectedNodeId);
+      if (options && options.focusSelected) {
+        focusNetworkGraphSelection();
+      }
+      var hiddenSuffix = graphData.hiddenNodeCount || graphData.hiddenEdgeCount ?
+        " Hidden event items are available from the Events toggle." :
+        "";
+      var restoreSuffix = restoredLayout ? " View restored after refresh." : "";
+      var layoutSuffix = " " + networkGraphLayoutLabel() + " layout.";
+      setNetworkGraphStatus(root, "Showing " + graphData.nodeCount + " nodes and " + graphData.edgeCount + " edges." + layoutSuffix + restoreSuffix + hiddenSuffix);
+      return true;
+    }).catch(function (error) {
+      destroyNetworkGraph();
+      setNetworkGraphStatus(root, "Network graph failed to load: " + (error && error.message ? error.message : "unknown error"));
+      return false;
+    });
+  }
+
+  function mountGraphModeControls() {
+    var root = document.querySelector ? document.querySelector("[data-graph-panel-root]") : null;
+    if (!root || !root.querySelectorAll) {
+      return;
+    }
+    var buttons = Array.prototype.slice.call(root.querySelectorAll("[data-graph-mode-choice]"));
+    var views = Array.prototype.slice.call(root.querySelectorAll("[data-graph-view]"));
+    function setMode(mode) {
+      activeGraphMode = mode === "network" ? "network" : "pipeline";
+      buttons.forEach(function (button) {
+        var active = button.getAttribute("data-graph-mode-choice") === activeGraphMode;
+        button.classList[active ? "add" : "remove"]("is-active");
+        button.setAttribute("aria-pressed", active ? "true" : "false");
+      });
+      views.forEach(function (view) {
+        var visible = view.getAttribute("data-graph-view") === activeGraphMode;
+        if (visible) {
+          view.removeAttribute("hidden");
+        } else {
+          view.setAttribute("hidden", "hidden");
+        }
+      });
+      if (activeGraphMode === "network") {
+        ensureNetworkGraph(activePayload);
+      }
+    }
+    buttons.forEach(function (button) {
+      if (button.getAttribute("data-mounted") === "true") {
+        return;
+      }
+      button.setAttribute("data-mounted", "true");
+      button.addEventListener("click", function () {
+        setMode(button.getAttribute("data-graph-mode-choice") || "pipeline");
+      });
+    });
+    setMode(activeGraphMode);
+  }
+
+  function graphNodeMap(payload) {
     var graph = readModel(payload, "workflow_graph.json");
     var nodes = Array.isArray(graph.nodes) ? graph.nodes : [];
     var byId = {};
     nodes.forEach(function (node) {
-      byId[node.node_id] = node;
-    });
-    var detail = document.getElementById("node-detail-body");
-    var buttons = Array.prototype.slice.call(document.querySelectorAll(".graph-node"));
-    if (!detail || buttons.length === 0) {
-      return;
-    }
-    function select(button) {
-      buttons.forEach(function (item) {
-        item.classList.remove("is-selected");
-      });
-      button.classList.add("is-selected");
-      var node = byId[button.getAttribute("data-node-id")];
-      if (node) {
-        detail.innerHTML = renderNode(node, nodeDetailForNode(payload, node));
-        mountFilePreviewActions(payload);
-        fetchSelectedRunDetail(payload, node, detail);
+      if (node && node.node_id) {
+        byId[node.node_id] = node;
       }
+    });
+    return byId;
+  }
+
+  function renderSelectedGraphNode(payload, nodeId) {
+    var detail = document.getElementById("node-detail-body");
+    var node = graphNodeMap(payload)[nodeId];
+    if (!detail || !node) {
+      return false;
     }
+    activeSelectedNodeId = node.node_id || nodeId || "";
+    detail.setAttribute("data-selected-node-id", activeSelectedNodeId);
+    detail.innerHTML = renderNode(node, nodeDetailForNode(payload, node));
+    mountFilePreviewActions(payload);
+    fetchSelectedRunDetail(payload, node, detail);
+    return true;
+  }
+
+  function selectGraphNodeById(payload, nodeId, options) {
+    var selectedId = text(nodeId || "");
+    var buttons = Array.prototype.slice.call(document.querySelectorAll(".graph-node"));
+    buttons.forEach(function (item) {
+      if (item.getAttribute("data-node-id") === selectedId) {
+        item.classList.add("is-selected");
+      } else {
+        item.classList.remove("is-selected");
+      }
+    });
+    syncNetworkGraphSelection(selectedId);
+    if (renderSelectedGraphNode(payload, selectedId)) {
+      return true;
+    }
+    if (!options || options.allowEmpty !== true) {
+      return false;
+    }
+    var detail = document.getElementById("node-detail-body");
+    if (detail) {
+      detail.innerHTML = '<p class="empty-state">No node selected.</p>';
+    }
+    return false;
+  }
+
+  function mountNodeDetails(payload, preferredNodeId) {
+    var graph = readModel(payload, "workflow_graph.json");
+    var nodes = Array.isArray(graph.nodes) ? graph.nodes : [];
+    var byId = graphNodeMap(payload);
+    var buttons = Array.prototype.slice.call(document.querySelectorAll(".graph-node"));
     buttons.forEach(function (button) {
       button.addEventListener("click", function () {
-        select(button);
+        selectGraphNodeById(payload, button.getAttribute("data-node-id"));
       });
     });
-    var selected = buttons[0];
-    if (preferredNodeId) {
-      selected = buttons.filter(function (button) {
-        return button.getAttribute("data-node-id") === preferredNodeId;
-      })[0] || selected;
+    var selectedId = preferredNodeId && byId[preferredNodeId] ? preferredNodeId : "";
+    if (!selectedId) {
+      var pipelineNodes = pipelineGraphNodes(nodes);
+      selectedId = pipelineNodes.length ? text(pipelineNodes[0].node_id) : (nodes[0] ? text(nodes[0].node_id) : "");
     }
-    select(selected);
+    if (selectedId) {
+      selectGraphNodeById(payload, selectedId);
+    } else {
+      selectGraphNodeById(payload, "", {allowEmpty: true});
+    }
   }
 
   function fetchSelectedRunDetail(payload, node, detail) {
@@ -3155,8 +4277,7 @@
     }
     var selectedNodeId = node.node_id;
     fetchRunDetail(payload.workflow_id, node.run_id).then(function (result) {
-      var selectedButton = document.querySelector(".graph-node.is-selected");
-      if (!selectedButton || selectedButton.getAttribute("data-node-id") !== selectedNodeId) {
+      if (activeSelectedNodeId !== selectedNodeId && detail.getAttribute("data-selected-node-id") !== selectedNodeId) {
         return;
       }
       var apiDetail = result.node_detail && typeof result.node_detail === "object" ? result.node_detail : {};
@@ -3278,8 +4399,12 @@
 
   function captureDashboardState() {
     var selected = document.querySelector ? document.querySelector(".graph-node.is-selected") : null;
+    var graphState = rememberNetworkGraphState();
     var state = {
-      selectedNodeId: selected ? selected.getAttribute("data-node-id") || "" : "",
+      graphMode: activeGraphMode,
+      networkLayoutMode: networkGraphLayoutMode,
+      networkGraph: graphState,
+      selectedNodeId: selected ? selected.getAttribute("data-node-id") || "" : activeSelectedNodeId,
       scrolls: {},
       drafts: {}
     };
@@ -3319,6 +4444,15 @@
     if (!state) {
       return;
     }
+    if (state.graphMode) {
+      activeGraphMode = state.graphMode === "network" ? "network" : "pipeline";
+    }
+    if (state.networkLayoutMode) {
+      networkGraphLayoutMode = state.networkLayoutMode === "force" ? "force" : "temporal";
+    }
+    if (state.networkGraph) {
+      networkGraphSavedState = state.networkGraph;
+    }
     Object.keys(state.drafts || {}).forEach(function (selector) {
       var input = document.querySelector ? document.querySelector(selector) : null;
       if (input) {
@@ -3344,6 +4478,15 @@
 
   function applyPayload(payload, message) {
     var uiState = captureDashboardState();
+    if (uiState.graphMode) {
+      activeGraphMode = uiState.graphMode === "network" ? "network" : "pipeline";
+    }
+    if (uiState.networkLayoutMode) {
+      networkGraphLayoutMode = uiState.networkLayoutMode === "force" ? "force" : "temporal";
+    }
+    if (uiState.networkGraph) {
+      networkGraphSavedState = uiState.networkGraph;
+    }
     var workflowStatus = readModel(payload, "workflow_status.json");
     var planIndex = readModel(payload, "plan_index.json");
     var workflowGraph = readModel(payload, "workflow_graph.json");
@@ -3371,6 +4514,7 @@
     setMetric("elapsed", workflowElapsedLabel(payload, workflowStatus, workflowGraph, feed));
     mountWorkspaceSelector(payload);
     setHtml("plan-panel-body", renderPlanPanel(planIndex, payload.plan_markdown || {}, workflowGraph, payload));
+    destroyNetworkGraph({rememberState: false});
     setHtml("graph-panel-body", renderGraphPanel(workflowGraph, planIndex));
     setHtml("node-detail-body", '<p class="empty-state">No node selected.</p>');
     setHtml("activity-feed-body", renderActivityFeed(feed, payload));
@@ -3387,6 +4531,7 @@
     mountPanelCollapses();
     mountGraphOverflow();
     mountGraphExpandToggle();
+    mountGraphModeControls();
     mountNodeDetails(payload, uiState.selectedNodeId);
     mountRunnerConfigForm(payload);
     mountPlanningControlForm(payload);

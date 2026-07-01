@@ -112,6 +112,8 @@ READ_MODEL_REBUILD_LOCK_TTL_SECONDS = _read_model_limit_from_env("LOOPPLANE_READ
 READ_MODEL_REBUILD_LOCK_WAIT_SECONDS = _read_model_limit_from_env("LOOPPLANE_READ_MODEL_REBUILD_LOCK_WAIT_SECONDS", 30)
 SELF_EXPANSION_GRAPH_DETAIL_LIMIT = _read_model_limit_from_env("LOOPPLANE_SELF_EXPANSION_GRAPH_DETAIL_LIMIT", 50)
 SELF_EXPANSION_GRAPH_SAMPLE_LIMIT = _read_model_limit_from_env("LOOPPLANE_SELF_EXPANSION_GRAPH_SAMPLE_LIMIT", 8)
+OBJECTIVE_VERIFIER_GRAPH_DETAIL_LIMIT = _read_model_limit_from_env("LOOPPLANE_OBJECTIVE_VERIFIER_GRAPH_DETAIL_LIMIT", 80)
+OBJECTIVE_VERIFIER_GRAPH_SAMPLE_LIMIT = _read_model_limit_from_env("LOOPPLANE_OBJECTIVE_VERIFIER_GRAPH_SAMPLE_LIMIT", 8)
 IMAGE_PREVIEW_SUFFIXES = frozenset({".svg", ".png", ".jpg", ".jpeg", ".gif", ".webp"})
 DEFAULT_DASHBOARD_MAX_EVENTS = _read_model_limit_from_env("LOOPPLANE_MAX_DASHBOARD_EVENTS", 200)
 DASHBOARD_EVENT_NODE_LIMIT = _read_model_limit_from_env("LOOPPLANE_DASHBOARD_EVENT_NODE_LIMIT", DEFAULT_DASHBOARD_MAX_EVENTS)
@@ -135,6 +137,18 @@ PRIVATE_KEY_REDACTION_RE = re.compile(
 BEARER_REDACTION_RE = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{8,}")
 SECRET_WORD_REDACTION_RE = re.compile(r"(?i)\b(access token|api key|password|secret|token)(\s+)([A-Za-z0-9._~+/=-]{8,})")
 SECRET_ASSIGNMENT_REDACTION_RE = re.compile(r"(?i)\b(API_KEY|SECRET|TOKEN|PASSWORD)\b(\s*[:=]\s*)([^\s,;]+)")
+GRAPH_CONTEXT_TASK_RE = re.compile(r"(?i)(?<![A-Z0-9])P(?P<phase>\d+)[._-]?T(?P<task>\d{1,4})(?![A-Z0-9])")
+GRAPH_CONTEXT_OBJECTIVE_RE = re.compile(r"(?i)(?<![A-Z0-9])P(?P<phase>\d+)[._-]O(?P<objective>\d{1,4})(?![A-Z0-9])")
+GRAPH_CONTEXT_PHASE_RE = re.compile(r"(?i)(?<![A-Z0-9])(?:PHASE[_-]?)?P(?P<phase>\d+)(?![A-Z0-9])")
+GRAPH_CONTEXT_SIDECAR_EVENT_TYPES = frozenset(
+    {
+        "objective_verifier_adapter_started",
+        "objective_verifier_run_classified",
+        "expansion_planner_adapter_started",
+        "expansion_planner_run_classified",
+        "self_expansion_requires_attention",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -194,6 +208,12 @@ def _mapping_or_empty(value: Any) -> Mapping[str, Any]:
     return value if isinstance(value, Mapping) else {}
 
 
+def _sequence(value: Any) -> list[Any]:
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return list(value)
+    return []
+
+
 def rebuild_read_models(
     project_root: Path | str,
     *,
@@ -240,6 +260,11 @@ def rebuild_read_models(
         last_event = _compact_event(events[-1]) if events else None
     last_event_seq = _event_sequence(last_event) if isinstance(last_event, Mapping) else None
     source_event_id = _event_id(last_event) if isinstance(last_event, Mapping) else None
+    graph_context_events = events
+    with telemetry.span("graph_context_event_read"):
+        if event_total_count is None or event_total_count > len(events) or len(events) >= dashboard_event_limit:
+            graph_context_events = _read_event_records(paths, limit=None)
+        graph_context_events = _hydrate_graph_context_event_payloads(paths, graph_context_events)
     with telemetry.span("active_lease_read"):
         active_leases = _read_active_leases(paths)
     with telemetry.span("source_hash_construction"):
@@ -339,7 +364,9 @@ def rebuild_read_models(
     with telemetry.span("workflow_graph_model"):
         workflow_graph_model = _workflow_graph_model(
             common=common,
+            plan_phases=_sequence(plan_index_model.get("phases")),
             events=events,
+            context_events=graph_context_events,
             event_limit=dashboard_event_limit,
             node_summaries=node_summaries,
             agent_statuses=agent_statuses,
@@ -347,6 +374,7 @@ def rebuild_read_models(
             active_leases=active_leases,
             task_summaries=task_summaries,
             objective_model=objective_model,
+            expansion_registry=expansion_registry,
             event_total_count=event_total_count,
         )
     with telemetry.span("metrics_model"):
@@ -404,6 +432,7 @@ def rebuild_read_models(
     diagnostics_counts = _read_model_rebuild_diagnostic_counts(
         paths,
         events=events,
+        graph_context_events=graph_context_events,
         event_total_count=event_total_count,
         run_summaries=run_summaries,
     )
@@ -950,6 +979,7 @@ def _read_model_rebuild_diagnostic_counts(
     paths: WorkflowPaths,
     *,
     events: Sequence[Mapping[str, Any]],
+    graph_context_events: Sequence[Mapping[str, Any]],
     event_total_count: int | None,
     run_summaries: Sequence[Mapping[str, Any]],
 ) -> dict[str, Any]:
@@ -958,6 +988,7 @@ def _read_model_rebuild_diagnostic_counts(
     detail_records = [record for record in run_summaries if record.get("detail_status") == "available"]
     return {
         "events_loaded": len(events),
+        "graph_context_events_loaded": len(graph_context_events),
         "events_total_count": event_total_count,
         "event_segment_files": event_stats["files"],
         "event_segment_bytes": event_stats["bytes"],
@@ -1483,6 +1514,7 @@ def _objective_model(paths: WorkflowPaths, *, objectives: Sequence[Any], parse_e
         expandable = bool(result and objective_result_is_expandable(result)) and objective.status != "!"
         result_status = str(_mapping_value(result, "status") or "").lower() if isinstance(result, Mapping) else ""
         result_verdict = str(_mapping_value(result, "verdict") or "").lower() if isinstance(result, Mapping) else ""
+        closed_at = _objective_closed_at(report, result)
         if closed:
             status = "closed"
         elif objective.status == "!" or result_status == "blocked" or result_verdict == "blocked_external":
@@ -1501,6 +1533,9 @@ def _objective_model(paths: WorkflowPaths, *, objectives: Sequence[Any], parse_e
             "report_path": _safe_dashboard_path(paths, report_path) if isinstance(report_path, Path) else None,
             "report_status": report.get("status") if isinstance(report, Mapping) else None,
             "verified_at": report.get("verified_at") if isinstance(report, Mapping) else None,
+            "closed_at": closed_at if closed else None,
+            "started_at": closed_at if closed else None,
+            "ended_at": closed_at if closed else None,
             "result": dict(result) if isinstance(result, Mapping) else None,
         }
         items.append(item)
@@ -1521,6 +1556,24 @@ def _objective_model(paths: WorkflowPaths, *, objectives: Sequence[Any], parse_e
             "parse_error_count": len(parse_errors),
         },
     }
+
+
+def _objective_closed_at(report: Any, result: Any) -> str | None:
+    report_map = _mapping_or_empty(report)
+    result_map = _mapping_or_empty(result)
+    return _first_timestamp_string(
+        result_map.get("ended_at"),
+        result_map.get("completed_at"),
+        result_map.get("verified_at"),
+        result_map.get("validated_at"),
+        result_map.get("updated_at"),
+        report_map.get("ended_at"),
+        report_map.get("completed_at"),
+        report_map.get("verified_at"),
+        report_map.get("validated_at"),
+        report_map.get("updated_at"),
+        report_map.get("generated_at"),
+    )
 
 
 def _objectives_for_phase_model(objective_model: Mapping[str, Any], phase_title: str) -> list[dict[str, Any]]:
@@ -1595,9 +1648,539 @@ def _plan_index_model(
     }
 
 
+def _phase_node_id(phase_id: str) -> str:
+    return "node_phase_" + _safe_id(phase_id or "unphased")
+
+
+def _task_node_id(task_id: str) -> str:
+    return "node_task_" + _safe_id(task_id)
+
+
+def _objective_node_id(objective_id: str) -> str:
+    return "objective_" + _safe_id(objective_id)
+
+
+def _graph_edge_id(edge_type: str, source: str, target: str, discriminator: str = "") -> str:
+    suffix = _stable_suffix({"type": edge_type, "source": source, "target": target, "discriminator": discriminator})
+    return f"edge_{_safe_id(edge_type)}_{suffix}"
+
+
+def _graph_edge(
+    edge_type: str,
+    source: str,
+    target: str,
+    *,
+    nodes_by_id: Mapping[str, Mapping[str, Any]],
+    label: str | None = None,
+    layer: str | None = None,
+    status: Any = None,
+    created_at: Any = None,
+    ended_at: Any = None,
+    hidden_by_default: bool = False,
+    priority: int | None = None,
+    evidence: Sequence[Mapping[str, Any]] | None = None,
+    discriminator: str = "",
+) -> dict[str, Any]:
+    source_node = _mapping_or_empty(nodes_by_id.get(source))
+    target_node = _mapping_or_empty(nodes_by_id.get(target))
+    edge: dict[str, Any] = {
+        "edge_id": _graph_edge_id(edge_type, source, target, discriminator),
+        "source": source,
+        "target": target,
+        "type": edge_type,
+        "label": label or edge_type.replace("_", " "),
+        "source_type": str(source_node.get("type") or ""),
+        "target_type": str(target_node.get("type") or ""),
+        "hidden_by_default": hidden_by_default,
+    }
+    if layer:
+        edge["layer"] = layer
+    if status not in (None, ""):
+        edge["status"] = status
+    if created_at not in (None, ""):
+        edge["created_at"] = created_at
+    if ended_at not in (None, ""):
+        edge["ended_at"] = ended_at
+    if priority is not None:
+        edge["priority"] = priority
+    evidence_values = [dict(item) for item in evidence or [] if isinstance(item, Mapping)]
+    if evidence_values:
+        edge["evidence"] = evidence_values
+    return edge
+
+
+def _append_graph_edge(
+    edges: list[dict[str, Any]],
+    edge_type: str,
+    source: str,
+    target: str,
+    *,
+    nodes_by_id: Mapping[str, Mapping[str, Any]],
+    require_nodes: bool = True,
+    **kwargs: Any,
+) -> None:
+    if not source or not target or source == target:
+        return
+    if require_nodes and (source not in nodes_by_id or target not in nodes_by_id):
+        return
+    edges.append(_graph_edge(edge_type, source, target, nodes_by_id=nodes_by_id, **kwargs))
+
+
+def _plan_phase_lookup(plan_phases: Sequence[Mapping[str, Any]]) -> tuple[dict[str, Mapping[str, Any]], dict[str, str]]:
+    phases_by_id: dict[str, Mapping[str, Any]] = {}
+    task_to_phase: dict[str, str] = {}
+    for raw_phase in plan_phases:
+        phase = _mapping_or_empty(raw_phase)
+        phase_id = str(phase.get("phase_id") or _phase_id(str(phase.get("title") or "Unphased")))
+        if not phase_id:
+            continue
+        phases_by_id[phase_id] = phase
+        for raw_task in _sequence(phase.get("tasks")):
+            task = _mapping_or_empty(raw_task)
+            task_id = str(task.get("task_id") or "")
+            if task_id:
+                task_to_phase[task_id] = phase_id
+    return phases_by_id, task_to_phase
+
+
+def _task_graph_started_at(task: Mapping[str, Any]) -> str | None:
+    return _first_timestamp_string(
+        task.get("started_at"),
+        task.get("prepared_at"),
+        task.get("created_at"),
+        _timestamp_from_run_id(task.get("latest_run_id")),
+        task.get("last_updated_at") if str(task.get("status") or "") in {"done", "skipped", "blocked"} else None,
+    )
+
+
+def _task_graph_ended_at(task: Mapping[str, Any]) -> str | None:
+    if str(task.get("status") or "") not in {"done", "skipped", "blocked"}:
+        return None
+    return _first_timestamp_string(
+        task.get("ended_at"),
+        task.get("completed_at"),
+        task.get("finished_at"),
+        task.get("validated_at"),
+        task.get("last_updated_at"),
+    )
+
+
+def _phase_graph_timing(tasks: Sequence[Mapping[str, Any]]) -> dict[str, str | None]:
+    starts: list[tuple[datetime, str]] = []
+    ends: list[tuple[datetime, str]] = []
+    for task in tasks:
+        started_at = _task_graph_started_at(task)
+        ended_at = _task_graph_ended_at(task)
+        started = _parse_timestamp(started_at)
+        ended = _parse_timestamp(ended_at)
+        if started is not None and started_at is not None:
+            starts.append((started, started_at))
+        if ended is not None and ended_at is not None:
+            ends.append((ended, ended_at))
+    starts.sort(key=lambda item: item[0])
+    ends.sort(key=lambda item: item[0])
+    return {
+        "started_at": starts[0][1] if starts else None,
+        "ended_at": ends[-1][1] if ends else None,
+    }
+
+
+def _add_plan_graph_nodes(
+    nodes_by_id: dict[str, dict[str, Any]],
+    *,
+    plan_phases: Sequence[Mapping[str, Any]],
+    task_summaries: Sequence[Mapping[str, Any]],
+) -> tuple[dict[str, Mapping[str, Any]], dict[str, str]]:
+    phases_by_id, task_to_phase = _plan_phase_lookup(plan_phases)
+    task_summaries_by_phase: dict[str, list[Mapping[str, Any]]] = {}
+    for task in task_summaries:
+        task_id = str(task.get("task_id") or "")
+        phase_title = str(task.get("phase") or "")
+        phase_id = task_to_phase.get(task_id) or _phase_id(phase_title or "Unphased")
+        task_summaries_by_phase.setdefault(phase_id, []).append(task)
+    for phase_id, phase in phases_by_id.items():
+        title = str(phase.get("title") or phase_id)
+        tasks = [_mapping_or_empty(task) for task in _sequence(phase.get("tasks"))]
+        node_id = _phase_node_id(phase_id)
+        timing = _phase_graph_timing(task_summaries_by_phase.get(phase_id, []))
+        nodes_by_id.setdefault(
+            node_id,
+            _node_with_timing(
+                {
+                    "node_id": node_id,
+                    "type": "phase",
+                    "kind": "phase",
+                    "layer": "plan",
+                    "status": phase.get("status") or "planned",
+                    "title": title,
+                    "display_label": phase_id,
+                    "phase_id": phase_id,
+                    "phase": title,
+                    "started_at": timing.get("started_at"),
+                    "ended_at": timing.get("ended_at"),
+                    "pipeline_visible": False,
+                    "importance": 100,
+                    "task_count": len(tasks),
+                    "summary": {
+                        "one_line": f"Phase {phase_id}: {title}",
+                        "highlights": [f"{len(tasks)} task(s)."],
+                        "risks": [],
+                    },
+                    "input_refs": [],
+                    "output_refs": [],
+                }
+            ),
+        )
+    for task in task_summaries:
+        task_id = str(task.get("task_id") or "")
+        if not task_id:
+            continue
+        phase_title = str(task.get("phase") or "")
+        phase_id = task_to_phase.get(task_id) or _phase_id(phase_title or "Unphased")
+        task_to_phase[task_id] = phase_id
+        if phase_id and phase_id not in phases_by_id:
+            phases_by_id[phase_id] = {"phase_id": phase_id, "title": phase_title or phase_id, "tasks": []}
+            node_id = _phase_node_id(phase_id)
+            timing = _phase_graph_timing(task_summaries_by_phase.get(phase_id, [task]))
+            nodes_by_id.setdefault(
+                node_id,
+                _node_with_timing(
+                    {
+                        "node_id": node_id,
+                        "type": "phase",
+                        "kind": "phase",
+                        "layer": "plan",
+                        "status": "planned",
+                        "title": phase_title or phase_id,
+                        "display_label": phase_id,
+                        "phase_id": phase_id,
+                        "phase": phase_title or phase_id,
+                        "started_at": timing.get("started_at"),
+                        "ended_at": timing.get("ended_at"),
+                        "pipeline_visible": False,
+                        "importance": 100,
+                        "summary": {
+                            "one_line": f"Phase {phase_id}: {phase_title or phase_id}",
+                            "highlights": [],
+                            "risks": [],
+                        },
+                        "input_refs": [],
+                        "output_refs": [],
+                    }
+                ),
+            )
+        node_id = _task_node_id(task_id)
+        started_at = _task_graph_started_at(task)
+        ended_at = _task_graph_ended_at(task)
+        nodes_by_id.setdefault(
+            node_id,
+            _node_with_timing(
+                {
+                    "node_id": node_id,
+                    "type": "task",
+                    "kind": "task",
+                    "layer": "plan",
+                    "status": task.get("status") or "unknown",
+                    "title": str(task.get("title") or task_id),
+                    "display_label": task_id,
+                    "phase_id": phase_id,
+                    "phase": phase_title or phase_id,
+                    "task_id": task_id,
+                    "pipeline_visible": False,
+                    "importance": 90,
+                    "deliverables": task.get("deliverables"),
+                    "started_at": started_at,
+                    "ended_at": ended_at,
+                    "summary": {
+                        "one_line": f"Task {task_id}: {task.get('title') or task.get('status') or 'planned'}",
+                        "highlights": [str(task.get("deliverables") or "")] if task.get("deliverables") else [],
+                        "risks": [],
+                    },
+                    "input_refs": [],
+                    "output_refs": _present_refs(task.get("latest_path"), task.get("validation_path")),
+                }
+            ),
+        )
+    return phases_by_id, task_to_phase
+
+
+def _annotate_pipeline_visibility(nodes_by_id: Mapping[str, dict[str, Any]]) -> None:
+    for node in nodes_by_id.values():
+        node_type = str(node.get("type") or "").strip().lower()
+        if node_type in {"phase", "task"}:
+            node["pipeline_visible"] = False
+        else:
+            node.setdefault("pipeline_visible", True)
+
+
+def _new_run_graph_context() -> dict[str, list[str]]:
+    return {
+        "phase_ids": [],
+        "target_task_ids": [],
+        "target_objective_ids": [],
+        "proposal_ids": [],
+    }
+
+
+def _append_graph_context_value(context: dict[str, list[str]], key: str, value: Any) -> None:
+    text = str(value or "").strip()
+    if not text:
+        return
+    values = context.setdefault(key, [])
+    if text not in values:
+        values.append(text)
+
+
+def _graph_context_values(value: Any) -> list[Any]:
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return list(value)
+    if value in (None, ""):
+        return []
+    return [value]
+
+
+def _normalize_context_phase_id(value: Any) -> str:
+    text = str(value or "").strip()
+    match = re.fullmatch(r"(?i)P(\d+)", text)
+    if match:
+        return f"P{int(match.group(1))}"
+    return text
+
+
+def _normalize_context_task_id(value: Any) -> str:
+    text = str(value or "").strip()
+    match = re.fullmatch(r"(?i)P(\d+)[._-]?T(\d{1,4})", text)
+    if match:
+        return f"P{int(match.group(1))}.T{int(match.group(2)):03d}"
+    return text
+
+
+def _normalize_context_objective_id(value: Any) -> str:
+    text = str(value or "").strip()
+    match = re.fullmatch(r"(?i)P(\d+)[._-]O(\d{1,4})", text)
+    if match:
+        return f"P{int(match.group(1))}.O{int(match.group(2))}"
+    return text
+
+
+def _add_graph_context_phase(context: dict[str, list[str]], value: Any) -> None:
+    phase_id = _normalize_context_phase_id(value)
+    _append_graph_context_value(context, "phase_ids", phase_id)
+
+
+def _add_graph_context_task(context: dict[str, list[str]], value: Any) -> None:
+    task_id = _normalize_context_task_id(value)
+    _append_graph_context_value(context, "target_task_ids", task_id)
+    match = re.fullmatch(r"(?i)P(\d+)[._-]?T\d{1,4}", task_id)
+    if match:
+        _add_graph_context_phase(context, f"P{match.group(1)}")
+
+
+def _add_graph_context_objective(context: dict[str, list[str]], value: Any) -> None:
+    objective_id = _normalize_context_objective_id(value)
+    _append_graph_context_value(context, "target_objective_ids", objective_id)
+    match = re.fullmatch(r"(?i)P(\d+)[._-]O\d{1,4}", objective_id)
+    if match:
+        _add_graph_context_phase(context, f"P{match.group(1)}")
+
+
+def _add_graph_context_from_text(context: dict[str, list[str]], value: Any) -> None:
+    text = str(value or "").strip()
+    if not text:
+        return
+    for match in GRAPH_CONTEXT_TASK_RE.finditer(text):
+        _add_graph_context_task(context, f"P{match.group('phase')}.T{int(match.group('task')):03d}")
+    for match in GRAPH_CONTEXT_OBJECTIVE_RE.finditer(text):
+        _add_graph_context_objective(context, f"P{match.group('phase')}.O{int(match.group('objective'))}")
+    for match in GRAPH_CONTEXT_PHASE_RE.finditer(text):
+        _add_graph_context_phase(context, f"P{match.group('phase')}")
+
+
+def _add_graph_context_from_nested_text(context: dict[str, list[str]], value: Any, *, depth: int = 0) -> None:
+    if depth > 5 or value in (None, ""):
+        return
+    if isinstance(value, str):
+        _add_graph_context_from_text(context, value)
+        return
+    if isinstance(value, Mapping):
+        for item in value.values():
+            _add_graph_context_from_nested_text(context, item, depth=depth + 1)
+        return
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        for item in list(value)[:200]:
+            _add_graph_context_from_nested_text(context, item, depth=depth + 1)
+
+
+def _add_event_run_context(context: dict[str, list[str]], event: Mapping[str, Any]) -> None:
+    payload = _event_payload(event)
+    subject = event.get("subject") if isinstance(event.get("subject"), Mapping) else {}
+    for value in (
+        event.get("phase_id"),
+        payload.get("phase_id"),
+        payload.get("objective_phase_id"),
+        _mapping_value(subject, "phase_id"),
+        _mapping_value(subject, "objective_phase_id"),
+    ):
+        _add_graph_context_phase(context, value)
+    for value in (
+        event.get("task_id"),
+        payload.get("task_id"),
+        _mapping_value(subject, "task_id"),
+    ):
+        _add_graph_context_task(context, value)
+    for key in ("target_task_ids", "added_task_ids", "related_task_ids"):
+        for value in _graph_context_values(payload.get(key)):
+            _add_graph_context_task(context, value)
+    for value in _graph_context_values(payload.get("target_objective_ids")):
+        _add_graph_context_objective(context, value)
+    for value in (payload.get("objective_id"), payload.get("target_objective_id")):
+        _add_graph_context_objective(context, value)
+    proposal_id = payload.get("proposal_id")
+    _append_graph_context_value(context, "proposal_ids", proposal_id)
+    for key in (
+        "proposal_id",
+        "loop_signature",
+        "objective_gap_signature",
+        "failure_signature",
+        "action_scope_key",
+        "scope_key",
+        "message",
+        "summary",
+        "reason",
+    ):
+        _add_graph_context_from_text(context, payload.get(key))
+    for value in _graph_context_values(payload.get("target_failure_ids")):
+        _add_graph_context_from_text(context, value)
+    _add_graph_context_from_nested_text(context, payload.get("agent_status"))
+    for key in ("candidate", "selected_candidate", "proposal", "expansion"):
+        _add_graph_context_from_proposal_like(context, payload.get(key))
+
+
+def _add_expansion_proposal_run_context(context: dict[str, list[str]], proposal: Mapping[str, Any]) -> None:
+    for key in ("target_task_ids", "added_task_ids", "related_task_ids"):
+        for value in _graph_context_values(proposal.get(key)):
+            _add_graph_context_task(context, value)
+    for key in ("target_objective_ids", "added_objective_ids"):
+        for value in _graph_context_values(proposal.get(key)):
+            _add_graph_context_objective(context, value)
+    for key in ("target_phase_ids", "added_phase_ids", "related_phase_ids"):
+        for value in _graph_context_values(proposal.get(key)):
+            _add_graph_context_phase(context, value)
+    for value in (proposal.get("phase_id"), proposal.get("new_phase_id"), proposal.get("objective_phase_id")):
+        _add_graph_context_phase(context, value)
+    proposal_id = proposal.get("proposal_id")
+    _append_graph_context_value(context, "proposal_ids", proposal_id)
+    for key in (
+        "proposal_id",
+        "loop_signature",
+        "objective_gap_signature",
+        "failure_signature",
+        "action_scope_key",
+        "scope_key",
+        "trigger",
+        "summary",
+        "reason",
+    ):
+        _add_graph_context_from_text(context, proposal.get(key))
+    for value in _graph_context_values(proposal.get("target_failure_ids")):
+        _add_graph_context_from_text(context, value)
+
+
+def _add_graph_context_from_proposal_like(context: dict[str, list[str]], value: Any, *, depth: int = 0) -> None:
+    if depth > 3 or value in (None, ""):
+        return
+    if isinstance(value, Mapping):
+        _add_expansion_proposal_run_context(context, value)
+        for key in ("proposal", "expansion", "candidate", "selected_candidate"):
+            nested = value.get(key)
+            if nested not in (None, ""):
+                _add_graph_context_from_proposal_like(context, nested, depth=depth + 1)
+        return
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        for item in list(value)[:50]:
+            _add_graph_context_from_proposal_like(context, item, depth=depth + 1)
+
+
+def _run_context_index(
+    events: Sequence[Mapping[str, Any]],
+    expansion_registry: Mapping[str, Any],
+) -> dict[str, dict[str, list[str]]]:
+    contexts: dict[str, dict[str, list[str]]] = {}
+    for event in events:
+        if not isinstance(event, Mapping):
+            continue
+        payload = _event_payload(event)
+        subject = event.get("subject") if isinstance(event.get("subject"), Mapping) else {}
+        run_id = str(event.get("run_id") or payload.get("run_id") or _mapping_value(subject, "run_id") or "").strip()
+        if not run_id:
+            continue
+        _add_event_run_context(contexts.setdefault(run_id, _new_run_graph_context()), event)
+
+    proposals = expansion_registry.get("proposals")
+    if isinstance(proposals, Sequence) and not isinstance(proposals, (str, bytes, bytearray)):
+        for raw_proposal in proposals:
+            proposal = _mapping_or_empty(raw_proposal)
+            run_id = str(proposal.get("run_id") or "").strip()
+            if not run_id:
+                continue
+            _add_expansion_proposal_run_context(contexts.setdefault(run_id, _new_run_graph_context()), proposal)
+    return contexts
+
+
+def _merge_context_values(existing: Any, additions: Sequence[str]) -> list[str]:
+    values: list[str] = []
+    for value in _graph_context_values(existing):
+        text = str(value or "").strip()
+        if text and text not in values:
+            values.append(text)
+    for value in additions:
+        text = str(value or "").strip()
+        if text and text not in values:
+            values.append(text)
+    return values
+
+
+def _node_phase_ids(node: Mapping[str, Any]) -> list[str]:
+    values: list[str] = []
+    for value in _graph_context_values(node.get("phase_ids")):
+        phase_id = _normalize_context_phase_id(value)
+        if phase_id and phase_id not in values:
+            values.append(phase_id)
+    for value in (node.get("phase_id"), node.get("objective_phase_id")):
+        phase_id = _normalize_context_phase_id(value)
+        if phase_id and phase_id not in values:
+            values.append(phase_id)
+    return values
+
+
+def _merge_run_context_into_nodes(
+    nodes_by_id: Mapping[str, dict[str, Any]],
+    run_context: Mapping[str, Mapping[str, Sequence[str]]],
+) -> None:
+    for node in nodes_by_id.values():
+        run_id = str(node.get("run_id") or "")
+        if not run_id:
+            continue
+        context = run_context.get(run_id)
+        if not context:
+            continue
+        phase_ids = _merge_context_values(node.get("phase_ids"), list(context.get("phase_ids") or []))
+        if phase_ids:
+            node["phase_ids"] = phase_ids
+            if node.get("phase_id") in (None, "", []):
+                node["phase_id"] = phase_ids[0]
+            if node.get("phase") in (None, "", []):
+                node["phase"] = phase_ids[0]
+        for key in ("target_task_ids", "target_objective_ids", "proposal_ids"):
+            values = _merge_context_values(node.get(key), list(context.get(key) or []))
+            if values:
+                node[key] = values
+
+
 def _workflow_graph_model(
     *,
     common: Mapping[str, Any],
+    plan_phases: Sequence[Mapping[str, Any]],
     events: Sequence[Mapping[str, Any]],
     event_limit: int,
     node_summaries: Sequence[Mapping[str, Any]],
@@ -1606,11 +2189,19 @@ def _workflow_graph_model(
     active_leases: Sequence[Mapping[str, Any]],
     task_summaries: Sequence[Mapping[str, Any]],
     objective_model: Mapping[str, Any],
+    expansion_registry: Mapping[str, Any],
     event_total_count: int | None,
+    context_events: Sequence[Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     graph_events = _recent_dashboard_events(events, limit=event_limit)
+    run_context = _run_context_index(context_events if context_events is not None else events, expansion_registry)
     total_events = event_total_count if event_total_count is not None else len(events)
     nodes_by_id: dict[str, dict[str, Any]] = {}
+    phases_by_id, task_to_phase = _add_plan_graph_nodes(
+        nodes_by_id,
+        plan_phases=plan_phases,
+        task_summaries=task_summaries,
+    )
     summary_run_ids = {str(summary.get("run_id") or "") for summary in node_summaries if summary.get("run_id")}
     validation_keys = {
         (
@@ -1654,9 +2245,40 @@ def _workflow_graph_model(
             continue
         node = _node_from_objective(objective)
         nodes_by_id.setdefault(node["node_id"], node)
+    _merge_run_context_into_nodes(nodes_by_id, run_context)
+    _annotate_pipeline_visibility(nodes_by_id)
     _propagate_run_graph_metadata(nodes_by_id)
 
     edges: list[dict[str, Any]] = []
+    for task_id, phase_id in sorted(task_to_phase.items()):
+        _append_graph_edge(
+            edges,
+            "phase_contains_task",
+            _phase_node_id(phase_id),
+            _task_node_id(task_id),
+            nodes_by_id=nodes_by_id,
+            label="contains",
+            layer="plan",
+            priority=100,
+            evidence=[{"kind": "plan_index", "id": task_id}],
+        )
+    for phase_id, phase in sorted(phases_by_id.items()):
+        phase_node = _phase_node_id(phase_id)
+        for objective in _sequence(phase.get("objectives")):
+            objective_id = str(_mapping_or_empty(objective).get("objective_id") or "")
+            if not objective_id:
+                continue
+            _append_graph_edge(
+                edges,
+                "phase_has_objective",
+                phase_node,
+                _objective_node_id(objective_id),
+                nodes_by_id=nodes_by_id,
+                label="objective",
+                layer="objective",
+                priority=80,
+                evidence=[{"kind": "objective", "id": objective_id}],
+            )
     for validation in validation_records:
         run_id = str(validation.get("run_id") or "")
         if not run_id:
@@ -1672,20 +2294,164 @@ def _workflow_graph_model(
                 "run_id": run_id,
                 "summary": {"one_line": "Run inferred from validation.", "highlights": [], "risks": []},
             }
-        edges.append({"edge_id": f"edge_{source}_to_{target}", "source": source, "target": target, "type": "validated_by"})
+        _append_graph_edge(
+            edges,
+            "validated_by",
+            source,
+            target,
+            nodes_by_id=nodes_by_id,
+            label="validated by",
+            layer="validation",
+            status=validation.get("status"),
+            created_at=validation.get("started_at") or validation.get("validated_at"),
+            ended_at=validation.get("validated_at"),
+            priority=70,
+            evidence=[{"kind": "validation", "id": run_id}],
+        )
+        task_id = str(validation.get("primary_task_id") or validation.get("task_id") or "")
+        if task_id:
+            _append_graph_edge(
+                edges,
+                "validation_checks_task",
+                target,
+                _task_node_id(task_id),
+                nodes_by_id=nodes_by_id,
+                label="checks",
+                layer="validation",
+                status=validation.get("status"),
+                priority=55,
+                evidence=[{"kind": "validation", "id": run_id}],
+            )
     previous_event_node: str | None = None
     for event in graph_events:
         node_id = _event_node_id(event)
         if previous_event_node is not None:
-            edges.append(
-                {
-                    "edge_id": f"edge_{previous_event_node}_to_{node_id}",
-                    "source": previous_event_node,
-                    "target": node_id,
-                    "type": "event_sequence",
-                }
+            _append_graph_edge(
+                edges,
+                "event_sequence",
+                previous_event_node,
+                node_id,
+                nodes_by_id=nodes_by_id,
+                label="next event",
+                layer="event",
+                hidden_by_default=True,
+                priority=5,
+                discriminator=str(_event_sequence(event) or _event_id(event) or node_id),
             )
         previous_event_node = node_id
+
+    for node_id, node in sorted(nodes_by_id.items()):
+        node_type = str(node.get("type") or "").strip().lower()
+        task_id = str(node.get("task_id") or "")
+        run_id = str(node.get("run_id") or "")
+        if task_id and run_id and node_type not in {"event", "validation"}:
+            _append_graph_edge(
+                edges,
+                "task_has_run",
+                _task_node_id(task_id),
+                node_id,
+                nodes_by_id=nodes_by_id,
+                label="run",
+                layer="runtime",
+                status=node.get("status"),
+                created_at=node.get("started_at"),
+                ended_at=node.get("ended_at"),
+                priority=75,
+                evidence=[{"kind": "run", "id": run_id}],
+            )
+        if run_id and node_type not in {"event", "validation"}:
+            for target_task_id in sorted({str(value) for value in _graph_context_values(node.get("target_task_ids")) if str(value)}):
+                if target_task_id == task_id:
+                    continue
+                _append_graph_edge(
+                    edges,
+                    "task_has_run",
+                    _task_node_id(target_task_id),
+                    node_id,
+                    nodes_by_id=nodes_by_id,
+                    label="targets",
+                    layer="runtime",
+                    status=node.get("status"),
+                    created_at=node.get("started_at"),
+                    ended_at=node.get("ended_at"),
+                    priority=58,
+                    evidence=[{"kind": "run_context", "id": run_id}],
+                    discriminator=target_task_id,
+                )
+            if not task_id:
+                for phase_id in sorted({phase_id for phase_id in _node_phase_ids(node) if phase_id}):
+                    _append_graph_edge(
+                        edges,
+                        "phase_has_run",
+                        _phase_node_id(phase_id),
+                        node_id,
+                        nodes_by_id=nodes_by_id,
+                        label="run",
+                        layer="runtime",
+                        status=node.get("status"),
+                        created_at=node.get("started_at"),
+                        ended_at=node.get("ended_at"),
+                        priority=57,
+                        evidence=[{"kind": "run_context", "id": run_id}],
+                        discriminator=phase_id,
+                    )
+        if node_type == "event":
+            if run_id:
+                _append_graph_edge(
+                    edges,
+                    "event_about_node",
+                    node_id,
+                    _preferred_run_node_id(nodes_by_id, run_id),
+                    nodes_by_id=nodes_by_id,
+                    label="about",
+                    layer="event",
+                    hidden_by_default=True,
+                    priority=15,
+                    evidence=[{"kind": "event", "id": str(node.get("event_id") or node_id)}],
+                )
+            elif task_id:
+                _append_graph_edge(
+                    edges,
+                    "event_about_node",
+                    node_id,
+                    _task_node_id(task_id),
+                    nodes_by_id=nodes_by_id,
+                    label="about",
+                    layer="event",
+                    hidden_by_default=True,
+                    priority=15,
+                    evidence=[{"kind": "event", "id": str(node.get("event_id") or node_id)}],
+                )
+        target_objective_ids = node.get("target_objective_ids")
+        if isinstance(target_objective_ids, Sequence) and not isinstance(target_objective_ids, (str, bytes, bytearray)):
+            for objective_id in sorted({str(value) for value in target_objective_ids if str(value)}):
+                target = _objective_node_id(objective_id)
+                if node_type == "event":
+                    edge_type = "event_about_node"
+                    source = node_id
+                    label = "about"
+                    priority = 20
+                elif run_id:
+                    edge_type = "run_supports_objective"
+                    source = _preferred_run_node_id(nodes_by_id, run_id)
+                    label = "supports"
+                    priority = 60
+                else:
+                    continue
+                _append_graph_edge(
+                    edges,
+                    edge_type,
+                    source,
+                    target,
+                    nodes_by_id=nodes_by_id,
+                    label=label,
+                    layer="objective",
+                    status=node.get("status"),
+                    hidden_by_default=node_type == "event",
+                    priority=priority,
+                    evidence=[{"kind": node_type or "node", "id": str(node.get("event_id") or run_id or node_id)}],
+                    discriminator=objective_id,
+                )
 
     task_lookup = {
         str(task.get("task_id") or ""): task
@@ -1698,6 +2464,12 @@ def _workflow_graph_model(
         _dedupe_edges(edges),
         detail_limit=SELF_EXPANSION_GRAPH_DETAIL_LIMIT,
     )
+    verifier_graph = _aggregate_objective_verifier_graph(
+        graph["nodes"],
+        graph["edges"],
+        detail_limit=OBJECTIVE_VERIFIER_GRAPH_DETAIL_LIMIT,
+    )
+    graph_edges = _annotate_parallel_edges(verifier_graph["edges"])
     return {
         **dict(common),
         "event_window": {
@@ -1707,8 +2479,10 @@ def _workflow_graph_model(
             "truncated": total_events > len(graph_events),
         },
         "self_expansion_aggregation": graph["aggregation"],
-        "nodes": graph["nodes"],
-        "edges": graph["edges"],
+        "objective_verifier_aggregation": verifier_graph["aggregation"],
+        "nodes": verifier_graph["nodes"],
+        "edges": graph_edges,
+        "network": _network_graph_metadata(verifier_graph["nodes"], graph_edges, event_window_truncated=total_events > len(graph_events)),
     }
 
 
@@ -1720,6 +2494,46 @@ def _preferred_run_node_id(nodes_by_id: Mapping[str, Mapping[str, Any]], run_id:
         if node_type not in {"event", "validation"}:
             return str(node_id)
     return _run_node_id(run_id)
+
+
+def _annotate_parallel_edges(edges: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    groups: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for edge in edges:
+        item = dict(edge)
+        key = (str(item.get("source") or ""), str(item.get("target") or ""))
+        groups.setdefault(key, []).append(item)
+    annotated: list[dict[str, Any]] = []
+    for group_edges in groups.values():
+        ordered = sorted(group_edges, key=lambda item: (str(item.get("type") or ""), str(item.get("edge_id") or "")))
+        count = len(ordered)
+        for index, edge in enumerate(ordered):
+            edge["parallel_index"] = index
+            edge["parallel_count"] = count
+            annotated.append(edge)
+    return sorted(annotated, key=lambda item: str(item.get("edge_id") or ""))
+
+
+def _network_graph_metadata(
+    nodes: Sequence[Mapping[str, Any]],
+    edges: Sequence[Mapping[str, Any]],
+    *,
+    event_window_truncated: bool,
+) -> dict[str, Any]:
+    hidden_edge_types = sorted({str(edge.get("type") or "") for edge in edges if edge.get("hidden_by_default") is True and edge.get("type")})
+    return {
+        "schema_version": "1",
+        "default_layout": "temporal_force",
+        "base_layout": "cose",
+        "available_layouts": ["temporal_force", "cose"],
+        "temporal_axis": "x",
+        "temporal_scale": "rank",
+        "temporal_pending": "end_alpha",
+        "default_visible_layers": ["plan", "runtime", "validation", "objective"],
+        "default_hidden_edge_types": hidden_edge_types or ["event_sequence"],
+        "node_count": len(nodes),
+        "edge_count": len(edges),
+        "truncated": bool(event_window_truncated),
+    }
 
 
 def _aggregate_self_expansion_graph(
@@ -1818,6 +2632,243 @@ def _aggregate_self_expansion_graph(
             "groups": group_records,
         },
     }
+
+
+def _aggregate_objective_verifier_graph(
+    nodes: Sequence[Mapping[str, Any]],
+    edges: Sequence[Mapping[str, Any]],
+    *,
+    detail_limit: int,
+) -> dict[str, Any]:
+    node_list = [dict(node) for node in nodes]
+    verifier_nodes = [node for node in node_list if _is_objective_verifier_graph_node(node)]
+    if detail_limit <= 0:
+        keep_ids = {str(node.get("node_id") or "") for node in verifier_nodes if _status_like_active(node.get("status"))}
+    else:
+        active_ids = {str(node.get("node_id") or "") for node in verifier_nodes if _status_like_active(node.get("status"))}
+        recent = sorted(verifier_nodes, key=_self_expansion_detail_sort_key, reverse=True)[:detail_limit]
+        keep_ids = active_ids | {str(node.get("node_id") or "") for node in recent}
+    aggregate_candidates = [
+        node
+        for node in verifier_nodes
+        if str(node.get("node_id") or "") and str(node.get("node_id") or "") not in keep_ids
+    ]
+    if not aggregate_candidates:
+        sorted_nodes = sorted(node_list, key=_graph_node_sort_key)
+        return {
+            "nodes": sorted_nodes,
+            "edges": _dedupe_edges(edges),
+            "aggregation": _objective_verifier_empty_aggregation(detail_limit, visible_node_count=len(sorted_nodes)),
+        }
+
+    groups: dict[str, list[Mapping[str, Any]]] = {}
+    for node in aggregate_candidates:
+        groups.setdefault(_objective_verifier_aggregation_key(node), []).append(node)
+    node_to_group: dict[str, str] = {}
+    aggregate_nodes: list[dict[str, Any]] = []
+    group_records: list[dict[str, Any]] = []
+    for key, group_nodes in sorted(groups.items()):
+        group_id = f"aggregate_objective_verifier_{_safe_id(key)}"
+        for node in group_nodes:
+            node_to_group[str(node.get("node_id") or "")] = group_id
+        fields = _objective_verifier_group_fields(group_nodes)
+        aggregate_node = _objective_verifier_aggregate_node(group_id, key, group_nodes, fields=fields)
+        aggregate_nodes.append(aggregate_node)
+        group_records.append(
+            {
+                "group_id": group_id,
+                "key": key,
+                **fields,
+                "aggregated_node_count": len(group_nodes),
+                "status_counts": _count_values(str(node.get("status") or "unknown") for node in group_nodes),
+                "sample_run_ids": _sample_values(
+                    (str(node.get("run_id") or "") for node in group_nodes if str(node.get("run_id") or "")),
+                    limit=OBJECTIVE_VERIFIER_GRAPH_SAMPLE_LIMIT,
+                ),
+            }
+        )
+    visible_nodes = [
+        node
+        for node in node_list
+        if str(node.get("node_id") or "") not in node_to_group
+    ]
+    visible_nodes.extend(aggregate_nodes)
+    visible_ids = {str(node.get("node_id") or "") for node in visible_nodes}
+    rewired_edges = _rewire_edges_for_aggregation(
+        edges,
+        node_to_group=node_to_group,
+        visible_ids=visible_ids,
+        aggregate_prefix="aggregate_objective_verifier_",
+    )
+    sorted_nodes = sorted(visible_nodes, key=_graph_node_sort_key)
+    return {
+        "nodes": sorted_nodes,
+        "edges": rewired_edges,
+        "aggregation": {
+            "enabled": True,
+            "visible_node_count": len(sorted_nodes),
+            "aggregated_node_count": len(aggregate_candidates),
+            "detail_limit": detail_limit,
+            "retention_policy": _objective_verifier_retention_policy(detail_limit),
+            "groups": group_records,
+        },
+    }
+
+
+def _rewire_edges_for_aggregation(
+    edges: Sequence[Mapping[str, Any]],
+    *,
+    node_to_group: Mapping[str, str],
+    visible_ids: set[str],
+    aggregate_prefix: str,
+) -> list[dict[str, Any]]:
+    rewired_by_key: dict[str, dict[str, Any]] = {}
+    for edge in edges:
+        source = str(edge.get("source") or "")
+        target = str(edge.get("target") or "")
+        mapped_source = node_to_group.get(source, source)
+        mapped_target = node_to_group.get(target, target)
+        if not mapped_source or not mapped_target or mapped_source == mapped_target:
+            continue
+        if mapped_source not in visible_ids or mapped_target not in visible_ids:
+            continue
+        rewired = dict(edge)
+        rewired["source"] = mapped_source
+        rewired["target"] = mapped_target
+        changed = mapped_source != source or mapped_target != target
+        if changed or mapped_source.startswith(aggregate_prefix) or mapped_target.startswith(aggregate_prefix):
+            rewired["aggregated"] = True
+        signature = {
+            "type": rewired.get("type"),
+            "source": mapped_source,
+            "target": mapped_target,
+            "label": rewired.get("label"),
+            "layer": rewired.get("layer"),
+            "status": rewired.get("status"),
+            "hidden_by_default": rewired.get("hidden_by_default") is True,
+        }
+        edge_id = _graph_edge_id(str(rewired.get("type") or "edge"), mapped_source, mapped_target, _stable_suffix(signature))
+        existing = rewired_by_key.get(edge_id)
+        if existing:
+            existing["aggregated_edge_count"] = int(existing.get("aggregated_edge_count") or 1) + 1
+            if rewired.get("aggregated"):
+                existing["aggregated"] = True
+            continue
+        rewired["edge_id"] = edge_id
+        if rewired.get("aggregated"):
+            rewired["aggregated_edge_count"] = 1
+        rewired_by_key[edge_id] = rewired
+    return sorted(rewired_by_key.values(), key=lambda item: str(item.get("edge_id") or ""))
+
+
+def _is_objective_verifier_graph_node(node: Mapping[str, Any]) -> bool:
+    node_type = str(node.get("type") or "").strip().lower()
+    role = str(node.get("agent_role") or "").strip().lower()
+    title = str(node.get("title") or "").strip().lower()
+    return "objective_verifier" in {node_type, role} or "objective verifier" in title or "objective_verifier" in title
+
+
+def _objective_verifier_empty_aggregation(detail_limit: int, *, visible_node_count: int) -> dict[str, Any]:
+    return {
+        "enabled": False,
+        "visible_node_count": visible_node_count,
+        "aggregated_node_count": 0,
+        "detail_limit": detail_limit,
+        "retention_policy": _objective_verifier_retention_policy(detail_limit),
+        "groups": [],
+    }
+
+
+def _objective_verifier_retention_policy(detail_limit: int) -> dict[str, Any]:
+    return {
+        "mode": "recent_active_detail_with_historical_buckets",
+        "recent_detail_limit": detail_limit,
+        "active_nodes_always_visible": True,
+        "bucket_fields": ["time_bucket", "phase_key", "target_key", "terminal_status"],
+        "sample_limit": OBJECTIVE_VERIFIER_GRAPH_SAMPLE_LIMIT,
+    }
+
+
+def _objective_verifier_aggregation_key(node: Mapping[str, Any]) -> str:
+    fields = _objective_verifier_group_fields([node])
+    return "|".join(
+        (
+            "bucket=" + fields["time_bucket"],
+            "phase=" + fields["phase_key"],
+            "target=" + fields["target_key"],
+            "status=" + fields["terminal_status"],
+        )
+    )
+
+
+def _objective_verifier_group_fields(nodes: Sequence[Mapping[str, Any]]) -> dict[str, str]:
+    first = nodes[0] if nodes else {}
+    return {
+        "time_bucket": _self_expansion_time_bucket(first),
+        "phase_key": _objective_verifier_phase_key(first),
+        "target_key": _self_expansion_target_key(first),
+        "terminal_status": _self_expansion_terminal_status(first),
+    }
+
+
+def _objective_verifier_phase_key(node: Mapping[str, Any]) -> str:
+    values = _node_phase_ids(node)
+    return "phase:" + ",".join(sorted(values)[:3]) if values else "phase:workflow"
+
+
+def _objective_verifier_aggregate_node(
+    group_id: str,
+    key: str,
+    nodes: Sequence[Mapping[str, Any]],
+    *,
+    fields: Mapping[str, str],
+) -> dict[str, Any]:
+    timestamps = [_latest_node_timestamp(node) for node in nodes if _latest_node_timestamp(node)]
+    started_at = min(timestamps) if timestamps else None
+    ended_at = max(timestamps) if timestamps else None
+    run_ids = [str(node.get("run_id") or "") for node in nodes if str(node.get("run_id") or "")]
+    phase_ids = sorted({phase_id for node in nodes for phase_id in _node_phase_ids(node) if phase_id})
+    target_objective_ids = sorted(
+        {
+            str(value)
+            for node in nodes
+            for value in _graph_context_values(node.get("target_objective_ids"))
+            if str(value)
+        }
+    )
+    status_counts = _count_values(str(node.get("status") or "unknown") for node in nodes)
+    return _node_with_timing(
+        {
+            "node_id": group_id,
+            "type": "objective_verifier_group",
+            "layer": "runtime",
+            "kind": "objective_verifier_group",
+            "status": key,
+            "title": f"Historical Objective Verifier: {fields.get('phase_key')} · {fields.get('target_key')}",
+            "display_label": f"Verifier x{len(nodes)}",
+            "started_at": started_at,
+            "ended_at": ended_at,
+            "aggregated": True,
+            "aggregated_node_count": len(nodes),
+            "retention_policy": "recent_active_detail_with_historical_buckets",
+            "time_bucket": fields.get("time_bucket"),
+            "phase_key": fields.get("phase_key"),
+            "target_key": fields.get("target_key"),
+            "terminal_status": fields.get("terminal_status"),
+            "phase_ids": phase_ids,
+            "phase_id": phase_ids[0] if phase_ids else None,
+            "target_objective_ids": target_objective_ids,
+            "sample_run_ids": _sample_values(run_ids, limit=OBJECTIVE_VERIFIER_GRAPH_SAMPLE_LIMIT),
+            "status_counts": status_counts,
+            "input_refs": [],
+            "output_refs": [],
+            "summary": {
+                "one_line": f"{len(nodes)} historical objective verifier run(s) are aggregated for {fields.get('phase_key')}.",
+                "highlights": [f"{len(set(run_ids))} run(s) represented."],
+                "risks": [],
+            },
+        }
+    )
 
 
 def _is_self_expansion_graph_node(node: Mapping[str, Any]) -> bool:
@@ -1988,6 +3039,7 @@ def _int_or_none(value: Any) -> int | None:
 def _propagate_run_graph_metadata(nodes_by_id: Mapping[str, dict[str, Any]]) -> None:
     metadata_by_run: dict[str, dict[str, Any]] = {}
     metadata_keys = ("phase_id", "phase", "objective_phase_id", "objective_scope")
+    list_metadata_keys = ("phase_ids", "target_objective_ids", "target_task_ids", "proposal_ids")
     for node in nodes_by_id.values():
         run_id = str(node.get("run_id") or "")
         if not run_id:
@@ -1997,9 +3049,10 @@ def _propagate_run_graph_metadata(nodes_by_id: Mapping[str, dict[str, Any]]) -> 
             value = node.get(key)
             if value not in (None, "", []):
                 metadata.setdefault(key, value)
-        target_objective_ids = node.get("target_objective_ids")
-        if isinstance(target_objective_ids, Sequence) and not isinstance(target_objective_ids, (str, bytes)) and target_objective_ids:
-            metadata.setdefault("target_objective_ids", list(target_objective_ids))
+        for key in list_metadata_keys:
+            values = _graph_context_values(node.get(key))
+            if values:
+                metadata[key] = _merge_context_values(metadata.get(key), [str(value) for value in values])
     for node in nodes_by_id.values():
         run_id = str(node.get("run_id") or "")
         if not run_id:
@@ -2883,6 +3936,16 @@ def _pending_log_file_record(paths: WorkflowPaths, path: Path) -> dict[str, Any]
     }
 
 
+def _file_written_metadata(stat_result: os.stat_result) -> dict[str, Any]:
+    return {
+        "last_written_at": datetime.fromtimestamp(stat_result.st_mtime, UTC)
+        .replace(microsecond=0)
+        .isoformat()
+        .replace("+00:00", "Z"),
+        "mtime_ns": stat_result.st_mtime_ns,
+    }
+
+
 def _validation_section(
     paths: WorkflowPaths,
     run_dirs: Sequence[Path],
@@ -3039,6 +4102,7 @@ def _text_file_record(paths: WorkflowPaths, path: Path, *, limit: int) -> dict[s
     record: dict[str, Any] = {
         "path": _safe_dashboard_path(paths, path),
         "size_bytes": stat_result.st_size,
+        **_file_written_metadata(stat_result),
         "render_mode": _file_render_mode(path),
         "content": content["content"],
         "truncated": content["truncated"],
@@ -3067,6 +4131,7 @@ def _artifact_record(paths: WorkflowPaths, path: Path) -> dict[str, Any]:
         "available": True,
         "path": _safe_dashboard_path(paths, path),
         "size_bytes": stat_result.st_size,
+        **_file_written_metadata(stat_result),
         "render_mode": _file_render_mode(path),
     }
     _add_bounded_file_hash(record, preview_data=data, size_bytes=stat_result.st_size)
@@ -3317,6 +4382,26 @@ def _task_summaries(
             _mapping_value(context.latest, "latest_run_id"),
             _mapping_value(context.validation, "run_id"),
         )
+        last_updated_at = _first_timestamp_string(
+            _mapping_value(context.latest, "updated_at"),
+            _mapping_value(context.validation, "validated_at"),
+            _latest_failure_timestamp(by_task_failures.get(task.task_id, [])),
+        )
+        started_at = _first_timestamp_string(
+            _mapping_value(context.latest, "started_at"),
+            _mapping_value(context.latest, "prepared_at"),
+            _mapping_value(context.latest, "created_at"),
+            _mapping_value(context.validation, "started_at"),
+            _timestamp_from_run_id(latest_run_id),
+            last_updated_at if status in {"done", "skipped", "blocked"} else None,
+        )
+        ended_at = _first_timestamp_string(
+            _mapping_value(context.latest, "ended_at"),
+            _mapping_value(context.latest, "completed_at"),
+            _mapping_value(context.latest, "finished_at"),
+            _mapping_value(context.validation, "validated_at"),
+            _mapping_value(context.latest, "updated_at") if status in {"done", "skipped", "blocked"} else None,
+        )
         summary = {
             "task_id": task.task_id,
             "title": task.title,
@@ -3332,15 +4417,13 @@ def _task_summaries(
             "latest_run_dir": _mapping_value(context.latest, "latest_run_dir"),
             "validation_path": _validation_display_path(context),
             "validation_status": validation_status,
+            "started_at": started_at,
+            "ended_at": ended_at,
             "human_summary": _fresh_human_summary(
                 load_task_human_summary(context.project_root, context.paths, task.task_id),
                 expected_source_hash=task_human_summary_source_hash(context.project_root, context.paths, task),
             ),
-            "last_updated_at": _first_string(
-                _mapping_value(context.latest, "updated_at"),
-                _mapping_value(context.validation, "validated_at"),
-                _latest_failure_timestamp(by_task_failures.get(task.task_id, [])),
-            ),
+            "last_updated_at": last_updated_at,
             "dependencies": _parse_dependency_list(_first_field(task, "depends_on") or "[]"),
             "risk_level": _first_field(task, "risk"),
             "approval": _first_field(task, "approval"),
@@ -3636,6 +4719,8 @@ def _plan_index_task(task: Mapping[str, Any]) -> dict[str, Any]:
         "latest_run_id": task.get("latest_run_id"),
         "latest_run_dir": task.get("latest_run_dir"),
         "validation_status": task.get("validation_status"),
+        "started_at": task.get("started_at"),
+        "ended_at": task.get("ended_at"),
         "human_summary": dict(task.get("human_summary") or {}),
         "last_updated_at": task.get("last_updated_at"),
         "dependencies": list(task.get("dependencies") or []),
@@ -4067,7 +5152,7 @@ def _node_from_summary(summary: Mapping[str, Any]) -> dict[str, Any]:
         "type": str(summary.get("node_type") or summary.get("role") or "run"),
         "status": summary.get("status"),
         "title": str(summary.get("message") or summary.get("task_id") or summary.get("run_id") or node_id),
-        "started_at": summary.get("started_at"),
+        "started_at": summary.get("started_at") or _timestamp_from_run_id(run_id),
         "ended_at": summary.get("ended_at") or summary.get("completed_at") or summary.get("updated_at"),
         "task_id": summary.get("task_id"),
         "run_id": summary.get("run_id"),
@@ -4086,16 +5171,42 @@ def _node_from_objective(objective: Mapping[str, Any]) -> dict[str, Any]:
     objective_id = str(objective.get("objective_id") or _stable_suffix(objective))
     status = str(objective.get("status") or "unknown")
     result = objective.get("result") if isinstance(objective.get("result"), Mapping) else {}
+    phase_title = objective.get("phase_title")
+    phase_id = str(objective.get("phase_id") or (_phase_id(str(phase_title)) if phase_title else ""))
+    closed_at = _first_timestamp_string(
+        objective.get("closed_at"),
+        objective.get("ended_at"),
+        objective.get("completed_at"),
+        objective.get("verified_at"),
+        result.get("ended_at") if isinstance(result, Mapping) else None,
+        result.get("completed_at") if isinstance(result, Mapping) else None,
+        result.get("verified_at") if isinstance(result, Mapping) else None,
+        result.get("updated_at") if isinstance(result, Mapping) else None,
+    )
+    started_at = _first_timestamp_string(objective.get("started_at"))
+    ended_at = _first_timestamp_string(objective.get("ended_at"), objective.get("completed_at"))
+    if status == "closed" and closed_at is not None:
+        started_at = started_at or closed_at
+        ended_at = ended_at or closed_at
     return _node_with_timing({
-        "node_id": f"objective_{_safe_id(objective_id)}",
+        "node_id": _objective_node_id(objective_id),
         "type": "objective",
+        "kind": "objective",
+        "layer": "objective",
         "status": status,
         "title": str(objective.get("text") or objective_id),
+        "display_label": objective_id,
         "task_id": None,
         "run_id": None,
         "objective_id": objective_id,
-        "phase": objective.get("phase_title"),
-        "context_label": _event_context_label(task_id=None, phase=objective.get("phase_title"), actor_label="objective", runner_id=None),
+        "phase_id": phase_id,
+        "phase": phase_title,
+        "closed_at": closed_at if status == "closed" else None,
+        "started_at": started_at,
+        "ended_at": ended_at,
+        "group_key": _phase_node_id(phase_id) if phase_id else None,
+        "importance": 80,
+        "context_label": _event_context_label(task_id=None, phase=phase_title, actor_label="objective", runner_id=None),
         "input_refs": _present_refs(objective.get("report_path")),
         "output_refs": _present_refs(objective.get("report_path")),
         "summary": {
@@ -4123,7 +5234,7 @@ def _node_from_agent_status(status: Mapping[str, Any]) -> dict[str, Any]:
         "type": node_type,
         "status": status.get("status"),
         "title": str(task_id or run_id),
-        "started_at": status.get("started_at"),
+        "started_at": status.get("started_at") or status.get("prepared_at") or _timestamp_from_run_id(run_id),
         "ended_at": status.get("ended_at") or status.get("completed_at") or status.get("updated_at"),
         "task_id": task_id,
         "run_id": run_id,
@@ -4227,9 +5338,6 @@ def _node_with_timing(node: dict[str, Any]) -> dict[str, Any]:
     started = _parse_timestamp(node.get("started_at"))
     ended = _parse_timestamp(node.get("ended_at"))
     heartbeat = _parse_timestamp(node.get("heartbeat_at"))
-    if started is None and ended is not None:
-        node["started_at"] = node.get("ended_at")
-        started = ended
     if ended is None and started is not None and _is_terminal_node_status(node.get("status")):
         node["ended_at"] = node.get("started_at")
         ended = started
@@ -4502,6 +5610,31 @@ def _read_event_records(paths: WorkflowPaths, *, limit: int | None = None) -> li
             record["_segment"] = _path_for_record(paths.project_root, path)
             records.append(record)
     return sorted(records, key=lambda record: (_event_sequence(record) or 0, str(record.get("event_id") or "")))
+
+
+def _hydrate_graph_context_event_payloads(
+    paths: WorkflowPaths,
+    events: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    for event in events:
+        record = dict(event)
+        event_type = str(record.get("event_type") or "")
+        payload_ref = str(record.get("payload_ref") or "").strip()
+        if (
+            payload_ref
+            and record.get("payload_compacted") is True
+            and (event_type in GRAPH_CONTEXT_SIDECAR_EVENT_TYPES or "objective_verifier" in event_type)
+        ):
+            payload_path = Path(payload_ref)
+            if not payload_path.is_absolute():
+                payload_path = paths.project_root / payload_path
+            sidecar = _read_json_object(payload_path, default={})
+            payload = sidecar.get("payload") if isinstance(sidecar, Mapping) else None
+            if isinstance(payload, Mapping):
+                record["payload"] = dict(payload)
+        records.append(record)
+    return records
 
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -5678,6 +6811,27 @@ def _read_model_timestamp(value: Any) -> Any:
     if parsed is None:
         return value
     return parsed.replace(microsecond=0).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _first_timestamp_string(*values: Any) -> str | None:
+    for value in values:
+        parsed = _parse_timestamp(value)
+        if parsed is not None:
+            return parsed.replace(microsecond=0).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return None
+
+
+def _timestamp_from_run_id(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    match = re.search(r"(?:^|[^A-Za-z0-9])run_(\d{8})_(\d{6})(?:_|$)", value)
+    if not match:
+        return None
+    try:
+        parsed = datetime.strptime(match.group(1) + match.group(2), "%Y%m%d%H%M%S").replace(tzinfo=UTC)
+    except ValueError:
+        return None
+    return parsed.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _mapping_value(value: Any, key: str) -> Any:

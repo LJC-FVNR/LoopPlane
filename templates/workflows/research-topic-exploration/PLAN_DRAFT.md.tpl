@@ -41,7 +41,7 @@ to exist at `{{final_report_path}}`.
   - judgment_guidance: Confirm the scope names what will and will not be claimed.
   - verifier: objective_verifier
   - unmet_action: self_expand
-  - max_expansions: 2
+  - max_expansions: 100
 
 ## Phase P1: Baseline And Prior Context
 
@@ -76,7 +76,7 @@ to exist at `{{final_report_path}}`.
   - judgment_guidance: Confirm baseline claims are sourced and limitations are visible.
   - verifier: objective_verifier
   - unmet_action: self_expand
-  - max_expansions: 2
+  - max_expansions: 100
 
 ## Phase P2: Experiment Matrix
 
@@ -98,7 +98,7 @@ to exist at `{{final_report_path}}`.
   - judgment_guidance: Confirm metrics and stopping criteria are unambiguous.
   - verifier: objective_verifier
   - unmet_action: self_expand
-  - max_expansions: 2
+  - max_expansions: 100
 
 ## Phase P3: Execution And Evidence Collection
 
@@ -120,7 +120,7 @@ to exist at `{{final_report_path}}`.
   - judgment_guidance: Confirm results are reproducible enough for {{target_standard}}.
   - verifier: objective_verifier
   - unmet_action: self_expand
-  - max_expansions: 2
+  - max_expansions: 100
 
 <!-- loopplane:if enable_ablation -->
 ## Phase P4: Ablation And Robustness
@@ -143,7 +143,7 @@ to exist at `{{final_report_path}}`.
   - judgment_guidance: Confirm ablation evidence changes or strengthens the claims.
   - verifier: objective_verifier
   - unmet_action: self_expand
-  - max_expansions: 2
+  - max_expansions: 100
 <!-- loopplane:endif -->
 
 ## Phase P5: Report And Final Gate
@@ -166,7 +166,7 @@ to exist at `{{final_report_path}}`.
   - judgment_guidance: Judge substance, evidence support, caveats, and reproducibility.
   - verifier: objective_verifier
   - unmet_action: self_expand
-  - max_expansions: 2
+  - max_expansions: 100
 
 ## Final Objective Checklist
 
@@ -175,4 +175,4 @@ to exist at `{{final_report_path}}`.
   - judgment_guidance: Confirm no major claim lacks supporting evidence and the final report exists.
   - verifier: objective_verifier
   - unmet_action: self_expand
-  - max_expansions: 2
+  - max_expansions: 100

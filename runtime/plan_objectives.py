@@ -16,6 +16,8 @@ PHASE_HEADING_RE = re.compile(r"^## Phase\b")
 PHASE_OBJECTIVE_HEADING_RE = re.compile(r"^###\s+Phase Objective Checklist\s*$", re.IGNORECASE)
 FINAL_OBJECTIVE_HEADING_RE = re.compile(r"^##\s+Final Objective Checklist\s*$", re.IGNORECASE)
 
+DEFAULT_OBJECTIVE_MAX_EXPANSIONS = 100
+
 
 @dataclass(frozen=True)
 class ObjectiveRecord:

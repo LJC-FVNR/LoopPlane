@@ -31,6 +31,8 @@ being trapped inside one chat session.
 
 ![LoopPlane dashboard showcase overview](artifacts/showcase/dashboard_showcase_overview.png)
 
+![LoopPlane dashboard interactive network graph visualization](artifacts/showcase/dashboard_network_graph.png)
+
 ## Why LoopPlane
 
 Long-running agent work needs more structure than a single prompt can provide.

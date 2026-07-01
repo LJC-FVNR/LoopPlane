@@ -8,6 +8,7 @@ from typing import Any, Mapping, Sequence
 from runtime.adapters.base import utc_timestamp
 from runtime.path_resolution import WORKFLOW_PATH_FIELDS, WorkflowPathError, WorkflowPaths, load_workflow_config
 from runtime.plan_objectives import (
+    DEFAULT_OBJECTIVE_MAX_EXPANSIONS,
     ObjectiveRecord,
     objective_closure_fingerprint,
     objective_structure_fingerprint,
@@ -727,7 +728,7 @@ def _objective_max_expansions(objective: ObjectiveRecord) -> int:
             return max(0, int(str(value).strip()))
         except ValueError:
             continue
-    return 25
+    return DEFAULT_OBJECTIVE_MAX_EXPANSIONS
 
 
 def _objective_expansion_counts(paths: WorkflowPaths) -> dict[str, int]:

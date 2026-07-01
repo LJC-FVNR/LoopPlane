@@ -97,6 +97,7 @@ DASHBOARD_ASSET_DIR = Path(__file__).resolve().parents[1] / "dashboard" / "publi
 STATIC_ASSET_FILES = (
     "static_dashboard.css",
     "static_dashboard.js",
+    "vendor/cytoscape.min.js",
     "loopplane_logo.png",
     "loopplane_logo_dark.png",
     "loopplane_logo_light.png",
@@ -844,7 +845,7 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
         path = parsed.path or "/"
         query = parse_qs(parsed.query)
         if method == "GET" and path.strip("/") in STATIC_ASSET_FILES:
-            self._serve_asset(path.rsplit("/", 1)[-1])
+            self._serve_asset(path.strip("/"))
             return
         if path == "/favicon.ico":
             self.send_response(HTTPStatus.NO_CONTENT)
@@ -1047,11 +1048,16 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
         self._send_html(_render_index_html(payload, server_mode=True))
 
     def _serve_asset(self, filename: str) -> None:
-        if filename not in STATIC_ASSET_FILES:
+        asset_rel = PurePosixPath(unquote(filename).strip("/"))
+        if (
+            not asset_rel.parts
+            or ".." in asset_rel.parts
+            or asset_rel.as_posix() not in STATIC_ASSET_FILES
+        ):
             self._send_json({"ok": False, "status": "not_found"}, HTTPStatus.NOT_FOUND)
             return
-        path = DASHBOARD_ASSET_DIR / filename
-        content_type = _dashboard_asset_content_type(filename)
+        path = DASHBOARD_ASSET_DIR / Path(*asset_rel.parts)
+        content_type = _dashboard_asset_content_type(asset_rel.name)
         self._send_bytes(path.read_bytes(), content_type)
 
     def _serve_read_model(self, raw_filename: str) -> None:
@@ -6668,7 +6674,9 @@ def _copy_read_models(source: Path, destination: Path) -> None:
 
 def _copy_static_assets(destination: Path) -> None:
     for filename in STATIC_ASSET_FILES:
-        shutil.copy2(DASHBOARD_ASSET_DIR / filename, destination / filename)
+        target = destination / filename
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(DASHBOARD_ASSET_DIR / filename, target)
 
 
 def _render_index_html(payload: Mapping[str, Any], *, server_mode: bool) -> str:
@@ -6692,7 +6700,8 @@ def _render_index_html(payload: Mapping[str, Any], *, server_mode: bool) -> str:
     plan_markdown = _mapping(payload.get("plan_markdown"))
     feed = _sequence(jsonl_models.get("dashboard_feed.jsonl"))
     nodes = _sequence(workflow_graph.get("nodes"))
-    selected_node = _mapping(nodes[0]) if nodes else {}
+    pipeline_nodes = _pipeline_graph_nodes(nodes)
+    selected_node = _mapping(pipeline_nodes[0]) if pipeline_nodes else (_mapping(nodes[0]) if nodes else {})
     workflow_title = _text(payload.get("workflow_title") or "Workflow")
     title = f"LoopPlane Dashboard - {workflow_title}"
     workspace_selector = _render_workspace_selector(payload)
@@ -7928,7 +7937,7 @@ def _workflow_elapsed_label(
         parsed = _parse_dashboard_timestamp(value)
         if parsed is not None:
             ends.append(parsed)
-    for raw_node in _sequence(workflow_graph.get("nodes")):
+    for raw_node in _pipeline_graph_nodes(_sequence(workflow_graph.get("nodes"))):
         node = _mapping(raw_node)
         start = _first_dashboard_timestamp(
             node,
@@ -8164,7 +8173,7 @@ def _phase_timing(
             starts.append(start)
         if end:
             ends.append(end)
-    for raw_node in _sequence(workflow_graph.get("nodes")):
+    for raw_node in _pipeline_graph_nodes(_sequence(workflow_graph.get("nodes"))):
         node = _mapping(raw_node)
         if str(node.get("task_id") or "") not in task_ids:
             continue
@@ -8627,31 +8636,29 @@ def _render_human_summary_trigger(label: str, summary: Mapping[str, Any], *, css
 
 def _render_graph_panel(workflow_graph: Mapping[str, Any], plan_index: Mapping[str, Any]) -> str:
     nodes = _sequence(workflow_graph.get("nodes"))
+    pipeline_nodes = _pipeline_graph_nodes(nodes)
     edges = _sequence(workflow_graph.get("edges"))
-    if not nodes:
-        return '<p class="empty-state">No graph nodes are present.</p>'
-    phase_groups = _graph_phase_groups(plan_index, nodes)
+    phase_groups = _graph_phase_groups(plan_index, pipeline_nodes)
     lane_html = [_render_graph_phase_lane(_mapping(group)) for group in phase_groups]
-    edge_rows = []
-    for edge in edges[:12]:
-        item = _mapping(edge)
-        edge_rows.append(
-            f"<li>{_escape(_text(item.get('source')))} to {_escape(_text(item.get('target')))} <span>{_escape(_text(item.get('type') or 'edge'))}</span></li>"
-        )
-    overflow = ""
-    if len(edges) > 12:
-        overflow = f'<li>{len(edges) - 12} more edges</li>'
-    return f"""<div class="graph-mode-toolbar">
-  <div>
+    edge_rows = _render_graph_edge_summary_rows(edges)
+    pipeline_empty = '<p class="empty-state">No graph nodes are present.</p>' if not pipeline_nodes else ""
+    return f"""<div class="graph-panel-root" data-graph-panel-root>
+<div class="graph-mode-toolbar">
+  <div class="graph-mode-picker">
     <span class="eyebrow">Graph Mode</span>
-    <strong>Agent Pipeline</strong>
+    <div class="graph-mode-switch" role="group" aria-label="Graph mode">
+      <button type="button" class="is-active" data-graph-mode-choice="pipeline" aria-pressed="true">Agent Pipeline</button>
+      <button type="button" data-graph-mode-choice="network" aria-pressed="false">Network Graph</button>
+    </div>
   </div>
   <div class="graph-mode-actions">
     <small>Agent runs, lifecycle events, and validation checks.</small>
     <button type="button" class="graph-expand-toggle" data-graph-expand-toggle aria-pressed="false">Expand All</button>
   </div>
 </div>
-{_render_graph_overview(phase_groups, nodes, edges, workflow_graph)}
+<section data-graph-view="pipeline">
+{_render_graph_overview(phase_groups, pipeline_nodes, edges, workflow_graph)}
+{pipeline_empty}
 <div class="graph-pipeline-scroll" tabindex="0" aria-label="Scrollable phase pipeline">
   <div class="graph-pipeline" data-graph-mode="phase_pipeline">
     {''.join(lane_html)}
@@ -8660,9 +8667,46 @@ def _render_graph_panel(workflow_graph: Mapping[str, Any], plan_index: Mapping[s
 <details class="graph-edge-summary">
   <summary><strong>Runtime Relations</strong><span>{len(edges)}</span></summary>
   <ul class="edge-list">
-    {''.join(edge_rows)}{overflow}
+    {edge_rows}
   </ul>
-</details>"""
+</details>
+</section>
+<section data-graph-view="network" hidden>
+  <div class="network-graph-controls" data-network-graph-controls hidden></div>
+  <div class="network-graph-canvas" data-network-graph-canvas></div>
+  <p class="network-graph-status" data-network-graph-status>Network graph is not loaded.</p>
+</section>
+</div>"""
+
+
+def _pipeline_graph_nodes(nodes: Sequence[Any]) -> list[Mapping[str, Any]]:
+    pipeline_nodes: list[Mapping[str, Any]] = []
+    for node in nodes:
+        item = _mapping(node)
+        node_type = str(item.get("type") or item.get("kind") or "").strip().lower()
+        if item.get("pipeline_visible") is False and node_type in {"phase", "task"}:
+            continue
+        pipeline_nodes.append(item)
+    return pipeline_nodes
+
+
+def _render_graph_edge_summary_rows(edges: Sequence[Any]) -> str:
+    if not edges:
+        return '<li>No runtime relations are present.</li>'
+    counts: dict[str, int] = {}
+    hidden_counts: dict[str, int] = {}
+    for raw_edge in edges:
+        edge = _mapping(raw_edge)
+        edge_type = _text(edge.get("type") or "edge")
+        counts[edge_type] = counts.get(edge_type, 0) + 1
+        if edge.get("hidden_by_default") is True:
+            hidden_counts[edge_type] = hidden_counts.get(edge_type, 0) + 1
+    rows = []
+    for edge_type, count in sorted(counts.items()):
+        hidden = hidden_counts.get(edge_type, 0)
+        suffix = f" ({hidden} hidden by default)" if hidden else ""
+        rows.append(f"<li>{_escape(edge_type.replace('_', ' ').title())} <span>{count}{_escape(suffix)}</span></li>")
+    return "".join(rows)
 
 
 def _render_graph_phase_lane(group: Mapping[str, Any]) -> str:
@@ -9355,6 +9399,7 @@ def _render_node_detail_section(section: Mapping[str, Any]) -> str:
                 truncated=section.get("truncated") is True,
                 size_bytes=section.get("size_bytes"),
                 sha256=section.get("sha256"),
+                last_written_at=section.get("last_written_at"),
                 render_mode=section.get("render_mode"),
             )
         )
@@ -9428,6 +9473,7 @@ def _render_detail_file_action(
     truncated: bool = False,
     size_bytes: Any = None,
     sha256: Any = None,
+    last_written_at: Any = None,
     render_mode: Any = None,
 ) -> str:
     path_value = str(path or "").strip()
@@ -9438,9 +9484,11 @@ def _render_detail_file_action(
     mode = _detail_render_mode(path_value, render_mode)
     render_attr = f' data-detail-render="{_escape(mode)}"' if mode else ""
     truncated_attr = ' data-detail-truncated="true"' if truncated else ""
+    last_written_label = _detail_file_written_label(last_written_at) if _is_dashboard_log_path(path_value) else ""
     meta_rows = [
         _detail_row("Path", path_value) if path_value else "",
         _detail_row("Size", f"{size_bytes} bytes") if size_bytes not in (None, "") else "",
+        _detail_row("Last Written", last_written_label) if last_written_label else "",
     ]
     link_html = (
         f'<a class="detail-file-link" href="#" data-detail-file-link{path_attr}>Open file</a>'
@@ -9491,6 +9539,7 @@ def _render_artifact_detail(title: str, item: Mapping[str, Any]) -> str:
         truncated=item.get("truncated") is True,
         size_bytes=item.get("size_bytes"),
         sha256=item.get("sha256"),
+        last_written_at=item.get("last_written_at"),
     )
     return f'<div class="detail-mapping"><h5>{_escape(title)}</h5>{action}{_render_detail_mapping("", metadata)}</div>'
 
@@ -9510,6 +9559,7 @@ def _render_detail_items(items: Sequence[Any]) -> str:
                     truncated=item.get("truncated") is True,
                     size_bytes=item.get("size_bytes"),
                     sha256=item.get("sha256"),
+                    last_written_at=item.get("last_written_at"),
                 )
                 if content or item.get("path")
                 else ""
@@ -9549,6 +9599,8 @@ def _human_detail_metadata(item: Mapping[str, Any], *, exclude: set[str] | None 
         "events_segment_manifest",
         "content_sha256",
         "source_hashes",
+        "last_written_at",
+        "mtime_ns",
         "token",
         "access_token",
         "api_key",
@@ -9563,6 +9615,13 @@ def _human_detail_metadata(item: Mapping[str, Any], *, exclude: set[str] | None 
             continue
         metadata[text_key] = value
     return metadata
+
+
+def _detail_file_written_label(value: Any) -> str:
+    parsed = _parse_dashboard_timestamp(value)
+    if parsed is not None:
+        return _compact_dashboard_time(parsed)
+    return _text(value)
 
 
 def _render_changed_file_items(items: Sequence[Any]) -> str:

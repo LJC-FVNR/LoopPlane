@@ -157,7 +157,7 @@ objective gates. After every phase's task list, add:
     the phase outcome is ready, without enumerating every implementation detail.
   - verifier: objective_verifier
   - unmet_action: self_expand
-  - max_expansions: 2
+  - max_expansions: 100
 ```
 
 Near the end of the plan, add:
@@ -171,7 +171,7 @@ Near the end of the plan, add:
     handoff quality and completeness.
   - verifier: objective_verifier
   - unmet_action: self_expand
-  - max_expansions: 2
+  - max_expansions: 100
 ```
 
 Objectives are not executable tasks. They should be high-level enough for an

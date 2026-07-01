@@ -10,6 +10,7 @@ import unittest
 from pathlib import Path
 
 from runtime.init_workflow import init_project
+from runtime.plan_objectives import DEFAULT_OBJECTIVE_MAX_EXPANSIONS
 from runtime.planning import activate_plan, inspect_plan_draft, run_auditor, run_plan_revision_loop, run_planner
 
 
@@ -184,6 +185,7 @@ class PlannerRuntimeTest(unittest.TestCase):
             plan_text = plan_path.read_text(encoding="utf-8")
             self.assertIn("- [ ] P0.T001: Review brief and workspace constraints", plan_text)
             self.assertIn("- evidence: .loopplane/results/P0.T001/", plan_text)
+            self.assertEqual(plan_text.count(f"- max_expansions: {DEFAULT_OBJECTIVE_MAX_EXPANSIONS}"), 4)
             structural = inspect_plan_draft(plan_path, workflow_id=result["workflow_id"])
             self.assertTrue(structural["valid"], structural)
             self.assertEqual(structural["task_ids"], ["P0.T001", "P1.T001", "P2.T001"])
@@ -1589,7 +1591,9 @@ draft.write_text(f'''# Project Plan
             run_dir = Path(data["run_dir"])
             plan_path = project / ".loopplane" / "planning" / "PLAN_DRAFT.md"
             self.assertTrue(plan_path.is_file())
-            self.assertIn("Codex fixture planner task", plan_path.read_text(encoding="utf-8"))
+            plan_text = plan_path.read_text(encoding="utf-8")
+            self.assertIn("Codex fixture planner task", plan_text)
+            self.assertEqual(plan_text.count(f"- max_expansions: {DEFAULT_OBJECTIVE_MAX_EXPANSIONS}"), 2)
             self.assertTrue((run_dir / "PLAN_DRAFT.md").is_file())
             self.assertTrue((run_dir / "codex_fixture_record.json").is_file())
 

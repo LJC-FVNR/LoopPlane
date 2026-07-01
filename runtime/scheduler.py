@@ -60,6 +60,7 @@ from runtime.exit_codes import (
 )
 from runtime.path_resolution import WorkflowPathError, WorkflowPaths, load_workflow_config
 from runtime.plan_objectives import (
+    DEFAULT_OBJECTIVE_MAX_EXPANSIONS,
     ObjectiveRecord,
     objective_closure_fingerprint,
     objective_structure_fingerprint,
@@ -107,7 +108,6 @@ NODE_SUMMARY_FILENAME = "node_summary.json"
 FAILURE_REGISTRY_FILENAME = "failure_registry.json"
 EXPANSION_PROPOSAL_FILENAME = "expansion_proposal.json"
 RUNNER_HEALTH_FILENAME = "runner_health.json"
-DEFAULT_OBJECTIVE_MAX_EXPANSIONS = 2
 RUNNER_HEALTH_EVENT_LIMIT = 200
 FAILURE_TERMINAL_STATUSES = frozenset({"recovered", "waived", "exhausted", "needs_human"})
 DEFAULT_MAX_RECOVERY_ATTEMPTS = 1

@@ -1233,10 +1233,10 @@ def _workflow_config(
         "self_expansion": {
             "enabled": True,
             "default_mode": "append_only",
-            "max_cycles": 25,
+            "max_cycles": 100,
             "max_tasks_added_total": 100,
-            "max_tasks_per_cycle": 5,
-            "max_repeated_signature_count": 2,
+            "max_tasks_per_cycle": 100,
+            "max_repeated_signature_count": 100,
             "auto_apply_low_risk": True,
             "require_approval_for_medium_risk": True,
             "require_approval_for_high_risk": True,

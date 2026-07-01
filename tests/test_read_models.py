@@ -420,6 +420,23 @@ class ReadModelBuilderIntegrationTest(unittest.TestCase):
             self.assertEqual(workflow_status["active_task_id"], "T001")
             self.assertEqual(workflow_status["active_run_id"], "run_active")
             graph = json.loads((read_models_dir / "workflow_graph.json").read_text(encoding="utf-8"))
+            nodes_by_id = {node["node_id"]: node for node in graph["nodes"]}
+            self.assertEqual(nodes_by_id["node_phase_P0"]["type"], "phase")
+            self.assertEqual(nodes_by_id["node_phase_P0"]["layer"], "plan")
+            self.assertFalse(nodes_by_id["node_phase_P0"]["pipeline_visible"])
+            self.assertEqual(nodes_by_id["node_task_T001"]["type"], "task")
+            self.assertEqual(nodes_by_id["node_task_T001"]["phase_id"], "P0")
+            self.assertFalse(nodes_by_id["node_task_T001"]["pipeline_visible"])
+            edge_types = {(edge["type"], edge["source"], edge["target"]) for edge in graph["edges"]}
+            self.assertIn(("phase_contains_task", "node_phase_P0", "node_task_T001"), edge_types)
+            self.assertIn(("task_has_run", "node_task_T001", "node_worker_T001_run_active"), edge_types)
+            self.assertEqual(graph["network"]["schema_version"], "1")
+            self.assertEqual(graph["network"]["default_layout"], "temporal_force")
+            self.assertEqual(graph["network"]["base_layout"], "cose")
+            self.assertIn("temporal_force", graph["network"]["available_layouts"])
+            self.assertEqual(graph["network"]["temporal_scale"], "rank")
+            self.assertEqual(graph["network"]["temporal_pending"], "end_alpha")
+            self.assertIn("plan", graph["network"]["default_visible_layers"])
             active_nodes = [node for node in graph["nodes"] if node.get("run_id") == "run_active"]
             self.assertEqual(len(active_nodes), 1)
             self.assertEqual(active_nodes[0]["status"], "running")
@@ -440,6 +457,274 @@ class ReadModelBuilderIntegrationTest(unittest.TestCase):
             stdout_log = next(item for item in sections["logs"]["items"] if item["path"].endswith("stdout.log"))
             self.assertTrue(stdout_log["pending"])
             self.assertEqual(stdout_log["size_bytes"], 0)
+
+    def test_workflow_graph_assigns_start_times_to_phase_task_and_closed_objective_nodes(self) -> None:
+        graph = read_models_module._workflow_graph_model(
+            common={
+                "schema_version": "1.5",
+                "workflow_id": "wf_temporal",
+                "generated_at": "2026-06-30T00:00:00Z",
+            },
+            plan_phases=[
+                {
+                    "phase_id": "P0",
+                    "title": "Phase P0: Research Contract",
+                    "tasks": [{"task_id": "P0.T001"}],
+                    "objectives": [{"objective_id": "P0.O1"}],
+                },
+            ],
+            events=[],
+            event_limit=10,
+            node_summaries=[],
+            agent_statuses=[],
+            validation_records=[],
+            active_leases=[],
+            task_summaries=[
+                {
+                    "task_id": "P0.T001",
+                    "status": "done",
+                    "title": "Establish source-grounded research contract",
+                    "phase": "Phase P0: Research Contract",
+                    "latest_run_id": "run_20260626_225143_18258b43",
+                    "last_updated_at": "2026-06-26T22:55:32Z",
+                },
+            ],
+            objective_model={
+                "objectives": [
+                    {
+                        "objective_id": "P0.O1",
+                        "phase_id": "P0",
+                        "status": "closed",
+                        "text": "Establish the research contract.",
+                        "verified_at": "2026-06-27T10:17:44Z",
+                    }
+                ],
+            },
+            expansion_registry={},
+            event_total_count=0,
+        )
+
+        nodes_by_id = {node["node_id"]: node for node in graph["nodes"]}
+        self.assertEqual(nodes_by_id["node_task_P0_T001"]["started_at"], "2026-06-26T22:51:43Z")
+        self.assertEqual(nodes_by_id["node_task_P0_T001"]["ended_at"], "2026-06-26T22:55:32Z")
+        self.assertEqual(nodes_by_id["node_phase_P0"]["started_at"], "2026-06-26T22:51:43Z")
+        self.assertEqual(nodes_by_id["node_phase_P0"]["ended_at"], "2026-06-26T22:55:32Z")
+        self.assertEqual(nodes_by_id["objective_P0_O1"]["started_at"], "2026-06-27T10:17:44Z")
+        self.assertEqual(nodes_by_id["objective_P0_O1"]["ended_at"], "2026-06-27T10:17:44Z")
+
+    def test_workflow_graph_connects_taskless_adapter_runs_from_context(self) -> None:
+        graph = read_models_module._workflow_graph_model(
+            common={
+                "schema_version": "1.5",
+                "workflow_id": "wf_context",
+                "generated_at": "2026-06-30T00:00:00Z",
+            },
+            plan_phases=[
+                {
+                    "phase_id": "P5",
+                    "title": "Phase P5",
+                    "tasks": [],
+                    "objectives": [{"objective_id": "P5.O1"}],
+                },
+                {
+                    "phase_id": "P7",
+                    "title": "Phase P7",
+                    "tasks": [{"task_id": "P7.T005"}],
+                    "objectives": [],
+                },
+            ],
+            events=[
+                {
+                    "event_type": "objective_verifier_adapter_started",
+                    "ts": "2026-06-30T00:00:01Z",
+                    "data": {
+                        "run_id": "run_obj",
+                        "phase_id": "P5",
+                        "target_objective_ids": ["P5.O1"],
+                    },
+                },
+                {
+                    "event_type": "self_expansion_requires_attention",
+                    "ts": "2026-06-30T00:00:02Z",
+                    "data": {
+                        "run_id": "run_exp",
+                        "proposal_id": "exp_20260630_run_exp_p7_t005",
+                        "loop_signature": "objective_verifier_phase_P5_repeated_duplicate_stop",
+                    },
+                },
+            ],
+            event_limit=1,
+            node_summaries=[],
+            agent_statuses=[
+                {
+                    "run_id": "run_obj",
+                    "role": "objective_verifier",
+                    "status": "completed",
+                    "started_at": "2026-06-30T00:00:01Z",
+                },
+                {
+                    "run_id": "run_exp",
+                    "role": "expansion_planner",
+                    "status": "requires_attention",
+                    "started_at": "2026-06-30T00:00:02Z",
+                },
+            ],
+            validation_records=[],
+            active_leases=[],
+            task_summaries=[
+                {
+                    "task_id": "P7.T005",
+                    "status": "pending",
+                    "title": "Expanded task",
+                    "phase": "Phase P7",
+                },
+            ],
+            objective_model={
+                "objectives": [
+                    {
+                        "objective_id": "P5.O1",
+                        "phase_id": "P5",
+                        "status": "open",
+                        "text": "Verify P5 objective.",
+                    }
+                ],
+            },
+            expansion_registry={
+                "proposals": [
+                    {
+                        "run_id": "run_exp",
+                        "proposal_id": "exp_20260630_run_exp_p7_t005",
+                        "loop_signature": "objective_verifier_phase_P5_repeated_duplicate_stop",
+                        "status": "requires_attention",
+                    }
+                ]
+            },
+            event_total_count=2,
+        )
+
+        nodes_by_run = {
+            node["run_id"]: node
+            for node in graph["nodes"]
+            if node.get("run_id") in {"run_obj", "run_exp"} and node.get("type") != "event"
+        }
+        objective_run = nodes_by_run["run_obj"]
+        expansion_run = nodes_by_run["run_exp"]
+        edge_types = {(edge["type"], edge["source"], edge["target"]) for edge in graph["edges"]}
+        self.assertIn("P5", objective_run["phase_ids"])
+        self.assertIn("P5.O1", objective_run["target_objective_ids"])
+        self.assertIn(("phase_has_run", "node_phase_P5", objective_run["node_id"]), edge_types)
+        self.assertIn(("run_supports_objective", objective_run["node_id"], "objective_P5_O1"), edge_types)
+        self.assertIn("P5", expansion_run["phase_ids"])
+        self.assertIn("P7", expansion_run["phase_ids"])
+        self.assertIn("P7.T005", expansion_run["target_task_ids"])
+        self.assertIn(("phase_has_run", "node_phase_P5", expansion_run["node_id"]), edge_types)
+        self.assertIn(("phase_has_run", "node_phase_P7", expansion_run["node_id"]), edge_types)
+        self.assertIn(("task_has_run", "node_task_P7_T005", expansion_run["node_id"]), edge_types)
+
+    def test_run_context_extracts_nested_adapter_summary_tokens(self) -> None:
+        context = read_models_module._run_context_index(
+            [
+                {
+                    "event_type": "expansion_planner_run_classified",
+                    "payload": {
+                        "run_id": "run_nested",
+                        "agent_status": {
+                            "summary": "Blocked on the stale P5 objective verifier loop; P7.T004 already records the stop.",
+                        },
+                    },
+                }
+            ],
+            {},
+        )
+
+        self.assertIn("P5", context["run_nested"]["phase_ids"])
+        self.assertIn("P7", context["run_nested"]["phase_ids"])
+        self.assertIn("P7.T004", context["run_nested"]["target_task_ids"])
+
+    def test_workflow_graph_ignores_rebuild_metadata_when_linking_expansion_runs(self) -> None:
+        graph = read_models_module._workflow_graph_model(
+            common={
+                "schema_version": "1.5",
+                "workflow_id": "wf_expansion_context",
+                "generated_at": "2026-06-30T00:00:00Z",
+            },
+            plan_phases=[
+                {
+                    "phase_id": "P0",
+                    "title": "Phase P0",
+                    "tasks": [{"task_id": "P0.T001"}],
+                    "objectives": [],
+                },
+                {
+                    "phase_id": "P5",
+                    "title": "Phase P5",
+                    "tasks": [{"task_id": "P5.T012"}, {"task_id": "P5.T013"}],
+                    "objectives": [{"objective_id": "P5.O1"}],
+                },
+            ],
+            events=[
+                {
+                    "event_type": "self_expansion_requires_attention",
+                    "ts": "2026-06-30T00:00:01Z",
+                    "payload": {
+                        "run_id": "run_expand",
+                        "proposal": {
+                            "proposal_id": "exp_run_expand_p5_o1",
+                            "target_objective_ids": ["P5.O1"],
+                            "target_task_ids": ["P5.T012"],
+                            "added_task_ids": ["P5.T013"],
+                            "objective_followup_update": {
+                                "read_model_rebuild": {
+                                    "first_run_id": "run_20260626_225143_18258b43",
+                                    "first_source_path": ".loopplane/results/P0.T001/runs/run_20260626_225143_18258b43/validation.json",
+                                }
+                            },
+                        },
+                    },
+                }
+            ],
+            event_limit=10,
+            node_summaries=[],
+            agent_statuses=[
+                {
+                    "run_id": "run_expand",
+                    "role": "expansion_planner",
+                    "status": "applied",
+                    "started_at": "2026-06-30T00:00:01Z",
+                }
+            ],
+            validation_records=[],
+            active_leases=[],
+            task_summaries=[
+                {"task_id": "P0.T001", "status": "done", "title": "Contract", "phase": "Phase P0"},
+                {"task_id": "P5.T012", "status": "done", "title": "Prior follow-up", "phase": "Phase P5"},
+                {"task_id": "P5.T013", "status": "pending", "title": "New follow-up", "phase": "Phase P5"},
+            ],
+            objective_model={
+                "objectives": [
+                    {
+                        "objective_id": "P5.O1",
+                        "phase_id": "P5",
+                        "status": "needs_verification",
+                        "text": "Verify P5 objective.",
+                    }
+                ],
+            },
+            expansion_registry={},
+            event_total_count=1,
+        )
+
+        expansion_node = next(
+            node for node in graph["nodes"] if node.get("run_id") == "run_expand" and node.get("type") == "expansion_planner"
+        )
+        self.assertEqual(expansion_node.get("phase_ids"), ["P5"])
+        self.assertEqual(expansion_node.get("target_task_ids"), ["P5.T012", "P5.T013"])
+        edge_types = {(edge["type"], edge["source"], edge["target"]) for edge in graph["edges"]}
+        self.assertIn(("phase_has_run", "node_phase_P5", expansion_node["node_id"]), edge_types)
+        self.assertIn(("task_has_run", "node_task_P5_T012", expansion_node["node_id"]), edge_types)
+        self.assertIn(("task_has_run", "node_task_P5_T013", expansion_node["node_id"]), edge_types)
+        self.assertNotIn(("phase_has_run", "node_phase_P0", expansion_node["node_id"]), edge_types)
+        self.assertNotIn(("task_has_run", "node_task_P0_T001", expansion_node["node_id"]), edge_types)
 
     def test_rebuild_bounds_large_log_and_artifact_previews(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -465,6 +750,8 @@ class ReadModelBuilderIntegrationTest(unittest.TestCase):
 
             stdout_log = next(item for item in sections["logs"]["items"] if item["path"].endswith("stdout.log"))
             self.assertEqual(stdout_log["size_bytes"], len(large_text.encode("utf-8")))
+            self.assertRegex(str(stdout_log.get("last_written_at")), r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
+            self.assertIsInstance(stdout_log.get("mtime_ns"), int)
             self.assertTrue(stdout_log["truncated"])
             self.assertFalse(stdout_log["full_sha256_available"])
             self.assertIn("preview_sha256", stdout_log)
@@ -846,6 +1133,82 @@ class ReadModelBuilderIntegrationTest(unittest.TestCase):
         self.assertEqual(groups[0]["target_key"], "target_failure:failure_b")
         self.assertEqual(groups[1]["expansion_type"], "objective_gap")
         self.assertEqual(groups[1]["target_key"], "target_failure:failure_a")
+
+    def test_objective_verifier_graph_nodes_are_aggregated_with_collapsed_edges(self) -> None:
+        nodes = [
+            {
+                "node_id": "node_phase_P5",
+                "type": "phase",
+                "layer": "plan",
+                "status": "completed",
+                "title": "Phase P5",
+            },
+            {
+                "node_id": "objective_P5_O1",
+                "type": "objective",
+                "layer": "objective",
+                "status": "open",
+                "title": "Objective P5.O1",
+            },
+        ]
+        for index in range(1, 6):
+            nodes.append(
+                {
+                    "node_id": f"node_objective_verifier_run_{index}",
+                    "type": "objective_verifier",
+                    "status": "completed",
+                    "started_at": f"2026-06-11T00:0{index}:00Z",
+                    "run_id": f"run_verifier_{index}",
+                    "phase_ids": ["P5"],
+                    "target_objective_ids": ["P5.O1"],
+                    "summary": {"one_line": "verifier", "highlights": [], "risks": []},
+                }
+            )
+        edges = []
+        for index in range(1, 6):
+            verifier_id = f"node_objective_verifier_run_{index}"
+            edges.extend(
+                [
+                    {
+                        "edge_id": f"edge_phase_{index}",
+                        "source": "node_phase_P5",
+                        "target": verifier_id,
+                        "type": "phase_has_run",
+                        "label": "run",
+                        "layer": "runtime",
+                    },
+                    {
+                        "edge_id": f"edge_objective_{index}",
+                        "source": verifier_id,
+                        "target": "objective_P5_O1",
+                        "type": "run_supports_objective",
+                        "label": "supports",
+                        "layer": "objective",
+                    },
+                ]
+            )
+
+        graph = read_models_module._aggregate_objective_verifier_graph(nodes, edges, detail_limit=2)
+
+        aggregation = graph["aggregation"]
+        self.assertTrue(aggregation["enabled"])
+        self.assertEqual(aggregation["aggregated_node_count"], 3)
+        visible_ids = {node["node_id"] for node in graph["nodes"]}
+        self.assertIn("node_objective_verifier_run_4", visible_ids)
+        self.assertIn("node_objective_verifier_run_5", visible_ids)
+        aggregate_ids = {node_id for node_id in visible_ids if node_id.startswith("aggregate_objective_verifier_")}
+        self.assertEqual(len(aggregate_ids), 1)
+        aggregate_id = next(iter(aggregate_ids))
+        aggregate_node = next(node for node in graph["nodes"] if node["node_id"] == aggregate_id)
+        self.assertEqual(aggregate_node["aggregated_node_count"], 3)
+        self.assertEqual(aggregate_node["phase_ids"], ["P5"])
+        self.assertEqual(aggregate_node["target_objective_ids"], ["P5.O1"])
+        aggregate_edges = [edge for edge in graph["edges"] if edge.get("source") == aggregate_id or edge.get("target") == aggregate_id]
+        self.assertEqual(len(aggregate_edges), 2)
+        self.assertTrue(all(edge.get("aggregated") for edge in aggregate_edges))
+        self.assertEqual({edge.get("aggregated_edge_count") for edge in aggregate_edges}, {3})
+        self.assertIn(("phase_has_run", "node_phase_P5", aggregate_id), {(edge["type"], edge["source"], edge["target"]) for edge in graph["edges"]})
+        self.assertIn(("run_supports_objective", aggregate_id, "objective_P5_O1"), {(edge["type"], edge["source"], edge["target"]) for edge in graph["edges"]})
 
     def test_cli_rebuilds_read_models_from_plan_latest_validations_events_and_git_status(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

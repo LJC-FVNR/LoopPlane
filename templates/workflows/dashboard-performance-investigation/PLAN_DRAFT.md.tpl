@@ -42,7 +42,7 @@ the task evidence.
   - judgment_guidance: Confirm the benchmark records latency, payload size, disk reads, and memory.
   - verifier: objective_verifier
   - unmet_action: self_expand
-  - max_expansions: 2
+  - max_expansions: 100
 
 ## Phase P1: Identify Hot Paths
 
@@ -64,7 +64,7 @@ the task evidence.
   - judgment_guidance: Confirm findings point to concrete files/functions and measured costs.
   - verifier: objective_verifier
   - unmet_action: self_expand
-  - max_expansions: 2
+  - max_expansions: 100
 
 ## Phase P2: Implement Bounded Loading
 
@@ -86,7 +86,7 @@ the task evidence.
   - judgment_guidance: Confirm dashboard GET paths remain read-only and selected workflow loads are isolated.
   - verifier: objective_verifier
   - unmet_action: self_expand
-  - max_expansions: 2
+  - max_expansions: 100
 
 ## Phase P3: Regression Tests
 
@@ -108,7 +108,7 @@ the task evidence.
   - judgment_guidance: Confirm tests would fail for the original slow-path behavior.
   - verifier: objective_verifier
   - unmet_action: self_expand
-  - max_expansions: 2
+  - max_expansions: 100
 
 ## Phase P4: Benchmark And Report
 
@@ -130,7 +130,7 @@ the task evidence.
   - judgment_guidance: Confirm final measurements meet or explain the budgets.
   - verifier: objective_verifier
   - unmet_action: self_expand
-  - max_expansions: 2
+  - max_expansions: 100
 
 ## Final Objective Checklist
 
@@ -139,4 +139,4 @@ the task evidence.
   - judgment_guidance: Confirm root cause, fix, tests, and final benchmark are all present.
   - verifier: objective_verifier
   - unmet_action: self_expand
-  - max_expansions: 2
+  - max_expansions: 100

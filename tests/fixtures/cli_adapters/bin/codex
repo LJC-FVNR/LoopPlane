@@ -120,7 +120,7 @@ def _write_plan_draft_if_requested() -> None:
   - judgment_guidance: Confirm the adapter-authored plan draft is suitable for durable execution.
   - verifier: objective_verifier
   - unmet_action: self_expand
-  - max_expansions: 2
+  - max_expansions: 100
 
 ## Final Objective Checklist
 
@@ -129,7 +129,7 @@ def _write_plan_draft_if_requested() -> None:
   - judgment_guidance: Confirm the plan includes objective gates that can be verified before final completion.
   - verifier: objective_verifier
   - unmet_action: self_expand
-  - max_expansions: 2
+  - max_expansions: 100
 """,
         encoding="utf-8",
     )

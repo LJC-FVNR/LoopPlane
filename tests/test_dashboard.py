@@ -767,6 +767,8 @@ class StaticDashboardTest(unittest.TestCase):
             for filename in ("loopplane_logo.png", "loopplane_logo_dark.png", "loopplane_logo_light.png"):
                 self.assertIn(f"{result['dashboard_dir'].rstrip('/')}/{filename}", result["generated_files"])
                 self.assertTrue((output_dir / filename).is_file())
+            self.assertIn(f"{result['dashboard_dir'].rstrip('/')}/vendor/cytoscape.min.js", result["generated_files"])
+            self.assertTrue((output_dir / "vendor" / "cytoscape.min.js").is_file())
             for filename in READ_MODEL_FILES:
                 self.assertTrue((output_dir / "read_models" / filename).is_file(), filename)
 
@@ -789,8 +791,11 @@ class StaticDashboardTest(unittest.TestCase):
                 "graph-overview",
                 "graph-phase-group",
                 "graph-task-rail",
+                "graph-mode-picker",
                 "Graph Mode",
                 "Agent Pipeline",
+                "Network Graph",
+                "network-graph-canvas",
                 "graph-expand-toggle",
                 "graph-pipeline-scroll",
                 'data-graph-mode="phase_pipeline"',
@@ -863,6 +868,60 @@ class StaticDashboardTest(unittest.TestCase):
             self.assertIn("statusBucket", static_js)
             self.assertIn("naturalCompare", static_js)
             self.assertIn("last_activity_at", static_js)
+            self.assertIn('row("Last Written"', static_js)
+            self.assertIn('CYTOSCAPE_VENDOR_SRC = "vendor/cytoscape.min.js"', static_js)
+            self.assertIn("loadCytoscapeBundleOnce", static_js)
+            self.assertIn("networkGraphElements", static_js)
+            self.assertIn("networkGraphSavedState", static_js)
+            self.assertIn("rememberNetworkGraphState", static_js)
+            self.assertIn("applyNetworkGraphPositions", static_js)
+            self.assertIn("networkGraphLayoutReady", static_js)
+            self.assertIn("NETWORK_GRAPH_WHEEL_SENSITIVITY = 1.2", static_js)
+            self.assertIn("wheelSensitivity: NETWORK_GRAPH_WHEEL_SENSITIVITY", static_js)
+            self.assertIn('networkGraphLayoutMode = "temporal"', static_js)
+            self.assertIn("applyTemporalForcePositions", static_js)
+            self.assertIn("networkGraphTemporalSpan", static_js)
+            self.assertIn("networkGraphTemporalMsValue", static_js)
+            self.assertIn('value.trim() === ""', static_js)
+            self.assertIn("networkGraphTemporalMsValue(element.data.temporalMs)", static_js)
+            self.assertIn("rankRatio", static_js)
+            self.assertIn('temporalScale: "rank"', static_js)
+            self.assertIn("pendingNodes", static_js)
+            self.assertIn('pendingPlacement: "end_alpha"', static_js)
+            self.assertNotIn("Number(element.data.temporalMs)", static_js)
+            self.assertNotIn("neighborXs", static_js)
+            for node_type in (
+                "worker",
+                "recovery_worker",
+                "expansion_planner",
+                "self_expansion_group",
+                "objective_verifier",
+                "objective_verifier_group",
+            ):
+                self.assertIn(f".node-type-{node_type}", static_js)
+            self.assertIn('selector: ".node-type-expansion_planner"', static_js)
+            self.assertIn('selector: ".node-type-self_expansion_group"', static_js)
+            self.assertIn('selector: ".node-type-objective_verifier"', static_js)
+            self.assertIn('selector: ".node-type-objective_verifier_group"', static_js)
+            self.assertGreaterEqual(static_js.count('"shape": "triangle"'), 2)
+            self.assertGreaterEqual(static_js.count('"shape": "vee"'), 2)
+            self.assertNotIn('"shape": "tag"', static_js)
+            self.assertNotIn('"shape": "pentagon"', static_js)
+            temporal_time_function = static_js[
+                static_js.index("function networkGraphNodeTimeMs"):
+                static_js.index("function networkGraphNodeSize")
+            ]
+            self.assertIn('"started_at"', temporal_time_function)
+            self.assertIn('"prepared_at"', temporal_time_function)
+            self.assertIn('"created_at"', temporal_time_function)
+            self.assertNotIn('"ended_at"', temporal_time_function)
+            self.assertNotIn('"completed_at"', temporal_time_function)
+            self.assertNotIn('"validated_at"', temporal_time_function)
+            self.assertNotIn('"updated_at"', temporal_time_function)
+            self.assertIn("data-network-layout-choice", static_js)
+            self.assertIn("networkLayoutMode", static_js)
+            self.assertIn('name: "cose"', static_js)
+            self.assertNotIn('name: "preset"', static_js)
             self.assertNotIn("markdown-plain-link", static_js)
             self.assertLess(
                 static_js.index('\'<ol class="task-list">\' + taskRows'),
@@ -875,6 +934,8 @@ class StaticDashboardTest(unittest.TestCase):
             self.assertIn("dashboard-loading-spin", static_css)
             self.assertIn(".app-header", static_css)
             self.assertIn(".app-logo", static_css)
+            self.assertIn(".graph-mode-picker", static_css)
+            self.assertIn(".network-layout-switch", static_css)
             self.assertIn(".markdown-table-wrap", static_css)
             self.assertIn("overflow-y: hidden", static_css)
             self.assertIn("overflow-y: clip", static_css)
@@ -931,6 +992,9 @@ class StaticDashboardTest(unittest.TestCase):
             self.assertEqual(run_sections["report"]["render_mode"], "markdown")
             self.assertEqual(run_sections["human_summary"]["render_mode"], "markdown")
             self.assertTrue(str(run_sections["human_summary"]["path"]).endswith("human_summary.md"))
+            stdout_log = next(item for item in run_sections["logs"]["items"] if str(item.get("path", "")).endswith("stdout.log"))
+            self.assertRegex(str(stdout_log.get("last_written_at")), r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
+            self.assertIsInstance(stdout_log.get("mtime_ns"), int)
             self.assertIn("Task T001 validation passed", run_sections["validation"]["content"])
             self.assertEqual(run_sections["diff_summary"]["changed_files_count"], 1)
             self.assertEqual(run_sections["diff_summary"]["changed_files"][0]["path"], "src/app.py")
@@ -1314,6 +1378,36 @@ class StaticDashboardTest(unittest.TestCase):
 
         self.assertNotIn("last pending", html)
         self.assertIn("1 task \u00b7 last 06-26 18:55", html)
+
+    def test_dashboard_graph_panel_keeps_lazy_network_shell_when_pipeline_empty(self) -> None:
+        plan_index = {
+            "objectives": [],
+            "phases": [
+                {
+                    "phase_id": "P0",
+                    "title": "Phase P0",
+                    "status": "completed",
+                    "tasks": [{"task_id": "P0.T001", "title": "Task", "status": "completed"}],
+                }
+            ],
+        }
+        workflow_graph = {
+            "nodes": [
+                {"node_id": "node_phase_P0", "type": "phase", "pipeline_visible": False, "title": "Phase P0"},
+                {"node_id": "node_task_P0_T001", "type": "task", "pipeline_visible": False, "title": "Task"},
+            ],
+            "edges": [{"type": "phase_contains_task", "source": "node_phase_P0", "target": "node_task_P0_T001"}],
+        }
+
+        html = _render_graph_panel(workflow_graph, plan_index)
+
+        self.assertIn('data-graph-mode-choice="pipeline"', html)
+        self.assertIn('data-graph-mode-choice="network"', html)
+        self.assertIn('data-graph-view="network" hidden', html)
+        self.assertIn('data-network-graph-canvas', html)
+        self.assertIn("Network graph is not loaded.", html)
+        self.assertIn("No graph nodes are present.", html)
+        self.assertIn("Phase Contains Task", html)
 
     def test_dashboard_graph_phase_fallback_uses_natural_order(self) -> None:
         plan_index = {
@@ -3868,6 +3962,7 @@ class StaticDashboardTest(unittest.TestCase):
                 self.assertEqual(server_payload["jsonl_models"], {})
                 js = request_text(f"{base}/static_dashboard.js", token)
                 css = request_text(f"{base}/static_dashboard.css", token)
+                cytoscape_js = request_text(f"{base}/vendor/cytoscape.min.js", token)
                 logos = []
                 for filename in ("loopplane_logo_dark.png", "loopplane_logo_light.png"):
                     logo_request = Request(f"{base}/{filename}", headers={"Authorization": f"Bearer {token}"})
@@ -3876,11 +3971,13 @@ class StaticDashboardTest(unittest.TestCase):
                         logos.append(logo_response.read())
                 self.assertIn("mountNodeDetails", js)
                 self.assertIn("REFRESH_INTERVAL_MS = 30000", js)
+                self.assertIn("Cytoscape Consortium", cytoscape_js)
                 self.assertTrue(all(logo.startswith(b"\x89PNG\r\n\x1a\n") for logo in logos))
                 self.assertIn(".dashboard-shell", css)
                 self.assertIn(".app-header", css)
                 self.assertIn(".status-strip", css)
                 self.assertIn(".graph-pipeline-scroll", css)
+                self.assertIn(".network-graph-canvas", css)
                 self.assertIn("flex: 0 0 auto", css)
                 self.assertIn("grid-template-columns: minmax(340px, 430px) repeat(3", css)
                 self.assertIn('"vc runner approval metrics"', css)

@@ -24,7 +24,11 @@ from runtime.exit_codes import (
     has_text,
 )
 from runtime.path_resolution import WorkflowPathError, WorkflowPaths, load_workflow_config, path_lines
-from runtime.plan_objectives import parse_plan_objectives, is_task_block_terminator
+from runtime.plan_objectives import (
+    DEFAULT_OBJECTIVE_MAX_EXPANSIONS,
+    is_task_block_terminator,
+    parse_plan_objectives,
+)
 from runtime.prompt_context import file_reference, prompt_reference_index
 from runtime.version_control import create_git_checkpoint
 from runtime.workflow_lifecycle import mark_workflow_active
@@ -2286,7 +2290,7 @@ def _noop_plan_draft(workflow_id: str, paths: WorkflowPaths, run_id: str, genera
   - judgment_guidance: Confirm the brief, configured paths, and workspace constraints are reviewable enough to guide implementation.
   - verifier: objective_verifier
   - unmet_action: self_expand
-  - max_expansions: 2
+  - max_expansions: {DEFAULT_OBJECTIVE_MAX_EXPANSIONS}
 
 ## Phase P1: Requested Deliverables
 
@@ -2308,7 +2312,7 @@ def _noop_plan_draft(workflow_id: str, paths: WorkflowPaths, run_id: str, genera
   - judgment_guidance: Confirm the implementation evidence satisfies the user brief at a high level, not just individual task file checks.
   - verifier: objective_verifier
   - unmet_action: self_expand
-  - max_expansions: 2
+  - max_expansions: {DEFAULT_OBJECTIVE_MAX_EXPANSIONS}
 
 ## Phase P2: Completion Validation
 
@@ -2330,7 +2334,7 @@ def _noop_plan_draft(workflow_id: str, paths: WorkflowPaths, run_id: str, genera
   - judgment_guidance: Confirm validation evidence, changed files, and residual risks are documented for final review.
   - verifier: objective_verifier
   - unmet_action: self_expand
-  - max_expansions: 2
+  - max_expansions: {DEFAULT_OBJECTIVE_MAX_EXPANSIONS}
 
 ## Final Objective Checklist
 
@@ -2339,7 +2343,7 @@ def _noop_plan_draft(workflow_id: str, paths: WorkflowPaths, run_id: str, genera
   - judgment_guidance: Confirm all phase evidence composes into a complete, dashboard-ready workflow outcome for the original brief.
   - verifier: objective_verifier
   - unmet_action: self_expand
-  - max_expansions: 2
+  - max_expansions: {DEFAULT_OBJECTIVE_MAX_EXPANSIONS}
 """
 
 

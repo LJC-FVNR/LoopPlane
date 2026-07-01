@@ -264,6 +264,7 @@ class SkillPackageDoctorTest(unittest.TestCase):
         self.assertIn("runtime/dashboard.py", dashboard_group["files"])
         self.assertIn("dashboard/public/static_dashboard.css", dashboard_group["files"])
         self.assertIn("dashboard/public/static_dashboard.js", dashboard_group["files"])
+        self.assertIn("dashboard/public/vendor/cytoscape.min.js", dashboard_group["files"])
         optional_classes = {
             entry["classification"]
             for entry in coverage_check["optional_or_deferred_groups"]

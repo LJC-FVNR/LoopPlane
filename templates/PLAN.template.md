@@ -111,7 +111,7 @@ Skipped tasks additionally require `skip_reason` and `skip_authorization` or
   - judgment_guidance: {{phase_objective_judgment_guidance}}
   - verifier: objective_verifier
   - unmet_action: self_expand
-  - max_expansions: 2
+  - max_expansions: 100
 
 ## Final Objective Checklist
 
@@ -120,7 +120,7 @@ Skipped tasks additionally require `skip_reason` and `skip_authorization` or
   - judgment_guidance: {{final_objective_judgment_guidance}}
   - verifier: objective_verifier
   - unmet_action: self_expand
-  - max_expansions: 2
+  - max_expansions: 100
 
 ## State Metadata Patterns
 

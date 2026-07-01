@@ -1575,12 +1575,55 @@ a:hover {
   overflow-wrap: anywhere;
 }
 
+.graph-mode-picker {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+}
+
+.graph-mode-picker .eyebrow {
+  flex: 0 0 auto;
+  margin: 0;
+}
+
 .graph-mode-actions {
   align-items: center;
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
   justify-content: flex-end;
+}
+
+.graph-mode-switch {
+  border: 1px solid var(--line);
+  display: inline-flex;
+}
+
+.graph-mode-switch button {
+  background: var(--surface-muted);
+  border: 0;
+  border-right: 1px solid var(--line);
+  color: var(--muted);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 800;
+  min-height: 31px;
+  padding: 6px 10px;
+}
+
+.graph-mode-switch button:last-child {
+  border-right: 0;
+}
+
+.graph-mode-switch button:hover,
+.graph-mode-switch button:focus-visible,
+.graph-mode-switch button.is-active {
+  background: var(--active-bg);
+  color: var(--blue);
+  outline: none;
 }
 
 .graph-expand-toggle {
@@ -1602,6 +1645,100 @@ a:hover {
   border-color: var(--active-line);
   color: var(--blue);
   outline: none;
+}
+
+.network-graph-controls {
+  margin-bottom: 8px;
+}
+
+.network-control-row {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.network-layout-switch,
+.network-control-row button,
+.network-control-toggle {
+  background: var(--surface-muted);
+  border: 1px solid var(--line);
+  color: var(--muted);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 800;
+  min-height: 31px;
+  padding: 6px 9px;
+}
+
+.network-layout-switch {
+  align-items: stretch;
+  display: inline-flex;
+  gap: 0;
+  padding: 0;
+}
+
+.network-layout-switch button {
+  border: 0;
+  border-radius: 0;
+  min-height: 29px;
+}
+
+.network-layout-switch button + button {
+  border-left: 1px solid var(--line);
+}
+
+.network-control-row button {
+  cursor: pointer;
+}
+
+.network-control-row button:hover,
+.network-control-row button:focus-visible,
+.network-layout-switch button.is-active,
+.network-control-toggle:hover {
+  border-color: var(--active-line);
+  color: var(--blue);
+  outline: none;
+}
+
+.network-layout-switch button.is-active {
+  background: var(--active-bg);
+}
+
+.network-control-toggle {
+  align-items: center;
+  cursor: pointer;
+  display: inline-flex;
+  gap: 6px;
+}
+
+.network-control-toggle input {
+  accent-color: var(--blue);
+}
+
+.network-control-count {
+  color: var(--muted);
+  font-size: 12px;
+  margin-left: auto;
+}
+
+.network-graph-canvas {
+  background: color-mix(in srgb, var(--surface-muted) 72%, var(--bg) 28%);
+  border: 1px solid var(--line);
+  height: clamp(520px, 68vh, 900px);
+  min-height: 420px;
+  position: relative;
+}
+
+.graph-panel.is-graph-expanded .network-graph-canvas {
+  height: min(82vh, 1040px);
+}
+
+.network-graph-status {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+  margin: 8px 0 0;
 }
 
 .graph-overview {
@@ -2779,6 +2916,27 @@ a:hover {
 
   .graph-mode-actions {
     justify-content: flex-start;
+  }
+
+  .graph-mode-switch,
+  .network-layout-switch,
+  .network-control-row {
+    width: 100%;
+  }
+
+  .graph-mode-switch button,
+  .network-layout-switch button {
+    flex: 1 1 0;
+  }
+
+  .network-control-count {
+    flex: 1 1 100%;
+    margin-left: 0;
+  }
+
+  .network-graph-canvas {
+    height: 420px;
+    min-height: 340px;
   }
 
   .form-grid {

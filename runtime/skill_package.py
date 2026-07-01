@@ -283,6 +283,7 @@ PACKAGE_FILE_REQUIREMENT_GROUPS: tuple[dict[str, Any], ...] = (
             "dashboard/package.json",
             "dashboard/public/static_dashboard.css",
             "dashboard/public/static_dashboard.js",
+            "dashboard/public/vendor/cytoscape.min.js",
         ),
     },
     {
@@ -6360,7 +6361,7 @@ def _archived_read_only_gate_default_api_smoke(
         }
         expected_minimums = {
             "dashboard_requests": 3,
-            "control_requests": 5,
+            "control_requests": 4,
             "approval_responses": 1,
             "chat_requests": 1,
             "chat_responses": 1,

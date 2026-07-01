@@ -20,6 +20,7 @@ from runtime.adapters.policy import (
 from runtime.exit_codes import EXIT_SECURITY_POLICY_VIOLATION
 from runtime.init_workflow import InitConflictError, init_project
 from runtime.schema_validation import validate_project_schemas
+from runtime.self_expansion import DEFAULT_SELF_EXPANSION_POLICY
 from runtime.version_control import GitCommandResult
 
 
@@ -630,6 +631,15 @@ class LoopPlaneInitIntegrationTest(unittest.TestCase):
             self.assertFalse(workflow["validation"]["validator_agent_for_high_risk"])
             self.assertTrue(workflow["execution"]["continue_on_fail"])
             self.assertTrue(workflow["execution"]["recovery_before_new_work"])
+            self_expansion = workflow["self_expansion"]
+            for budget_key in (
+                "max_cycles",
+                "max_tasks_added_total",
+                "max_tasks_per_cycle",
+                "max_repeated_signature_count",
+            ):
+                self.assertEqual(self_expansion[budget_key], DEFAULT_SELF_EXPANSION_POLICY[budget_key])
+                self.assertEqual(self_expansion[budget_key], 100)
             self.assertEqual(dashboard["port"], "auto")
             self.assertEqual(dashboard["preferred_port"], 3766)
             self.assertEqual(dashboard["port_range"], [3766, 4766])
