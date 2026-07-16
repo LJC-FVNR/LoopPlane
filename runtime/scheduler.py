@@ -7,6 +7,7 @@ import shutil
 import socket
 import threading
 import uuid
+from contextlib import contextmanager
 from hashlib import sha256
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -138,6 +139,7 @@ ALLOWED_BACKGROUND_JOB_STATUSES = frozenset(
 )
 BACKGROUND_JOB_SAFE_STATUSES = frozenset({"completed", "cancelled"})
 BACKGROUND_JOB_TERMINAL_STATUSES = frozenset({"completed", "failed", "timed_out", "cancelled"})
+BACKGROUND_JOB_ATTENTION_STATUSES = frozenset({"failed", "timed_out", "stale", "needs_recovery"})
 ACTIVE_RUN_LEASE_ACTIVE_STATUSES = frozenset({"starting", "running", "pending", "waiting"})
 ACTIVE_RUN_LEASE_INACTIVE_STATUSES = frozenset({"completed", "succeeded", "failed", "cancelled", "aborted", "released"})
 ACTIVE_RUN_LEASE_FINGERPRINT_FILENAME = "active_run_leases_fingerprint.json"
@@ -220,6 +222,7 @@ class HeldOwnerLock:
         self.lock = lock
         self.fd = fd
         self.released = False
+        self._metadata_lock = threading.Lock()
 
     def __enter__(self) -> "HeldOwnerLock":
         return self
@@ -228,8 +231,33 @@ class HeldOwnerLock:
         self.release()
 
     def heartbeat(self) -> None:
-        metadata = _owner_metadata(self.lock.owner, self.lock.ttl_seconds)
-        self.lock.owner_path.write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        with self._metadata_lock:
+            if self.released:
+                return
+            metadata = _owner_metadata(self.lock.owner, self.lock.ttl_seconds)
+            self.lock.owner_path.write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    @contextmanager
+    def keepalive(self, *, interval_seconds: float | None = None):
+        interval = interval_seconds
+        if interval is None:
+            interval = min(30.0, max(1.0, float(self.lock.ttl_seconds) / 3.0))
+        stop = threading.Event()
+
+        def _run() -> None:
+            while not stop.wait(interval):
+                try:
+                    self.heartbeat()
+                except OSError:
+                    return
+
+        thread = threading.Thread(target=_run, name="loopplane-scheduler-lock-heartbeat", daemon=True)
+        thread.start()
+        try:
+            yield self
+        finally:
+            stop.set()
+            thread.join(timeout=max(1.0, interval + 1.0))
 
     def release(self) -> None:
         if self.released:
@@ -465,7 +493,7 @@ def run_scheduler(
     ticks_run = 0
     selected: dict[str, Any] | None = None
     action_history: list[dict[str, Any]] = []
-    with held_lock:
+    with held_lock, held_lock.keepalive():
         completion_snapshot = load_scheduler_snapshot(project)
         completion_selected = select_next_action(completion_snapshot)
         if completion_selected.get("action") == "complete":
@@ -1264,6 +1292,24 @@ def select_next_action(snapshot: Mapping[str, Any]) -> dict[str, Any]:
 
     background_job = _background_job_not_ready(snapshot)
     if background_job is not None:
+        attention_problem = _background_job_attention_problem(background_job)
+        if attention_problem is not None:
+            return _action(
+                "requires_attention",
+                reason=attention_problem["reason"],
+                selected={
+                    "type": "background_job_needs_recovery",
+                    "job_id": _record_id(background_job),
+                    "task_id": background_job.get("task_id"),
+                    "run_id": background_job.get("run_id"),
+                    "job": background_job,
+                    "run_kind": "background_job_recovery",
+                    "message": attention_problem["reason"],
+                },
+                would_wait=True,
+                blocking_conditions=["requires_attention", attention_problem["blocking_condition"]],
+                considered=considered,
+            )
         return _action(
             "wait_background_job",
             reason="An active background job is not safe to continue past yet.",
@@ -1502,6 +1548,13 @@ def execute_selected_action(
                     )
         if action_name == "requires_attention":
             selected = action.get("selected", {}) if isinstance(action.get("selected"), Mapping) else {}
+            if str(selected.get("type") or "") == "background_job_needs_recovery":
+                _persist_background_jobs_from_snapshot(paths, workflow_id, snapshot)
+                selected_job = selected.get("job")
+                if isinstance(selected_job, Mapping):
+                    scheduler_update["active_background_job_id"] = _record_id(selected_job)
+                    scheduler_update["active_background_job_status"] = selected_job.get("status")
+                    scheduler_update["wake_next_agent_when"] = selected_job.get("wake_next_agent_when")
             attention_item = _requires_attention_item(selected, reason=str(action.get("reason") or "Requires attention."))
             attention_items = [attention_item]
             scheduler_update["requires_attention_id"] = attention_item.get("request_id")
@@ -1547,17 +1600,7 @@ def execute_selected_action(
                 except Exception as error:
                     scheduler_update["workflow_registry_update"] = {"status": "error", "error": str(error)}
         if action_name == "wait_background_job":
-            background_jobs = snapshot.get("background_jobs")
-            if isinstance(background_jobs, Sequence) and not isinstance(background_jobs, (str, bytes)):
-                _write_background_job_registry(
-                    paths,
-                    {
-                        "schema_version": SCHEMA_VERSION,
-                        "workflow_id": workflow_id,
-                        "updated_at": utc_timestamp(),
-                        "jobs": [dict(job) for job in background_jobs if isinstance(job, Mapping)],
-                    },
-                )
+            _persist_background_jobs_from_snapshot(paths, workflow_id, snapshot)
             selected_job = action.get("selected", {}).get("job") if isinstance(action.get("selected"), Mapping) else None
             if isinstance(selected_job, Mapping):
                 scheduler_update["active_background_job_id"] = _record_id(selected_job)
@@ -3158,6 +3201,22 @@ def _background_job_not_ready(snapshot: Mapping[str, Any]) -> Mapping[str, Any] 
     return None
 
 
+def _background_job_attention_problem(job: Mapping[str, Any]) -> dict[str, str] | None:
+    status = str(job.get("status") or "").strip().lower()
+    if status not in BACKGROUND_JOB_ATTENTION_STATUSES:
+        return None
+    job_id = _record_id(job) or "background_job"
+    status_problem = str(job.get("status_problem") or "").strip()
+    problem_suffix = f" ({status_problem})" if status_problem else ""
+    return {
+        "blocking_condition": f"background_job_{status}",
+        "reason": (
+            f"Background job {job_id} is {status}{problem_suffix}. "
+            "It cannot become safe by scheduler polling alone; recover or manually resolve the background job before continuing."
+        ),
+    }
+
+
 def _active_run_lease_not_ready(snapshot: Mapping[str, Any]) -> Mapping[str, Any] | None:
     for lease in snapshot.get("active_run_leases", []):
         if not isinstance(lease, Mapping):
@@ -3492,10 +3551,12 @@ def _handle_control_request(
         "owner": owner,
     }
     runtime_status: str | None = None
+    clear_resolved_attention = False
     if response_status == "rejected":
         message = f"Unsupported control request type: {action}."
     elif action == "start":
         runtime_status = "running"
+        clear_resolved_attention = True
         scheduler_update["running"] = True
         scheduler_update["paused"] = False
         scheduler_update["stop_requested"] = False
@@ -3508,6 +3569,7 @@ def _handle_control_request(
         scheduler_update["running"] = False
     elif action == "resume":
         runtime_status = "running"
+        clear_resolved_attention = True
         scheduler_update["paused"] = False
         scheduler_update["running"] = True
         scheduler_update["stop_requested"] = False
@@ -3581,7 +3643,27 @@ def _handle_control_request(
         except Exception as error:
             response["workflow_registry_update"] = {"status": "error", "error": str(error)}
     _append_jsonl_locked(paths, paths.runtime_dir / CONTROL_RESPONSES_FILENAME, response)
-    _update_runtime_state(paths, status=runtime_status, scheduler_update=scheduler_update)
+    if clear_resolved_attention:
+        # start/resume is also the acknowledgement boundary after an operator
+        # or autonomous repair has made a requires-attention condition safe.
+        # If the underlying condition is still unsafe, the next scheduler tick
+        # deterministically recreates the attention item.  Keeping the old item
+        # here makes the dashboard report a resolved incident indefinitely.
+        scheduler_update.update(
+            {
+                "requires_attention_id": None,
+                "requires_attention_type": None,
+                "active_background_job_id": None,
+                "active_background_job_status": None,
+                "wake_next_agent_when": None,
+            }
+        )
+    _update_runtime_state(
+        paths,
+        status=runtime_status,
+        scheduler_update=scheduler_update,
+        requires_attention=[] if clear_resolved_attention else None,
+    )
     return response
 
 
@@ -5688,6 +5770,41 @@ def _write_background_job_registry(paths: WorkflowPaths, registry: Mapping[str, 
     _write_json_atomic_fsynced(paths.runtime_dir / BACKGROUND_JOBS_FILENAME, registry)
 
 
+def _persist_background_jobs_from_snapshot(paths: WorkflowPaths, workflow_id: str, snapshot: Mapping[str, Any]) -> None:
+    background_jobs = snapshot.get("background_jobs")
+    if not isinstance(background_jobs, Sequence) or isinstance(background_jobs, (str, bytes)):
+        return
+    snapshot_jobs = [dict(job) for job in background_jobs if isinstance(job, Mapping)]
+
+    def update(registry: dict[str, Any]) -> None:
+        current_jobs = [dict(job) for job in registry.get("jobs", []) if isinstance(job, Mapping)]
+        current_by_id = {_record_id(job): job for job in current_jobs if _record_id(job)}
+        merged: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for candidate in snapshot_jobs:
+            job_id = _record_id(candidate)
+            current = current_by_id.get(job_id) if job_id else None
+            if current is not None:
+                current_updated = _parse_iso_timestamp(current.get("updated_at"))
+                candidate_updated = _parse_iso_timestamp(candidate.get("updated_at"))
+                if current_updated is not None and (candidate_updated is None or current_updated > candidate_updated):
+                    candidate = current
+            merged.append(dict(candidate))
+            if job_id:
+                seen.add(job_id)
+        merged.extend(job for job in current_jobs if _record_id(job) not in seen)
+        registry.update(
+            {
+                "schema_version": SCHEMA_VERSION,
+                "workflow_id": workflow_id,
+                "updated_at": utc_timestamp(),
+                "jobs": merged,
+            }
+        )
+
+    _update_background_registry_locked(paths, workflow_id=workflow_id, update=update)
+
+
 def _update_background_registry_locked(
     paths: WorkflowPaths,
     *,
@@ -5762,6 +5879,22 @@ def _evaluate_background_job_record(
         age = max(0, int((now - heartbeat).total_seconds()))
         job["heartbeat_age_seconds"] = age
         if age > BACKGROUND_JOB_HEARTBEAT_TTL_SECONDS:
+            child_pid = _positive_int(job.get("pid") or job.get("child_pid"))
+            supervisor_pid = _positive_int(job.get("supervisor_pid"))
+            if (
+                child_pid is not None
+                and supervisor_pid is not None
+                and _pid_exists(child_pid)
+                and _pid_exists(supervisor_pid)
+            ):
+                # Both independently recorded process levels are live.  This
+                # is stronger evidence than a metadata heartbeat during a
+                # synchronous watchdog inspection and also covers a short
+                # registry-snapshot race around current_check_id.
+                job["next_prompt_ready"] = False
+                if job.get("status_problem") == "stale_heartbeat":
+                    job.pop("status_problem", None)
+                return job
             job["status"] = "stale"
             job["status_problem"] = "stale_heartbeat"
             job["next_prompt_ready"] = False
@@ -5777,6 +5910,8 @@ def _evaluate_background_job_record(
                 job["status_problem"] = "process_not_live"
                 job["next_prompt_ready"] = False
                 return job
+        if job.get("status_problem") in {"stale_heartbeat", "process_not_live", "missing_parseable_heartbeat"}:
+            job.pop("status_problem", None)
         job["next_prompt_ready"] = False if job.get("next_prompt_ready") is not True else True
     elif status in {"failed", "timed_out", "stale", "needs_recovery"}:
         job["next_prompt_ready"] = False

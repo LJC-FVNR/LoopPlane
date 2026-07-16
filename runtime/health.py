@@ -246,6 +246,24 @@ def _check_scheduler_lock(paths: WorkflowPaths, now: datetime) -> dict[str, Any]
             path=_relative(paths, owner_path),
             details={"owner": owner.get("owner"), "age_seconds": age, "ttl_seconds": ttl},
         )
+    owner_pid = _positive_int(owner.get("pid"), 0)
+    covering_lease = _fresh_scheduler_lock_owner_lease(paths, now=now, owner_pid=owner_pid)
+    if owner_pid > 0 and _pid_exists(owner_pid) is True and covering_lease is not None:
+        return _check(
+            "scheduler_lock",
+            PASS,
+            "Scheduler lock metadata heartbeat is covered by a fresh owner-held active run lease.",
+            path=_relative(paths, owner_path),
+            details={
+                "owner": owner.get("owner"),
+                "owner_pid": owner_pid,
+                "age_seconds": age,
+                "ttl_seconds": ttl,
+                "metadata_heartbeat_stale": True,
+                "heartbeat_covered_by_active_run_lease": True,
+                "active_run_lease": covering_lease,
+            },
+        )
     return _check(
         "scheduler_lock",
         FAIL,
@@ -253,6 +271,42 @@ def _check_scheduler_lock(paths: WorkflowPaths, now: datetime) -> dict[str, Any]
         path=_relative(paths, owner_path),
         details={"owner": owner.get("owner"), "age_seconds": age, "ttl_seconds": ttl},
     )
+
+
+def _fresh_scheduler_lock_owner_lease(
+    paths: WorkflowPaths,
+    *,
+    now: datetime,
+    owner_pid: int,
+) -> dict[str, Any] | None:
+    if owner_pid <= 0:
+        return None
+    lease_dir = paths.runtime_dir / "active_run_leases"
+    if not lease_dir.is_dir():
+        return None
+    for lease_path in sorted(lease_dir.glob("*.json"), reverse=True):
+        lease, error = _read_json_object(lease_path)
+        if error or not isinstance(lease, Mapping):
+            continue
+        if str(lease.get("status") or "").lower() not in ACTIVE_RUN_STATUSES:
+            continue
+        lease_owner_pids = {
+            _positive_int(lease.get("adapter_pid"), 0),
+            _positive_int(lease.get("scheduler_pid"), 0),
+        }
+        if owner_pid not in lease_owner_pids:
+            continue
+        heartbeat = _parse_timestamp(lease.get("heartbeat_at") or lease.get("prepared_at"))
+        ttl = _positive_int(lease.get("lease_ttl_seconds"), DEFAULT_HEARTBEAT_TTL_SECONDS)
+        if heartbeat is None or _age_seconds(now, heartbeat) > ttl:
+            continue
+        return {
+            "run_id": lease.get("run_id") or lease_path.stem,
+            "path": _relative(paths, lease_path),
+            "heartbeat_at": lease.get("heartbeat_at"),
+            "ttl_seconds": ttl,
+        }
+    return None
 
 
 def _check_active_run_leases(paths: WorkflowPaths, now: datetime) -> tuple[dict[str, Any], list[dict[str, Any]]]:

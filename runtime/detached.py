@@ -18,7 +18,7 @@ from runtime.control import record_control_request
 from runtime.exit_codes import EXIT_GENERIC_FAILURE, EXIT_INVALID_CONFIG, EXIT_SUCCESS
 from runtime.path_resolution import WorkflowPathError, WorkflowPaths, load_workflow_config
 from runtime.reconciliation import reconciliation_exit_code, run_reconciler
-from runtime.scheduler import run_scheduler, scheduler_exit_code
+from runtime.scheduler import SchedulerLockError, run_scheduler, scheduler_exit_code
 from runtime.validation import run_validator, validation_exit_code
 
 
@@ -235,7 +235,27 @@ def run_supervisor(project_root: Path | str, *, poll_interval_seconds: float = D
     try:
         while True:
             _heartbeat(paths, owner=owner, status="running")
-            result = run_scheduler(project, max_ticks=1)
+            try:
+                result = run_scheduler(project, max_ticks=1)
+            except SchedulerLockError as error:
+                # Event, failure-registry, and other short-lived authority locks
+                # can legitimately overlap with background watchdog/inspector
+                # writes.  A detached supervisor must retry this transient
+                # contention instead of dying and leaving a completed
+                # background job with no scheduler to consume it.
+                _merge_supervisor_metadata(
+                    paths,
+                    {
+                        "status": "running",
+                        "updated_at": utc_timestamp(),
+                        "heartbeat_at": utc_timestamp(),
+                        "last_action": "scheduler_lock_contention_retry",
+                        "last_loop_reason": "transient_scheduler_lock_contention",
+                        "last_lock_error": str(error),
+                    },
+                )
+                time.sleep(poll_interval)
+                continue
             selected = result.get("selected_action") if isinstance(result.get("selected_action"), Mapping) else {}
             action = str(selected.get("action") or "")
             follow_up = _complete_worker_follow_up(project, selected)
@@ -334,7 +354,12 @@ def load_supervisor_status(project_root: Path | str) -> dict[str, Any]:
     alive = _pid_exists(pid) if pid is not None else None
     liveness = "alive" if alive is True else ("dead" if alive is False else "unknown")
     metadata_status = str(metadata.get("status") or "unknown")
-    heartbeat_stale = _heartbeat_is_stale(metadata.get("heartbeat_at"))
+    metadata_heartbeat_stale = _heartbeat_is_stale(metadata.get("heartbeat_at"))
+    active_run_lease_id = _fresh_supervisor_owned_active_run_lease(paths, supervisor_pid=pid)
+    heartbeat_covered_by_active_run_lease = bool(
+        metadata_heartbeat_stale and alive is True and active_run_lease_id
+    )
+    heartbeat_stale = metadata_heartbeat_stale and not heartbeat_covered_by_active_run_lease
     status = metadata_status
     warnings: list[str] = []
     status_problems: list[str] = []
@@ -364,6 +389,9 @@ def load_supervisor_status(project_root: Path | str) -> dict[str, Any]:
         "pid": pid,
         "liveness": liveness,
         "heartbeat_stale": heartbeat_stale,
+        "metadata_heartbeat_stale": metadata_heartbeat_stale,
+        "heartbeat_covered_by_active_run_lease": heartbeat_covered_by_active_run_lease,
+        "active_run_lease_id": active_run_lease_id,
         "status_problem": status_problems[0] if status_problems else None,
         "status_problems": status_problems,
         "errors": [],
@@ -889,6 +917,35 @@ def _heartbeat_is_stale(value: object) -> bool:
         return True
     age = datetime.now(UTC) - heartbeat
     return age.total_seconds() > SUPERVISOR_HEARTBEAT_TTL_SECONDS
+
+
+def _fresh_supervisor_owned_active_run_lease(
+    paths: WorkflowPaths,
+    *,
+    supervisor_pid: int | None,
+) -> str | None:
+    if supervisor_pid is None:
+        return None
+    lease_dir = paths.runtime_dir / "active_run_leases"
+    if not lease_dir.is_dir():
+        return None
+    for lease_path in sorted(lease_dir.glob("*.json"), reverse=True):
+        lease = _read_json(lease_path, default={})
+        if not isinstance(lease, Mapping):
+            continue
+        if str(lease.get("status") or "").lower() != "running":
+            continue
+        owner_pids = {
+            _positive_int(lease.get("adapter_pid")),
+            _positive_int(lease.get("scheduler_pid")),
+        }
+        if supervisor_pid not in owner_pids:
+            continue
+        if _heartbeat_is_stale(lease.get("heartbeat_at")):
+            continue
+        run_id = str(lease.get("run_id") or lease_path.stem).strip()
+        return run_id or lease_path.stem
+    return None
 
 
 def _missing_supervisor_metadata_fields(metadata: Mapping[str, Any]) -> list[str]:

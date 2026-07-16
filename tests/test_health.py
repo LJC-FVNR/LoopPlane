@@ -404,6 +404,46 @@ class HealthProbeTest(unittest.TestCase):
             self.assertTrue(active_check["details"]["external_nonblocking"])
             self.assertEqual(check_by_name(result, "runner_liveness")["status"], "pass")
 
+    def test_fresh_owner_lease_covers_stale_scheduler_lock_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "Fresh active lease covers a blocking scheduler tick.")
+            now = datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+            write_json(
+                project / ".loopplane" / "runtime" / "lock" / "scheduler_instance_lock" / "owner.json",
+                {
+                    "owner": f"test:{os.getpid()}:owner",
+                    "pid": os.getpid(),
+                    "started_at": "2000-01-01T00:00:00Z",
+                    "heartbeat_at": "2000-01-01T00:00:00Z",
+                    "ttl_seconds": 1,
+                },
+            )
+            write_json(
+                project / ".loopplane" / "runtime" / "active_run_leases" / "run_live.json",
+                {
+                    "schema_version": "1.5",
+                    "run_id": "run_live",
+                    "task_id": "T001",
+                    "role": "worker",
+                    "runner_id": "worker",
+                    "status": "running",
+                    "blocks_scheduler": True,
+                    "heartbeat_at": now,
+                    "lease_ttl_seconds": 120,
+                    "adapter_pid": os.getpid(),
+                    "adapter_child_pid": os.getpid(),
+                    "scheduler_pid": os.getpid(),
+                },
+            )
+
+            result = run_health_probe(project)
+
+            check = check_by_name(result, "scheduler_lock")
+            self.assertEqual(check["status"], "pass", json.dumps(result, indent=2, sort_keys=True))
+            self.assertTrue(check["details"]["heartbeat_covered_by_active_run_lease"])
+            self.assertEqual(check["details"]["active_run_lease"]["run_id"], "run_live")
+
     def _stale_scheduler_lock(self, project: Path) -> None:
         write_json(
             project / ".loopplane" / "runtime" / "lock" / "scheduler_instance_lock" / "owner.json",

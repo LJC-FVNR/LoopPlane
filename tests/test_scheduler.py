@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+import time
 import unittest
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
@@ -529,7 +530,7 @@ class SchedulerSelectionTest(unittest.TestCase):
             init_project(project, "Wait for background job.")
             write_active_plan(project, {"P0.T001": " ", "P1.T001": " "})
             (project / ".loopplane" / "runtime" / "background_jobs.json").write_text(
-                json.dumps([{"job_id": "job1", "status": "running", "next_prompt_ready": False}]),
+                json.dumps([{"job_id": "job1", "status": "running", "next_prompt_ready": False, "heartbeat_at": timestamp()}]),
                 encoding="utf-8",
             )
 
@@ -538,10 +539,10 @@ class SchedulerSelectionTest(unittest.TestCase):
             self.assertEqual(action["action"], "wait_background_job")
             self.assertEqual(action["selected"]["job_id"], "job1")
 
-    def test_malformed_background_status_waits_and_live_tick_persists_needs_recovery(self) -> None:
+    def test_malformed_background_status_requires_attention_and_persists_needs_recovery(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             project = Path(tmp) / "project"
-            init_project(project, "Malformed background status waits.")
+            init_project(project, "Malformed background status requires attention.")
             write_active_plan(project, {"P0.T001": " ", "P1.T001": " "})
             registry_path = project / ".loopplane" / "runtime" / "background_jobs.json"
             registry_path.write_text(
@@ -569,28 +570,32 @@ class SchedulerSelectionTest(unittest.TestCase):
 
             action = select_next_action(load_scheduler_snapshot(project))
 
-            self.assertEqual(action["action"], "wait_background_job")
+            self.assertEqual(action["action"], "requires_attention")
+            self.assertEqual(action["selected"]["type"], "background_job_needs_recovery")
             self.assertEqual(action["selected"]["job"]["status"], "needs_recovery")
             self.assertFalse(action["selected"]["job"]["next_prompt_ready"])
 
             result = run_scheduler(project, max_ticks=1)
 
-            self.assertEqual(result["exit_code"], EXIT_WAITING_BACKGROUND_JOB, json.dumps(result, indent=2, sort_keys=True))
-            self.assertEqual(result["selected_action"]["action"], "wait_background_job")
-            self.assertEqual(result["stopped_reason"], "wait_background_job")
+            self.assertEqual(result["exit_code"], EXIT_GENERIC_FAILURE, json.dumps(result, indent=2, sort_keys=True))
+            self.assertEqual(result["selected_action"]["action"], "requires_attention")
+            self.assertEqual(result["stopped_reason"], "requires_attention")
             persisted = json.loads(registry_path.read_text(encoding="utf-8"))
             self.assertEqual(persisted["jobs"][0]["status"], "needs_recovery")
             self.assertEqual(persisted["jobs"][0]["status_problem"], "invalid_status:definitely_not_allowed")
             events = read_jsonl(project / ".loopplane" / "runtime" / "events" / "events_000001.jsonl")
             event_types = [event["event_type"] for event in events]
-            self.assertEqual(event_types, ["scheduler_wait_tick"])
-            self.assertEqual(events[0]["payload"]["action"], "wait_background_job")
-            self.assertEqual(events[0]["payload"]["status"], "waiting_background_job")
+            self.assertIn("scheduler_requires_attention", event_types)
+            attention_event = next(event for event in events if event["event_type"] == "scheduler_requires_attention")
+            self.assertEqual(attention_event["payload"]["status"], "requires_attention")
+            state = json.loads((project / ".loopplane" / "runtime" / "state.json").read_text(encoding="utf-8"))
+            self.assertEqual(state["status"], "requires_attention")
+            self.assertEqual(state["requires_attention"][0]["type"], "background_job_needs_recovery")
 
-    def test_stale_background_heartbeat_waits_before_work(self) -> None:
+    def test_stale_background_heartbeat_requires_attention_before_work(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             project = Path(tmp) / "project"
-            init_project(project, "Stale background heartbeat waits.")
+            init_project(project, "Stale background heartbeat requires attention.")
             write_active_plan(project, {"P0.T001": " ", "P1.T001": " "})
             (project / ".loopplane" / "runtime" / "background_jobs.json").write_text(
                 json.dumps(
@@ -616,9 +621,94 @@ class SchedulerSelectionTest(unittest.TestCase):
 
             action = select_next_action(load_scheduler_snapshot(project))
 
-            self.assertEqual(action["action"], "wait_background_job")
+            self.assertEqual(action["action"], "requires_attention")
+            self.assertEqual(action["selected"]["type"], "background_job_needs_recovery")
             self.assertEqual(action["selected"]["job"]["status"], "stale")
             self.assertEqual(action["selected"]["job"]["status_problem"], "stale_heartbeat")
+
+    def test_live_synchronous_watchdog_waits_despite_stale_heartbeat(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "A live synchronous watchdog covers its heartbeat gap.")
+            write_active_plan(project, {"P0.T001": " ", "P1.T001": " "})
+            (project / ".loopplane" / "runtime" / "background_jobs.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "1.5",
+                        "jobs": [
+                            {
+                                "job_id": "bg_live_watchdog",
+                                "task_id": "P0.T001",
+                                "run_id": "run_bg_live_watchdog",
+                                "status": "running",
+                                "next_prompt_ready": False,
+                                "heartbeat_at": "2000-01-01T00:00:00Z",
+                                "pid": os.getpid(),
+                                "supervisor_pid": os.getpid(),
+                                "status_problem": "stale_heartbeat",
+                                "watchdog": {
+                                    "enabled": True,
+                                    "current_check_id": "watchdog_live_fixture",
+                                    "current_check_started_at": "2000-01-01T00:00:00Z",
+                                },
+                            }
+                        ],
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            action = select_next_action(load_scheduler_snapshot(project))
+
+            self.assertEqual(action["action"], "wait_background_job")
+            self.assertEqual(action["selected"]["job"]["status"], "running")
+            self.assertNotIn("status_problem", action["selected"]["job"])
+
+    def test_needs_recovery_background_job_requires_attention_instead_of_waiting_forever(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "Needs-recovery background job should not wait forever.")
+            write_active_plan(project, {"P0.T001": " ", "P1.T001": " "})
+            registry_path = project / ".loopplane" / "runtime" / "background_jobs.json"
+            registry_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "1.5",
+                        "jobs": [
+                            {
+                                "job_id": "bg_needs_recovery",
+                                "task_id": "P0.T001",
+                                "run_id": "run_bg_needs_recovery",
+                                "status": "needs_recovery",
+                                "pid": 999999999,
+                                "exit_code": -15,
+                                "status_problem": "watchdog:needs_recovery",
+                                "wake_next_agent_when": "Recover the failed background job.",
+                            }
+                        ],
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            result = run_scheduler(project, max_ticks=1)
+
+            selected = result["selected_action"]
+            self.assertEqual(selected["action"], "requires_attention", json.dumps(result, indent=2, sort_keys=True))
+            self.assertEqual(selected["selected"]["type"], "background_job_needs_recovery")
+            self.assertEqual(selected["selected"]["job_id"], "bg_needs_recovery")
+            self.assertIn("background_job_needs_recovery", selected["blocking_conditions"])
+            self.assertEqual(result["stopped_reason"], "requires_attention")
+            state = json.loads((project / ".loopplane" / "runtime" / "state.json").read_text(encoding="utf-8"))
+            self.assertEqual(state["status"], "requires_attention")
+            self.assertEqual(state["scheduler"]["active_background_job_id"], "bg_needs_recovery")
+            self.assertEqual(state["scheduler"]["active_background_job_status"], "needs_recovery")
 
     def test_inferred_completed_background_job_without_next_prompt_ready_does_not_block(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -3512,6 +3602,26 @@ class SchedulerMainLoopTest(unittest.TestCase):
             payload = json.loads(completed.stdout)
             self.assertEqual(payload["status"], "duplicate_scheduler")
             self.assertEqual(payload["exit_code"], EXIT_DUPLICATE_SCHEDULER)
+
+    def test_held_scheduler_lock_keepalive_refreshes_heartbeat(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "Scheduler lock keepalive smoke.")
+            context_result = load_scheduler_context(project)
+            self.assertTrue(context_result["ok"], context_result)
+            context = context_result["context"]
+            lock = AtomicOwnerLock(
+                context.paths.runtime_dir / "lock" / "scheduler_instance_lock",
+                "test-keepalive-owner",
+                ttl_seconds=2,
+            )
+            with lock.acquire() as held:
+                before_mtime = lock.owner_path.stat().st_mtime_ns
+                with held.keepalive(interval_seconds=0.05):
+                    time.sleep(0.12)
+                after_mtime = lock.owner_path.stat().st_mtime_ns
+
+            self.assertGreater(after_mtime, before_mtime)
 
     def test_scheduler_reclaims_stale_dead_owner_lock_before_running(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

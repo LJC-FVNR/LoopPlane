@@ -4896,10 +4896,10 @@ def _change_request_statuses_for_read_model(
             elif latest_status == "failed":
                 status = "failed"
             elif patch_file:
-                requires_approval = bool(_mapping(latest.get("impact")).get("requires_approval"))
+                requires_approval = bool(_mapping_or_empty(latest.get("impact")).get("requires_approval"))
                 if requires_approval:
                     approval = _approval_status_for_change_request(approvals, approval_responses, str(approval_id or ""))
-                    approval_status = str(_mapping(approval).get("status") or "")
+                    approval_status = str(_mapping_or_empty(approval).get("status") or "")
                     if approval_status == "approved":
                         status = "approved"
                     elif approval_status == "superseded":

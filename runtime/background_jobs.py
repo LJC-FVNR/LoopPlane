@@ -523,6 +523,13 @@ def _run_supervisor(project: Path, *, workflow_id: str, job_id: str, launch_path
     if loaded.get("ok") is not True:
         return EXIT_INVALID_CONFIG
     paths = loaded["paths"]
+    workflow_config = loaded.get("workflow_config") if isinstance(loaded.get("workflow_config"), Mapping) else {}
+    execution_config = (
+        workflow_config.get("execution")
+        if isinstance(workflow_config, Mapping) and isinstance(workflow_config.get("execution"), Mapping)
+        else {}
+    )
+    continue_on_fail = execution_config.get("continue_on_fail") is True
     try:
         launch = json.loads(launch_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
@@ -712,15 +719,12 @@ def _run_supervisor(project: Path, *, workflow_id: str, job_id: str, launch_path
                             job_id=job_id,
                             update=lambda job: _supervisor_terminal_update(
                                 job,
-                                {
-                                    "status": final_status,
-                                    "next_prompt_ready": final_status in BACKGROUND_JOB_SAFE_STATUSES,
-                                    "exit_code": process.returncode if process.returncode is not None else -1,
-                                    "ended_at": utc_timestamp(),
-                                    "updated_at": utc_timestamp(),
-                                    "heartbeat_at": utc_timestamp(),
-                                    "status_problem": watchdog_result.get("status_problem") or f"watchdog:{final_status}",
-                                },
+                                _background_terminal_update(
+                                    final_status=final_status,
+                                    exit_code=process.returncode if process.returncode is not None else -1,
+                                    continue_on_fail=continue_on_fail,
+                                    status_problem=watchdog_result.get("status_problem") or f"watchdog:{final_status}",
+                                ),
                             ),
                         )
                         preserved_status = _job_supervisor_stop_status_from_record(final_job)
@@ -809,20 +813,54 @@ def _run_supervisor(project: Path, *, workflow_id: str, job_id: str, launch_path
         job_id=job_id,
         update=lambda job: _supervisor_terminal_update(
             job,
-            {
-                "status": final_status,
-                "next_prompt_ready": final_status in BACKGROUND_JOB_SAFE_STATUSES,
-                "exit_code": exit_code,
-                "ended_at": utc_timestamp(),
-                "updated_at": utc_timestamp(),
-                "heartbeat_at": utc_timestamp(),
-            },
+            _background_terminal_update(
+                final_status=final_status,
+                exit_code=exit_code,
+                continue_on_fail=continue_on_fail,
+            ),
         ),
     )
     preserved_status = _job_supervisor_stop_status_from_record(final_job)
     if preserved_status is not None and preserved_status != final_status:
         _append_log(supervisor_log, f"final_update_preserved status={preserved_status} exit_code={exit_code}")
     return 0
+
+
+def _background_terminal_update(
+    *,
+    final_status: str,
+    exit_code: int,
+    continue_on_fail: bool,
+    status_problem: object | None = None,
+) -> dict[str, Any]:
+    now = utc_timestamp()
+    update: dict[str, Any] = {
+        "status": final_status,
+        "next_prompt_ready": final_status in BACKGROUND_JOB_SAFE_STATUSES,
+        "exit_code": exit_code,
+        "ended_at": now,
+        "updated_at": now,
+        "heartbeat_at": now,
+    }
+    if status_problem is not None:
+        update["status_problem"] = status_problem
+    if continue_on_fail and final_status in {"failed", "timed_out", "needs_recovery"}:
+        update.update(
+            {
+                "status": "cancelled",
+                "next_prompt_ready": True,
+                "status_problem": None,
+                "original_terminal_status": final_status,
+                "original_status_problem": status_problem,
+                "auto_resolved_for_continue_on_fail": True,
+                "auto_resolution_reason": (
+                    "The background command's terminal failure remains recorded by original_terminal_status, "
+                    "exit_code, logs, and watchdog evidence. execution.continue_on_fail=true releases the "
+                    "scheduler so the pending task can be retried or redesigned; this is not acceptance."
+                ),
+            }
+        )
+    return update
 
 
 def _run_watchdog_check(
@@ -1136,6 +1174,7 @@ def _load_project_paths(project_root: Path | str, *, workflow_id: str | None = N
         "project": context.project,
         "paths": context.paths,
         "workflow_id": context.workflow_id,
+        "workflow_config": dict(context.workflow_config),
     }
 
 
@@ -1308,6 +1347,23 @@ def _refresh_job(project: Path, paths: Any, job: Mapping[str, Any]) -> dict[str,
         age = max(0, int((datetime.now(UTC) - heartbeat).total_seconds()))
         refreshed["heartbeat_age_seconds"] = age
         if age > BACKGROUND_JOB_TTL_SECONDS:
+            child_pid = _positive_int(refreshed.get("pid") or refreshed.get("child_pid"))
+            supervisor_pid = _positive_int(refreshed.get("supervisor_pid"))
+            if (
+                child_pid is not None
+                and supervisor_pid is not None
+                and _pid_exists(child_pid)
+                and _pid_exists(supervisor_pid)
+            ):
+                # Both independently recorded process levels are live.  This
+                # covers synchronous watchdog inspections (which cannot emit a
+                # heartbeat while the inspector runs) and a registry snapshot
+                # race which may momentarily hide current_check_id.  Preserve
+                # the workload instead of converting healthy compute to stale.
+                refreshed["next_prompt_ready"] = False
+                if refreshed.get("status_problem") == "stale_heartbeat":
+                    refreshed.pop("status_problem", None)
+                return refreshed
             refreshed["status"] = "stale"
             refreshed["status_problem"] = "stale_heartbeat"
             refreshed["next_prompt_ready"] = False
@@ -1321,6 +1377,8 @@ def _refresh_job(project: Path, paths: Any, job: Mapping[str, Any]) -> dict[str,
             refreshed["status_problem"] = "process_not_live"
             refreshed["next_prompt_ready"] = False
             return refreshed
+        if refreshed.get("status_problem") in {"stale_heartbeat", "process_not_live", "missing_parseable_heartbeat"}:
+            refreshed.pop("status_problem", None)
         refreshed["next_prompt_ready"] = False
     return refreshed
 

@@ -19,7 +19,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from runtime.exit_codes import EXIT_INVALID_CONFIG, EXIT_SUCCESS
-from runtime.init_workflow import init_project
+from runtime.init_workflow import LAYOUT_CANONICAL_V16, init_project
 from runtime.skill_package import (
     ACCEPTED_MVP_DEFERRED_RELEASE_ITEMS,
     PACKAGE_FILE_REQUIREMENT_GROUPS,
@@ -2032,6 +2032,46 @@ class SkillPackageUpdateTest(unittest.TestCase):
             _assert_project_agent_skill_projection(self, project)
 
     @unittest.skipIf(shutil.which("git") is None, "git is not available")
+    def test_cli_skill_update_resolves_current_canonical_workflow(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project = Path(tmp) / "canonical-project"
+            env = _env_with_cli_fixtures(root)
+            initialized = init_project(project, "Canonical update fixture.", layout=LAYOUT_CANONICAL_V16)
+
+            result = run_loopplane("skill", "update", "--target", str(project), "--json", env=env)
+
+            self.assertEqual(result.returncode, EXIT_SUCCESS, result.stderr + result.stdout)
+            payload = json.loads(result.stdout)
+            self.assertTrue(payload["ok"], payload)
+            self.assertEqual(payload["status"], "updated")
+            self.assertEqual(payload["workflow_id"], initialized.workflow_id)
+            workflow_root = f".loopplane/workflows/{initialized.workflow_id}"
+            self.assertEqual(payload["layout"], "canonical_v16")
+            self.assertEqual(payload["workflow_root"], workflow_root)
+            self.assertIn(f"{workflow_root}/PROJECT_BRIEF.md", payload["protected_paths"])
+            self.assertIn(".loopplane/config/package_manifest.json", payload["created"])
+            instance = json.loads((project / ".loopplane" / "config" / "instance.json").read_text(encoding="utf-8"))
+            defaults = json.loads(
+                (project / ".loopplane" / "config" / "workflow_defaults.json").read_text(encoding="utf-8")
+            )
+            manifest = json.loads(
+                (project / ".loopplane" / "config" / "package_manifest.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(instance["layout"], "canonical_v16")
+            self.assertEqual(instance["workflow_root"], workflow_root)
+            self.assertEqual(instance["current_workflow_id"], initialized.workflow_id)
+            self.assertEqual(defaults["layout"], "canonical_v16")
+            self.assertEqual(defaults["workflow_root"], workflow_root)
+            self.assertEqual(defaults["runtime_dir"], f"{workflow_root}/runtime")
+            self.assertEqual(manifest["layout"], "canonical_v16")
+            self.assertEqual(manifest["workflow_root"], workflow_root)
+            self.assertEqual(manifest["workflow_id"], initialized.workflow_id)
+            self.assertFalse((project / ".loopplane" / "runtime").exists())
+            self.assertTrue((project / workflow_root / "runtime").is_dir())
+            _assert_project_agent_skill_projection(self, project)
+
+    @unittest.skipIf(shutil.which("git") is None, "git is not available")
     def test_cli_skill_update_text_does_real_work(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -2268,13 +2308,14 @@ class SkillPackageCommandNonStubTest(unittest.TestCase):
     @unittest.skipIf(shutil.which("git") is None, "git is not available")
     def test_skill_commands_do_real_work_and_do_not_route_to_stub(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
+            env = _env_with_cli_fixtures(Path(tmp))
             project = Path(tmp) / "project"
             artifact = Path(tmp) / "loopplane-skill.zip"
             commands = [
-                ("doctor", run_loopplane("skill", "doctor", "--json")),
-                ("install", run_loopplane("skill", "install", "--target", str(project), "--json")),
-                ("update", run_loopplane("skill", "update", "--target", str(project), "--json")),
-                ("pack", run_loopplane("skill", "pack", "--output", str(artifact), "--json")),
+                ("doctor", run_loopplane("skill", "doctor", "--json", env=env)),
+                ("install", run_loopplane("skill", "install", "--target", str(project), "--json", env=env)),
+                ("update", run_loopplane("skill", "update", "--target", str(project), "--json", env=env)),
+                ("pack", run_loopplane("skill", "pack", "--output", str(artifact), "--json", env=env)),
             ]
 
             for name, result in commands:

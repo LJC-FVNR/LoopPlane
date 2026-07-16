@@ -153,6 +153,35 @@ class ControlRequestCliTest(unittest.TestCase):
             self.assertEqual(status["pending_count"], 0)
             self.assertEqual(status["applied_count"], 1)
 
+            # A resolved attention incident must not remain as a stale
+            # dashboard banner after execution is explicitly resumed.
+            state_path = project / ".loopplane" / "runtime" / "state.json"
+            attention_state = json.loads(state_path.read_text(encoding="utf-8"))
+            attention_state["requires_attention"] = [
+                {
+                    "type": "background_job_needs_recovery",
+                    "request_id": "P0.T001",
+                    "task_id": "P0.T001",
+                    "status": "requires_attention",
+                    "message": "resolved test incident",
+                    "reason": "resolved test incident",
+                    "created_at": "2026-01-01T00:00:00Z",
+                }
+            ]
+            attention_state["scheduler"].update(
+                {
+                    "requires_attention_id": "P0.T001",
+                    "requires_attention_type": "background_job_needs_recovery",
+                    "active_background_job_id": "bg_resolved",
+                    "active_background_job_status": "failed",
+                    "wake_next_agent_when": "manual repair",
+                }
+            )
+            state_path.write_text(
+                json.dumps(attention_state, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+
             resume = run_loopplane("resume", "--project", str(project))
             self.assertEqual(resume["request"]["type"], "resume")
             resume_result = run_scheduler(project, max_ticks=1)
@@ -162,6 +191,12 @@ class ControlRequestCliTest(unittest.TestCase):
             resumed_state = json.loads((project / ".loopplane" / "runtime" / "state.json").read_text(encoding="utf-8"))
             self.assertEqual(resumed_state["status"], "running")
             self.assertFalse(resumed_state["scheduler"]["paused"])
+            self.assertEqual(resumed_state["requires_attention"], [])
+            self.assertIsNone(resumed_state["scheduler"]["requires_attention_id"])
+            self.assertIsNone(resumed_state["scheduler"]["requires_attention_type"])
+            self.assertIsNone(resumed_state["scheduler"]["active_background_job_id"])
+            self.assertIsNone(resumed_state["scheduler"]["active_background_job_status"])
+            self.assertIsNone(resumed_state["scheduler"]["wake_next_agent_when"])
             self.assertEqual(registry_status(), "running")
             runnable_action = select_next_action(load_scheduler_snapshot(project))
             self.assertEqual(runnable_action["action"], "run_worker")

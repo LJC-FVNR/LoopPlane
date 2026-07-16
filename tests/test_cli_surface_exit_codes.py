@@ -9,6 +9,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from runtime.adapters.base import utc_timestamp
 from runtime.exit_codes import (
     EXIT_DUPLICATE_SCHEDULER,
     EXIT_FAILURE_BUDGET_EXHAUSTED,
@@ -362,7 +363,14 @@ class CliExitCodeContractTest(unittest.TestCase):
             write_active_plan(project)
             write_json(
                 project / ".loopplane" / "runtime" / "background_jobs.json",
-                [{"job_id": "job1", "status": "running", "next_prompt_ready": False}],
+                [
+                    {
+                        "job_id": "job1",
+                        "status": "running",
+                        "next_prompt_ready": False,
+                        "heartbeat_at": utc_timestamp(),
+                    }
+                ],
             )
 
             result = run_loopplane("run", "--project", str(project), "--json")

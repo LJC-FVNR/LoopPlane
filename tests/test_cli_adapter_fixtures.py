@@ -7,11 +7,13 @@ import sys
 import tempfile
 import unittest
 from collections.abc import Mapping
+from datetime import UTC, datetime
 from pathlib import Path
 
 from runtime.adapters.base import AdapterInput, AdapterOutput
 from runtime.adapters.claude_code_cli_adapter import ClaudeCodeCliAdapter
 from runtime.adapters.codex_cli_adapter import CodexCliAdapter
+from runtime.adapters.runner_availability import _cooldown_seconds_from_retry_at, _match_builtin_classifier
 from runtime.adapters.shell_adapter import ShellAdapter
 from runtime.agent_runners import RunnerConfig
 from runtime.exit_codes import ADAPTER_POLICY_BLOCKED_EXIT_CODE, ADAPTER_TIMEOUT_EXIT_CODE
@@ -145,7 +147,6 @@ class CliAdapterFixtureIntegrationTest(unittest.TestCase):
                     "--ask-for-approval",
                     "never",
                     "exec",
-                    "--json",
                     "--skip-git-repo-check",
                     "--sandbox",
                     "danger-full-access",
@@ -179,7 +180,6 @@ class CliAdapterFixtureIntegrationTest(unittest.TestCase):
                     "--ask-for-approval",
                     "never",
                     "exec",
-                    "--json",
                     "--skip-git-repo-check",
                     "--sandbox",
                     "danger-full-access",
@@ -215,7 +215,6 @@ class CliAdapterFixtureIntegrationTest(unittest.TestCase):
                     "gpt-5.1-codex",
                     "-c",
                     'model_reasoning_effort="xhigh"',
-                    "--json",
                     "--skip-git-repo-check",
                     "--sandbox",
                     "danger-full-access",
@@ -463,7 +462,6 @@ class CliAdapterFixtureIntegrationTest(unittest.TestCase):
                     "--ask-for-approval",
                     "never",
                     "exec",
-                    "--json",
                     "--skip-git-repo-check",
                     "--sandbox",
                     "danger-full-access",
@@ -503,7 +501,6 @@ class CliAdapterFixtureIntegrationTest(unittest.TestCase):
                     "never",
                     "exec",
                     "--fail",
-                    "--json",
                     "--skip-git-repo-check",
                     "--sandbox",
                     "danger-full-access",
@@ -539,6 +536,75 @@ class CliAdapterFixtureIntegrationTest(unittest.TestCase):
             self.assertEqual(availability["retry_after_seconds"], 18000)
             self.assertIn("cooldown_until", availability)
             self.assert_adapter_contract(result, current_input)
+
+    def test_usage_limit_absolute_retry_time_uses_short_cooldown(self) -> None:
+        now = datetime(2026, 6, 27, 20, 58, 0, tzinfo=UTC)
+
+        cooldown = _cooldown_seconds_from_retry_at(
+            "ERROR: You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage "
+            "to purchase more credits or try again at 9:05 PM.",
+            now=now,
+        )
+
+        self.assertEqual(cooldown, 480)
+
+    def test_usage_limit_elapsed_absolute_retry_time_does_not_hold_until_next_day(self) -> None:
+        now = datetime(2026, 6, 27, 22, 12, 0, tzinfo=UTC)
+
+        cooldown = _cooldown_seconds_from_retry_at(
+            "ERROR: You've hit your usage limit. Try again at 9:05 PM.",
+            now=now,
+        )
+
+        self.assertEqual(cooldown, 60)
+
+    def test_bare_prompt_line_number_402_is_not_billing_evidence(self) -> None:
+        match = _match_builtin_classifier(
+            {
+                "stderr": "402- - approval: not_required\n",
+                "stdout": "",
+                "final_output": "",
+            }
+        )
+
+        self.assertIsNone(match)
+
+    def test_http_402_remains_billing_evidence(self) -> None:
+        match = _match_builtin_classifier(
+            {
+                "stderr": "HTTP 402: payment required\n",
+                "stdout": "",
+                "final_output": "",
+            }
+        )
+
+        self.assertIsNotNone(match)
+        assert match is not None
+        self.assertEqual(match["reason_class"], "billing_required")
+
+    def test_bare_numeric_status_like_file_sizes_are_not_availability_evidence(self) -> None:
+        match = _match_builtin_classifier(
+            {
+                "stderr": "-rwxrwxr-x 1 nvidia nvidia 429 Apr 2 06:51 write_spec.sh\n",
+                "stdout": "source lines 401 503 529\n",
+                "final_output": "",
+            }
+        )
+
+        self.assertIsNone(match)
+
+    def test_http_429_remains_rate_limit_evidence(self) -> None:
+        match = _match_builtin_classifier(
+            {
+                "stderr": "HTTP status 429: too many requests\n",
+                "stdout": "",
+                "final_output": "",
+            }
+        )
+
+        self.assertIsNotNone(match)
+        assert match is not None
+        self.assertEqual(match["reason_class"], "rate_limited")
 
     def test_shell_adapter_accepts_custom_runner_availability_classifier(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -4501,7 +4501,7 @@ def _workspace_path_policy(
 
     configured_includes, configured_excludes = _configured_path_policy(config)
     excludes = [*configured_excludes, *extra_excludes]
-    pathspecs = ["."]
+    pathspecs = list(configured_includes) if configured_includes else ["."]
     for exclude in excludes:
         if _is_git_internal_path(exclude):
             continue

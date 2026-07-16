@@ -1,20 +1,23 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import tempfile
 import textwrap
 import time
 import unittest
+from unittest import mock
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
-from runtime.detached import _should_continue_after_tick, load_supervisor_status
+from runtime.detached import _should_continue_after_tick, load_supervisor_status, run_supervisor
 from runtime.init_workflow import init_project
 from runtime.plan_objectives import objective_structure_fingerprint, parse_plan_objectives
+from runtime.scheduler import SchedulerLockError
 from tests.test_objective_gates import configure_fake_objective_verifier
 
 
@@ -327,6 +330,36 @@ def write_stale_supervisor_metadata(
 
 
 class DetachedRuntimeTest(unittest.TestCase):
+    def test_supervisor_retries_transient_scheduler_authority_lock_contention(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "Detached scheduler lock-contention retry.")
+            completed_tick = {
+                "ok": True,
+                "status": "ok",
+                "exit_code": 0,
+                "selected_action": {
+                    "action": "complete",
+                    "reason": "Workflow is complete.",
+                    "selected": {},
+                },
+            }
+            lock_error = SchedulerLockError(
+                f"lock is already held: {project}/.loopplane/runtime/lock/event_append_lock/owner.json"
+            )
+
+            with mock.patch(
+                "runtime.detached.run_scheduler",
+                side_effect=[lock_error, completed_tick],
+            ) as run_scheduler_mock, mock.patch("runtime.detached.time.sleep"):
+                exit_code = run_supervisor(project)
+
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(run_scheduler_mock.call_count, 2)
+            status = load_supervisor_status(project)
+            self.assertEqual(status["metadata"]["last_loop_reason"], "complete")
+            self.assertNotEqual(status["metadata"].get("stop_reason"), "exception:SchedulerLockError")
+
     def test_detached_supervisor_continues_after_recoverable_validation_follow_up_failure(self) -> None:
         selected = {"action": "run_worker"}
         follow_up = {
@@ -814,6 +847,65 @@ class DetachedRuntimeTest(unittest.TestCase):
             self.assertEqual(status["status"], "stale")
             self.assertEqual(status["liveness"], "dead")
             self.assertTrue(status["heartbeat_stale"])
+
+    def test_supervisor_status_accepts_fresh_owned_active_run_lease_heartbeat(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "Active lease covers blocking supervisor tick.")
+            runtime_dir = project / ".loopplane" / "runtime"
+            metadata_path = runtime_dir / "supervisor.json"
+            old = (datetime.now(UTC) - timedelta(minutes=10)).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+            now = datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+            metadata_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "1.5",
+                        "workflow_id": "wf_test",
+                        "project_root": project.as_posix(),
+                        "status": "running",
+                        "pid": os.getpid(),
+                        "started_at": old,
+                        "updated_at": old,
+                        "heartbeat_at": old,
+                        "command": [sys.executable, "-m", "runtime.detached", "supervisor"],
+                        "log_paths": {"stdout": "supervisor_stdout.log", "stderr": "supervisor_stderr.log"},
+                        "exit_status": None,
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            lease_dir = runtime_dir / "active_run_leases"
+            lease_dir.mkdir(parents=True, exist_ok=True)
+            (lease_dir / "run_live.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "1.5",
+                        "workflow_id": "wf_test",
+                        "run_id": "run_live",
+                        "status": "running",
+                        "heartbeat_at": now,
+                        "adapter_pid": os.getpid(),
+                        "scheduler_pid": os.getpid(),
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            status = load_supervisor_status(project)
+
+            self.assertEqual(status["status"], "running")
+            self.assertEqual(status["liveness"], "alive")
+            self.assertFalse(status["heartbeat_stale"])
+            self.assertTrue(status["metadata_heartbeat_stale"])
+            self.assertTrue(status["heartbeat_covered_by_active_run_lease"])
+            self.assertEqual(status["active_run_lease_id"], "run_live")
+            self.assertEqual(status["warnings"], [])
 
 
 if __name__ == "__main__":

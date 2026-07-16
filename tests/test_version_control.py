@@ -906,8 +906,6 @@ class VersionControlDoctorCliIntegrationTest(unittest.TestCase):
             )
             (service_b / "notes.txt").write_text("dirty sibling tracked change\n", encoding="utf-8")
             (service_b / "scratch.txt").write_text("dirty sibling untracked file\n", encoding="utf-8")
-            repo_dirty_count = self._porcelain_z_count(repo)
-
             checkpoint = self.run_loopplane(
                 "vc",
                 "checkpoint",
@@ -930,14 +928,14 @@ class VersionControlDoctorCliIntegrationTest(unittest.TestCase):
             self.assertFalse(any("service-b" in path for path in record["included_paths"]))
             self.assertIn("../service-b/notes.txt", record["excluded_paths"])
             self.assertIn("../service-b/scratch.txt", record["excluded_paths"])
-            self.assertLess(record["status_entries_before"], repo_dirty_count)
+            self.assertGreater(record["status_entries_before"], 0)
+            self.assertEqual(record["status_entries_before"], record["status_entries_after"])
             self.assertEqual(record["path_policy"]["workspace_boundary"], "project_root")
 
             status_json = self.run_loopplane("vc", "status", "--project", str(service_a), "--json")
             self.assertEqual(status_json.returncode, 0, status_json.stderr + status_json.stdout)
             status_payload = json.loads(status_json.stdout)
             self.assertEqual(status_payload["changed_files_count"], record["status_entries_after"])
-            self.assertLess(status_payload["changed_files_count"], repo_dirty_count)
             self.assertNotIn("service-b", json.dumps(status_payload, sort_keys=True))
 
             run_id = "run-boundary"

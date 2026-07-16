@@ -34,7 +34,7 @@ from runtime.agent_runners import (
 )
 from runtime.exit_codes import EXIT_INVALID_CONFIG, EXIT_SUCCESS
 from runtime.init_workflow import InitConflictError, InitResult, init_project
-from runtime.path_resolution import WORKFLOW_PATH_FIELDS, WorkflowPathError, WorkflowPaths
+from runtime.path_resolution import WORKFLOW_PATH_FIELDS, WorkflowPathError, WorkflowPaths, load_workflow_config
 from runtime.schema_validation import (
     RUNTIME_VERSION,
     validate_project_schemas,
@@ -7505,7 +7505,12 @@ def update_skill_project(target: Path | str) -> dict[str, Any]:
             errors=[f"{project}: target project does not exist or is not a directory"],
             conflicts=[],
         )
-    if not (project / ".loopplane" / "config" / "workflow.json").is_file():
+    has_flat_workflow = (project / ".loopplane" / "config" / "workflow.json").is_file()
+    has_current_workflow_metadata = (
+        (project / ".loopplane" / "current_workflow.json").is_file()
+        and (project / ".loopplane" / "workflow_registry.json").is_file()
+    )
+    if not has_flat_workflow and not has_current_workflow_metadata:
         return _update_failure(
             project=project,
             started_at=started_at,
@@ -7519,16 +7524,19 @@ def update_skill_project(target: Path | str) -> dict[str, Any]:
     preserved: list[str] = []
     created_directories: list[str] = []
     agent_skill_installations: list[dict[str, Any]] = []
+    layout = INSTALL_INSTANCE_PROFILE
+    workflow_root_value = ".loopplane"
     warnings = [
-        "Updated a v1.6-compatible flat workflow-root instance; canonical "
-        ".loopplane/workflows/<workflow_id>/ roots are available through explicit "
-        "workflow create, fork, or migration/import commands.",
+        "Updated LoopPlane-managed metadata for the current workflow root.",
         "Project brief, plan, shared context, runtime state, requests, approvals, "
         "read models, results, checkpoints, logs, and config/local files are preserved.",
     ]
     try:
-        workflow = _load_workflow(project)
+        workflow = load_workflow_config(project)
         paths = WorkflowPaths.from_config(project, workflow)
+        workflow_root_value = paths.workflow_root_value.rstrip("/")
+        if workflow_root_value != ".loopplane":
+            layout = "canonical_v16"
         _preflight_agent_skill_projection_conflicts(project, mode="update")
         created_directories.extend(_ensure_install_directories(project, paths))
         workspace = _ensure_workspace_identity(project, workflow, started_at, created, preserved)
@@ -7602,8 +7610,8 @@ def update_skill_project(target: Path | str) -> dict[str, Any]:
         "project_root": project.as_posix(),
         "workflow_id": str(workflow.get("workflow_id") or ""),
         "workspace_id": workspace.workspace_id,
-        "layout": INSTALL_INSTANCE_PROFILE,
-        "workflow_root": ".loopplane",
+        "layout": layout,
+        "workflow_root": workflow_root_value,
         "created": sorted(set(created)),
         "updated": sorted(set(updated)),
         "preserved": sorted(set(preserved)),
@@ -9353,6 +9361,7 @@ def _ensure_install_metadata_files(
     instance_file = project / ".loopplane" / "config" / "instance.json"
     defaults_file = project / ".loopplane" / "config" / "workflow_defaults.json"
     local_gitignore = project / ".loopplane" / "config" / "local" / ".gitignore"
+    layout, workflow_root = _install_layout_for_paths(paths)
 
     _ensure_current_pointer(
         current_file,
@@ -9380,16 +9389,16 @@ def _ensure_install_metadata_files(
         "current_workflow_id": workflow_id,
         "installed_at": installed_at,
         "installed_by": INSTALL_TOOL_VERSION,
-        "layout": INSTALL_INSTANCE_PROFILE,
-        "workflow_root": ".loopplane",
+        "layout": layout,
+        "workflow_root": workflow_root,
         "project_root": ".",
     }
     _write_new_json(instance_file, instance, project, created, preserved, preserve_existing_json_object=True)
 
     defaults = {
         "schema_version": "1.6",
-        "layout": INSTALL_INSTANCE_PROFILE,
-        "workflow_root": ".loopplane",
+        "layout": layout,
+        "workflow_root": workflow_root,
         "brief_file": paths.value("brief_file"),
         "plan_file": paths.value("plan_file"),
         "shared_context_file": paths.value("shared_context_file"),
@@ -9422,6 +9431,7 @@ def _ensure_update_metadata_files(
     defaults_file = project / ".loopplane" / "config" / "workflow_defaults.json"
     local_gitignore = project / ".loopplane" / "config" / "local" / ".gitignore"
     package_manifest_file = project / ".loopplane" / "config" / "package_manifest.json"
+    layout, workflow_root = _install_layout_for_paths(paths)
 
     _ensure_current_pointer(
         current_file,
@@ -9450,16 +9460,24 @@ def _ensure_update_metadata_files(
         "current_workflow_id": workflow_id,
         "installed_at": str(workflow.get("created_at") or updated_at),
         "installed_by": INSTALL_TOOL_VERSION,
-        "layout": INSTALL_INSTANCE_PROFILE,
-        "workflow_root": ".loopplane",
+        "layout": layout,
+        "workflow_root": workflow_root,
         "project_root": ".",
     }
-    _write_new_json(instance_file, instance, project, created, preserved, preserve_existing_json_object=True)
+    _write_managed_json(
+        instance_file,
+        instance,
+        project,
+        created,
+        updated,
+        preserved,
+        managed_schema_version="1.6",
+    )
 
     defaults = {
         "schema_version": "1.6",
-        "layout": INSTALL_INSTANCE_PROFILE,
-        "workflow_root": ".loopplane",
+        "layout": layout,
+        "workflow_root": workflow_root,
         "brief_file": paths.value("brief_file"),
         "plan_file": paths.value("plan_file"),
         "shared_context_file": paths.value("shared_context_file"),
@@ -9470,7 +9488,15 @@ def _ensure_update_metadata_files(
         "results_dir": paths.value("results_dir"),
         "version_control_config_file": paths.value("version_control_config_file"),
     }
-    _write_new_json(defaults_file, defaults, project, created, preserved, preserve_existing_json_object=True)
+    _write_managed_json(
+        defaults_file,
+        defaults,
+        project,
+        created,
+        updated,
+        preserved,
+        managed_schema_version="1.6",
+    )
     _ensure_local_gitignore_for_update(local_gitignore, project, created, preserved)
     _write_project_package_manifest(package_manifest_file, project, workflow, paths, created, updated, preserved)
 
@@ -9535,9 +9561,11 @@ def _ensure_workflow_registry(
     if not isinstance(workflows, Sequence) or isinstance(workflows, (str, bytes)):
         raise SkillInstallConflictError([f"{path}: workflows must be a list"])
     workflow_id = str(workflow["workflow_id"])
+    workflow_root = paths.workflow_root_value.rstrip("/")
+    allowed_workflow_roots = {workflow_root, f"{workflow_root}/"}
     for existing in workflows:
         if isinstance(existing, Mapping) and existing.get("workflow_id") == workflow_id:
-            if existing.get("workflow_root") not in (".loopplane", ".loopplane/"):
+            if existing.get("workflow_root") not in allowed_workflow_roots:
                 raise SkillInstallConflictError(
                     [
                         f"{path}: workflow {workflow_id} uses unsupported workflow_root "
@@ -9603,6 +9631,7 @@ def _write_project_package_manifest(
     metadata, metadata_errors, _metadata_warnings = _check_metadata(PACKAGE_ROOT)
     if metadata_errors:
         raise SkillUpdateConflictError([f"{PACKAGE_ROOT / 'skill.json'}: {error}" for error in metadata_errors])
+    layout, workflow_root = _install_layout_for_paths(paths)
 
     payload = {
         "schema_version": PROJECT_PACKAGE_MANIFEST_SCHEMA_VERSION,
@@ -9611,8 +9640,8 @@ def _write_project_package_manifest(
         "package_metadata_schema_version": str(metadata.get("schema_version") or ""),
         "runtime_version": RUNTIME_VERSION,
         "tool_version": INSTALL_TOOL_VERSION,
-        "layout": INSTALL_INSTANCE_PROFILE,
-        "workflow_root": ".loopplane",
+        "layout": layout,
+        "workflow_root": workflow_root,
         "project_root": ".",
         "workflow_id": str(workflow.get("workflow_id") or ""),
         "package_roots": sorted(str(item) for item in metadata.get("package_roots", []) if isinstance(item, str)),
@@ -9628,6 +9657,13 @@ def _write_project_package_manifest(
         preserved,
         managed_schema_version=PROJECT_PACKAGE_MANIFEST_SCHEMA_VERSION,
     )
+
+
+def _install_layout_for_paths(paths: WorkflowPaths) -> tuple[str, str]:
+    workflow_root = paths.workflow_root_value.rstrip("/") or ".loopplane"
+    if workflow_root == ".loopplane":
+        return INSTALL_INSTANCE_PROFILE, workflow_root
+    return "canonical_v16", workflow_root
 
 
 def _write_managed_json(

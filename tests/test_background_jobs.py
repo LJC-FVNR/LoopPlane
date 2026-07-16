@@ -212,6 +212,31 @@ class BackgroundJobRuntimeTest(unittest.TestCase):
             self.assertEqual(status["jobs"][0]["exit_code"], 0)
             self.assertEqual(marker.read_text(encoding="utf-8"), "done")
 
+    def test_continue_on_fail_releases_failed_background_job_without_hiding_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "Continue after a failed supervised background command.")
+            workflow_config = load_workflow_config(project)
+            workflow_config["execution"]["continue_on_fail"] = True
+            config_path = WorkflowPaths.from_config(project, workflow_config).config_file("workflow.json")
+            config_path.write_text(json.dumps(workflow_config, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+            result = start_background_job(
+                project,
+                command=[sys.executable, "-c", "raise SystemExit(3)"],
+                task_id="P0.T001",
+                run_id="run_background_continue_on_fail",
+            )
+
+            self.assertTrue(result["ok"], json.dumps(result, indent=2, sort_keys=True))
+            status = self._wait_for_job_status(project, result["job_id"], "cancelled")
+            job = status["jobs"][0]
+            self.assertTrue(job["next_prompt_ready"])
+            self.assertEqual(job["exit_code"], 3)
+            self.assertEqual(job["original_terminal_status"], "failed")
+            self.assertTrue(job["auto_resolved_for_continue_on_fail"])
+            self.assertIn("not acceptance", job["auto_resolution_reason"])
+
     def test_cli_background_start_returns_agent_status_fragment(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             project = Path(tmp) / "project"
@@ -644,6 +669,42 @@ class BackgroundJobRuntimeTest(unittest.TestCase):
             self.assertEqual(status["jobs"][0]["status"], "needs_recovery")
             self.assertEqual(status["jobs"][0]["status_problem"], "missing_parseable_heartbeat")
 
+    def test_live_synchronous_watchdog_covers_stale_heartbeat(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "A live synchronous watchdog covers its heartbeat gap.")
+            workflow_config = load_workflow_config(project)
+            workflow_id = str(workflow_config["workflow_id"])
+            paths = WorkflowPaths.from_config(project, workflow_config)
+            self._write_background_registry(
+                paths,
+                workflow_id,
+                [
+                    {
+                        "job_id": "live_watchdog_fixture",
+                        "workflow_id": workflow_id,
+                        "status": "running",
+                        "next_prompt_ready": False,
+                        "heartbeat_at": "2000-01-01T00:00:00Z",
+                        "pid": os.getpid(),
+                        "supervisor_pid": os.getpid(),
+                        "status_problem": "stale_heartbeat",
+                        "watchdog": {
+                            "enabled": True,
+                            "current_check_id": "watchdog_live_fixture",
+                            "current_check_started_at": "2000-01-01T00:00:00Z",
+                        },
+                    }
+                ],
+            )
+
+            status = list_background_jobs(project, job_id="live_watchdog_fixture")
+
+            job = status["jobs"][0]
+            self.assertEqual(job["status"], "running")
+            self.assertFalse(job["next_prompt_ready"])
+            self.assertNotIn("status_problem", job)
+
     def test_status_refresh_reconciles_completed_source_agent_status(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             project = Path(tmp) / "project"
@@ -743,6 +804,10 @@ class BackgroundJobRuntimeTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             project = Path(tmp) / "project"
             init_project(project, "Watchdog stops unhealthy background progress.")
+            workflow_config = load_workflow_config(project)
+            workflow_config["execution"]["continue_on_fail"] = False
+            config_path = WorkflowPaths.from_config(project, workflow_config).config_file("workflow.json")
+            config_path.write_text(json.dumps(workflow_config, indent=2, sort_keys=True) + "\n", encoding="utf-8")
             configure_watchdog_inspector(project)
 
             result = start_background_job(

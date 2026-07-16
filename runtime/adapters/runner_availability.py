@@ -14,11 +14,15 @@ DEFAULT_COOLDOWNS = {
     "usage_limit_exhausted": 18_000,
     "provider_overloaded": 300,
 }
+RETRY_AT_BUFFER_SECONDS = 60
 BUILTIN_ADAPTERS = frozenset({"codex_cli", "claude_code_cli"})
 BUILTIN_PATTERNS = (
     {
         "reason_class": "billing_required",
-        "pattern": r"\b(402|billing|payment required|spend limit|monthly budget)\b",
+        # A bare ``402`` commonly appears as a source/prompt line number (for
+        # example ``402- - approval: not_required``).  Require HTTP/error
+        # context before treating the numeric status as billing evidence.
+        "pattern": r"\b(?:billing|payment required|spend limit|monthly budget|(?:http(?: status)?|status(?: code)?|error)\s*[:=#-]?\s*402)\b",
         "requires_attention": True,
     },
     {
@@ -33,17 +37,17 @@ BUILTIN_PATTERNS = (
     },
     {
         "reason_class": "rate_limited",
-        "pattern": r"\b(rate limit|rate_limit|rate_limit_error|too many requests|429)\b",
+        "pattern": r"\b(?:rate limit|rate_limit|rate_limit_error|too many requests|(?:http(?: status)?|status(?: code)?|error)\s*[:=#-]?\s*429)\b",
         "cooldown_seconds": DEFAULT_COOLDOWNS["rate_limited"],
     },
     {
         "reason_class": "provider_overloaded",
-        "pattern": r"\b(overloaded|server overloaded|temporarily unavailable|503|529|overloaded_error)\b",
+        "pattern": r"\b(?:overloaded|server overloaded|temporarily unavailable|overloaded_error|(?:http(?: status)?|status(?: code)?|error)\s*[:=#-]?\s*(?:503|529))\b",
         "cooldown_seconds": DEFAULT_COOLDOWNS["provider_overloaded"],
     },
     {
         "reason_class": "auth_required",
-        "pattern": r"\b(authentication required|unauthorized|invalid api key|login required|401)\b",
+        "pattern": r"\b(?:authentication required|unauthorized|invalid api key|login required|(?:http(?: status)?|status(?: code)?|error)\s*[:=#-]?\s*401)\b",
         "requires_attention": True,
     },
 )
@@ -75,9 +79,13 @@ def classify_runner_availability(
     if match is None:
         return None
     reason_class = str(match.get("reason_class") or "unknown_runner_unavailable")
+    now = datetime.now(UTC)
     cooldown_seconds = _positive_int(match.get("cooldown_seconds"))
     if cooldown_seconds is None:
         cooldown_seconds = DEFAULT_COOLDOWNS.get(reason_class)
+    parsed_retry_after = _cooldown_seconds_from_retry_at(str(match.get("message") or ""), now=now)
+    if parsed_retry_after is not None:
+        cooldown_seconds = parsed_retry_after
     requires_attention = bool(match.get("requires_attention"))
     if cooldown_seconds is None:
         requires_attention = True
@@ -104,7 +112,7 @@ def classify_runner_availability(
     }
     if cooldown_seconds is not None and cooldown_seconds > 0:
         record["retry_after_seconds"] = cooldown_seconds
-        record["cooldown_until"] = (datetime.now(UTC) + timedelta(seconds=cooldown_seconds)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        record["cooldown_until"] = (now + timedelta(seconds=cooldown_seconds)).strftime("%Y-%m-%dT%H:%M:%SZ")
     return record
 
 
@@ -181,7 +189,7 @@ def _match_builtin_classifier(sources: Mapping[str, str]) -> dict[str, Any] | No
                     **pattern,
                     "source": source_name,
                     "matched_pattern": pattern["pattern"],
-                    "message": found.group(0),
+                    "message": _matched_line(text, found),
                 }
     return None
 
@@ -191,6 +199,42 @@ def _regex_search(pattern: str, text: str) -> re.Match[str] | None:
         return re.search(pattern, text, flags=re.IGNORECASE)
     except re.error:
         return None
+
+
+def _matched_line(text: str, found: re.Match[str]) -> str:
+    start = text.rfind("\n", 0, found.start()) + 1
+    end = text.find("\n", found.end())
+    if end == -1:
+        end = len(text)
+    return text[start:end].strip() or found.group(0)
+
+
+def _cooldown_seconds_from_retry_at(message: str, *, now: datetime) -> int | None:
+    found = re.search(
+        r"\btry again (?:at|after)\s+(?P<hour>\d{1,2})(?::(?P<minute>\d{2}))?\s*(?P<period>[ap]\.?m\.?)\b",
+        message,
+        flags=re.IGNORECASE,
+    )
+    if not found:
+        return None
+    hour = int(found.group("hour"))
+    minute = int(found.group("minute") or "0")
+    if hour < 1 or hour > 12 or minute > 59:
+        return None
+    period = found.group("period").lower().replace(".", "")
+    if period == "pm" and hour != 12:
+        hour += 12
+    elif period == "am" and hour == 12:
+        hour = 0
+    target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    seconds = int((target - now).total_seconds())
+    if seconds <= 0:
+        # A just-expired absolute retry time should not become a next-day hold.
+        if seconds >= -12 * 60 * 60:
+            return RETRY_AT_BUFFER_SECONDS
+        target += timedelta(days=1)
+        seconds = int((target - now).total_seconds())
+    return max(RETRY_AT_BUFFER_SECONDS, seconds + RETRY_AT_BUFFER_SECONDS)
 
 
 def _availability_fingerprint(*, adapter: str, reason_class: str, scope: Mapping[str, str], message: str) -> str:

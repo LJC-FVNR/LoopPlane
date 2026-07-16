@@ -246,7 +246,7 @@ def build_smoke_context(root: Path) -> SmokeContext:
     prepare_dashboard_project(dashboard_project)
     configure_noop_runner(plan_project, "planner", "planner", env=env)
     configure_noop_runner(plan_project, "auditor", "auditor", env=env)
-    install = run_cli(["skill", "install", "--target", str(update_target), "--json"])
+    install = run_cli(["skill", "install", "--target", str(update_target), "--json"], env=env)
     if install.returncode != 0:
         raise AssertionError(install.stderr + install.stdout)
     return SmokeContext(
