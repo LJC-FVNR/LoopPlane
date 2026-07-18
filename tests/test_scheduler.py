@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+import threading
 import time
 import unittest
 from datetime import UTC, datetime, timedelta
@@ -250,6 +251,50 @@ def authoritative_file_hashes(project: Path) -> dict[str, str]:
 
 
 class SchedulerSelectionTest(unittest.TestCase):
+    def test_all_unhealthy_failover_runners_return_no_runner(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "Do not spin when every expansion runner is unhealthy.")
+            config_path = project / ".loopplane" / "config" / "agent_runners.json"
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+            config["runners"]["worker_fallback"]["enabled"] = True
+            config_path.write_text(json.dumps(config, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+            observed_at = timestamp()
+            health = {
+                "schema_version": "1.5",
+                "workflow_id": json.loads(
+                    (project / ".loopplane" / "config" / "workflow.json").read_text(encoding="utf-8")
+                )["workflow_id"],
+                "runners": {},
+            }
+            for runner_id in ("expansion_planner", "expansion_planner_fallback"):
+                health["runners"][runner_id] = {
+                    "runner_id": runner_id,
+                    "events": [
+                        {"observed_at": observed_at, "scope": "runner_failure"},
+                        {"observed_at": observed_at, "scope": "runner_failure"},
+                        {"observed_at": observed_at, "scope": "runner_failure"},
+                    ],
+                }
+            write_json(project / ".loopplane" / "runtime" / "runner_health.json", health)
+
+            snapshot = load_scheduler_snapshot(project)
+
+            self.assertIsNone(scheduler_module._runner_for_role(snapshot, "expansion_planner"))
+
+    def test_planner_adapter_failure_counts_as_runner_failure(self) -> None:
+        scope = scheduler_module._runner_health_event_scope(
+            {
+                "ok": False,
+                "adapter_exit_code": 127,
+                "adapter_timed_out": False,
+                "agent_status_problem": "missing",
+            }
+        )
+
+        self.assertEqual(scope, "runner_failure")
+
     def test_scheduler_text_includes_worker_evidence_paths(self) -> None:
         text = format_scheduler_text(
             {
@@ -668,11 +713,102 @@ class SchedulerSelectionTest(unittest.TestCase):
             self.assertEqual(action["selected"]["job"]["status"], "running")
             self.assertNotIn("status_problem", action["selected"]["job"])
 
-    def test_needs_recovery_background_job_requires_attention_instead_of_waiting_forever(self) -> None:
+    def test_recovered_failed_background_does_not_mask_live_replacement(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             project = Path(tmp) / "project"
-            init_project(project, "Needs-recovery background job should not wait forever.")
+            init_project(project, "A live recovery replacement blocks duplicate task execution.")
             write_active_plan(project, {"P0.T001": " ", "P1.T001": " "})
+            write_json(
+                project / ".loopplane" / "runtime" / "background_jobs.json",
+                {
+                    "schema_version": "1.5",
+                    "workflow_id": "wf_test",
+                    "jobs": [
+                        {
+                            "job_id": "bg_original_failed",
+                            "task_id": "P0.T001",
+                            "run_id": "run_original",
+                            "status": "failed",
+                            "next_prompt_ready": False,
+                            "exit_code": 1,
+                        },
+                        {
+                            "job_id": "bg_recovery_running",
+                            "task_id": "P0.T001",
+                            "run_id": "run_recovery",
+                            "status": "running",
+                            "next_prompt_ready": False,
+                            "heartbeat_at": datetime.now(UTC).isoformat(),
+                        },
+                    ],
+                },
+            )
+            write_json(
+                project / ".loopplane" / "runtime" / "failure_registry.json",
+                {
+                    "schema_version": "1.5",
+                    "workflow_id": "wf_test",
+                    "failures": [
+                        {
+                            "failure_id": "fail_original_background",
+                            "task_id": "P0.T001",
+                            "run_id": "run_original",
+                            "status": "recovered",
+                            "failure_class": "background_job_failed",
+                            "source_background_job_id": "bg_original_failed",
+                        }
+                    ],
+                },
+            )
+
+            action = select_next_action(load_scheduler_snapshot(project))
+
+            self.assertEqual(action["action"], "wait_background_job")
+            self.assertEqual(action["selected"]["job_id"], "bg_recovery_running")
+            self.assertEqual(action["selected"]["job"]["status"], "running")
+
+    def test_needs_recovery_background_job_dispatches_autonomous_recovery(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "Needs-recovery background job should self-repair.")
+            write_active_plan(project, {"P0.T001": " ", "P1.T001": " "})
+            recovery_script = write_worker_script(
+                project,
+                "background_recovery.py",
+                """
+                import json
+                import os
+                from pathlib import Path
+
+                run_dir = Path(os.environ["LOOPPLANE_TASK_EVIDENCE_RUN_DIR"])
+                run_dir.mkdir(parents=True, exist_ok=True)
+                prompt = Path(os.environ["LOOPPLANE_PROMPT_PATH"]).read_text(encoding="utf-8")
+                (run_dir / "report.md").write_text("# Background recovery completed\\n", encoding="utf-8")
+                (run_dir / "commands.sh").write_text("python background_recovery.py\\n", encoding="utf-8")
+                status = {
+                    "schema_version": "1.5",
+                    "run_id": os.environ["LOOPPLANE_RUN_ID"],
+                    "task_id": os.environ["LOOPPLANE_TASK_ID"],
+                    "primary_task_id": os.environ["LOOPPLANE_TASK_ID"],
+                    "phase": "Phase P0: Scheduler Fixture",
+                    "status": "completed",
+                    "next_prompt_ready": True,
+                    "project_changes": [],
+                    "commands_run": [{"cmd": "python background_recovery.py", "exit_code": 0}],
+                    "key_outputs": [str(run_dir / "report.md")],
+                    "evidence_satisfies": [],
+                    "validation_claim": {"claim": "recovery_completed", "checks_claimed": [], "limitations": []},
+                    "summary_candidate": {"one_line": "Recovered.", "highlights": [], "warnings": [], "blockers": []},
+                    "background": {"pids": [], "commands": [], "logs": [], "heartbeat_required": False, "wake_next_agent_when": None},
+                    "repair_attempts": [{"failure_signature": "background_job_failed", "new_information": "read logs and repaired task"}],
+                    "known_risks": [],
+                    "remaining_incomplete_items": [],
+                    "prompt_had_background_failure": "background_job_failed" in prompt,
+                }
+                (run_dir / "agent_status.json").write_text(json.dumps(status) + "\\n", encoding="utf-8")
+                """,
+            )
+            configure_shell_worker(project, recovery_script)
             registry_path = project / ".loopplane" / "runtime" / "background_jobs.json"
             registry_path.write_text(
                 json.dumps(
@@ -698,18 +834,25 @@ class SchedulerSelectionTest(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            result = run_scheduler(project, max_ticks=1)
+            result = run_scheduler(
+                project, max_ticks=1, lease_heartbeat_interval_seconds=0.05
+            )
 
             selected = result["selected_action"]
-            self.assertEqual(selected["action"], "requires_attention", json.dumps(result, indent=2, sort_keys=True))
-            self.assertEqual(selected["selected"]["type"], "background_job_needs_recovery")
-            self.assertEqual(selected["selected"]["job_id"], "bg_needs_recovery")
-            self.assertIn("background_job_needs_recovery", selected["blocking_conditions"])
-            self.assertEqual(result["stopped_reason"], "requires_attention")
+            self.assertEqual(selected["action"], "run_recovery", json.dumps(result, indent=2, sort_keys=True))
+            self.assertEqual(selected["selected"]["task_id"], "P0.T001")
+            failure_registry = json.loads(
+                (project / ".loopplane" / "runtime" / "failure_registry.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            failure = failure_registry["failures"][0]
+            self.assertEqual(failure["failure_class"], "background_job_failed")
+            self.assertEqual(failure["source_background_job_id"], "bg_needs_recovery")
+            self.assertEqual(failure["status"], "recovered")
             state = json.loads((project / ".loopplane" / "runtime" / "state.json").read_text(encoding="utf-8"))
-            self.assertEqual(state["status"], "requires_attention")
-            self.assertEqual(state["scheduler"]["active_background_job_id"], "bg_needs_recovery")
-            self.assertEqual(state["scheduler"]["active_background_job_status"], "needs_recovery")
+            self.assertNotEqual(state["status"], "requires_attention")
+            self.assertEqual(state["requires_attention"], [])
 
     def test_inferred_completed_background_job_without_next_prompt_ready_does_not_block(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -3744,6 +3887,99 @@ class SchedulerMainLoopTest(unittest.TestCase):
 
             self.assertGreater(after_mtime, before_mtime)
 
+    def test_replaced_lock_owner_cannot_be_overwritten_or_unlinked_by_old_holder(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "Replaced lock owners retain authority.")
+            context_result = load_scheduler_context(project)
+            self.assertTrue(context_result["ok"], context_result)
+            context = context_result["context"]
+            lock_dir = context.paths.runtime_dir / "lock" / "scheduler_instance_lock"
+            first_lock = AtomicOwnerLock(lock_dir, "first-owner")
+            first_held = first_lock.acquire()
+            first_lock.owner_path.unlink()
+            second_lock = AtomicOwnerLock(lock_dir, "second-owner")
+            try:
+                with second_lock.acquire() as second_held:
+                    second_metadata = json.loads(second_lock.owner_path.read_text(encoding="utf-8"))
+
+                    with self.assertRaises(SchedulerLockError):
+                        first_held.heartbeat()
+                    first_held.release()
+
+                    current_metadata = json.loads(second_lock.owner_path.read_text(encoding="utf-8"))
+                    self.assertEqual(current_metadata["lock_id"], second_held.lock_id)
+                    self.assertEqual(current_metadata["lock_id"], second_metadata["lock_id"])
+                    self.assertEqual(current_metadata["owner"], "second-owner")
+            finally:
+                first_held.release()
+
+    def test_lock_acquire_waits_for_short_lived_owner(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "Registry writers may wait through brief lock contention.")
+            context_result = load_scheduler_context(project)
+            self.assertTrue(context_result["ok"], context_result)
+            context = context_result["context"]
+            lock_dir = context.paths.runtime_dir / "lock" / "background_jobs_lock"
+            held = AtomicOwnerLock(lock_dir, "short-holder").acquire()
+            release_thread = threading.Thread(target=lambda: (time.sleep(0.1), held.release()))
+            release_thread.start()
+            started = time.monotonic()
+            try:
+                with AtomicOwnerLock(lock_dir, "waiting-owner").acquire(timeout_seconds=1.0):
+                    waited = time.monotonic() - started
+            finally:
+                release_thread.join(timeout=1.0)
+                held.release()
+
+            self.assertGreaterEqual(waited, 0.05)
+
+    def test_stale_remote_lock_is_not_preserved_by_colliding_local_pid(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "Remote lock PID values are host scoped.")
+            context_result = load_scheduler_context(project)
+            self.assertTrue(context_result["ok"], context_result)
+            context = context_result["context"]
+            owner_path = context.paths.runtime_dir / "lock" / "scheduler_instance_lock" / "owner.json"
+            write_json(
+                owner_path,
+                {
+                    "schema_version": "1.5",
+                    "lock_id": "remote-stale-token",
+                    "owner": "remote-owner",
+                    "hostname": f"remote-{socket.gethostname()}",
+                    "pid": os.getpid(),
+                    "started_at": timestamp(timedelta(hours=-1)),
+                    "heartbeat_at": timestamp(timedelta(hours=-1)),
+                    "ttl_seconds": 1,
+                },
+            )
+
+            with AtomicOwnerLock(owner_path.parent, "local-reclaimer", ttl_seconds=1).acquire() as held:
+                metadata = json.loads(owner_path.read_text(encoding="utf-8"))
+                self.assertEqual(metadata["lock_id"], held.lock_id)
+                self.assertEqual(metadata["owner"], "local-reclaimer")
+
+    def test_stale_partial_owner_file_is_reclaimed_after_lease_ttl(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "A crash during lock creation must not wedge the workflow.")
+            context_result = load_scheduler_context(project)
+            self.assertTrue(context_result["ok"], context_result)
+            context = context_result["context"]
+            owner_path = context.paths.runtime_dir / "lock" / "scheduler_instance_lock" / "owner.json"
+            owner_path.parent.mkdir(parents=True, exist_ok=True)
+            owner_path.write_text('{"lock_id":', encoding="utf-8")
+            stale_time = time.time() - 60.0
+            os.utime(owner_path, (stale_time, stale_time))
+
+            with AtomicOwnerLock(owner_path.parent, "crash-reclaimer", ttl_seconds=1).acquire() as held:
+                metadata = json.loads(owner_path.read_text(encoding="utf-8"))
+                self.assertEqual(metadata["lock_id"], held.lock_id)
+                self.assertEqual(metadata["owner"], "crash-reclaimer")
+
     def test_scheduler_reclaims_stale_dead_owner_lock_before_running(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             project = Path(tmp) / "project"
@@ -3770,10 +4006,10 @@ class SchedulerMainLoopTest(unittest.TestCase):
             self.assertNotEqual(result["exit_code"], EXIT_DUPLICATE_SCHEDULER)
             self.assertFalse(owner_path.exists())
 
-    def test_scheduler_reclaims_fresh_dead_local_owner_lock(self) -> None:
+    def test_scheduler_reclaims_fresh_local_dead_owner_lock(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             project = Path(tmp) / "project"
-            init_project(project, "Fresh dead local scheduler lock recovery.")
+            init_project(project, "Fresh dead scheduler lock recovery smoke.")
             context_result = load_scheduler_context(project)
             self.assertTrue(context_result["ok"], context_result)
             context = context_result["context"]
@@ -3782,7 +4018,7 @@ class SchedulerMainLoopTest(unittest.TestCase):
                 owner_path,
                 {
                     "schema_version": "1.5",
-                    "owner": "local-dead:99999999:deadbeef",
+                    "owner": f"{socket.gethostname()}:99999999:deadbeef",
                     "hostname": socket.gethostname(),
                     "pid": 99999999,
                     "started_at": timestamp(),

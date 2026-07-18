@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ -n "${LOOPPLANE_CODEX_BIN:-}" && -x "${LOOPPLANE_CODEX_BIN}" ]]; then
+  exec "${LOOPPLANE_CODEX_BIN}" "$@"
+fi
+
+candidate="$({
+  find "${HOME}/.vscode-server/extensions" \
+    -path '*/openai.chatgpt-*-linux-x64/bin/linux-x86_64/codex' \
+    -type f -executable -printf '%T@ %p\n' 2>/dev/null || true
+} | sort -nr | head -n 1 | cut -d' ' -f2-)"
+
+if [[ -z "${candidate}" ]]; then
+  echo "codex-current: no executable Codex CLI installation found" >&2
+  exit 127
+fi
+
+exec "${candidate}" "$@"

@@ -33,9 +33,11 @@ Package helper scripts are thin wrappers around the same CLI handlers:
 Agent-driven installs must treat `skill install` as incomplete unless runner
 readiness is `ok`. If install/update reports `*_waiting_config` or
 `runner_readiness: waiting_config`, first discover the required external CLI
-paths with `command -v codex` or `command -v claude`, configure the absolute
-path with `loopplane configure-agent`, and rerun `loopplane doctor-agent` before
-planning, starting, or resuming a workflow.
+installation, configure Codex with the stable literal command `codex` (the
+Codex adapter resolves PATH and current editor-extension installs at execution
+time), and rerun `loopplane doctor-agent` before planning, starting, or resuming
+a workflow. Claude runners may still use the absolute path discovered with
+`command -v claude`.
 
 Approval commands include:
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import socket
 from datetime import UTC, datetime
 from hashlib import sha256
 from pathlib import Path
@@ -532,6 +533,13 @@ def _check_background_jobs(paths: WorkflowPaths, now: datetime) -> dict[str, Any
             problems.append(f"{label}: status {status!r} is not allowed")
         if job.get("next_prompt_ready") is not None and not isinstance(job.get("next_prompt_ready"), bool):
             problems.append(f"{label}: next_prompt_ready must be boolean when present")
+        if status in {"failed", "timed_out"}:
+            # These are valid terminal execution records. They must remain in
+            # the registry as failure evidence and are ingested by the
+            # scheduler's autonomous recovery queue; dead PIDs and old
+            # heartbeats are expected after termination, not malformed state.
+            warnings.append(f"{label}: terminal status {status!r} is retained for autonomous scheduler recovery")
+            continue
         if status in BACKGROUND_JOB_PROBLEM_STATUSES:
             problems.append(f"{label}: status {status!r} requires scheduler recovery or human attention")
         if status in BACKGROUND_JOB_SAFE_STATUSES:
@@ -544,7 +552,9 @@ def _check_background_jobs(paths: WorkflowPaths, now: datetime) -> dict[str, Any
         if job.get("next_prompt_ready") is False and not _non_empty_string(job.get("wake_next_agent_when")):
             warnings.append(f"{label}: next_prompt_ready=false should include wake_next_agent_when")
         pid_value = job.get("pid")
-        if pid_value is not None:
+        supervisor_host = str(job.get("supervisor_host") or "").strip()
+        pid_probe_is_local = not supervisor_host or supervisor_host == socket.gethostname()
+        if pid_value is not None and pid_probe_is_local:
             pid = _positive_int(pid_value, -1)
             if pid <= 0 or _pid_exists(pid) is False:
                 problems.append(f"{label}: process is not live")
@@ -567,7 +577,7 @@ def _check_agent_status_files(paths: WorkflowPaths) -> dict[str, Any]:
         return _check("agent_status_files", PASS, "No recent agent_status.json files are present.", count=0)
     problems: list[str] = []
     warnings: list[str] = []
-    background_run_ids = _background_registry_run_ids(paths)
+    background_run_ids, background_job_ids = _background_registry_identities(paths)
     resolved_agent_status_paths = _resolved_failure_agent_status_paths(paths)
     for path in files:
         data, error = _read_json_object(path)
@@ -605,7 +615,12 @@ def _check_agent_status_files(paths: WorkflowPaths) -> dict[str, Any]:
         if worker_status == "running_background" or next_prompt_ready is False:
             if not _agent_status_wake_next_agent_when(data):
                 file_problems.append(f"{rel}: unsafe background status must include wake_next_agent_when")
-            if run_id and run_id not in background_run_ids:
+            reported_background_job_ids = _agent_status_background_job_ids(data)
+            has_matching_background = bool(
+                (run_id and run_id in background_run_ids)
+                or reported_background_job_ids.intersection(background_job_ids)
+            )
+            if run_id and not has_matching_background:
                 file_problems.append(f"{rel}: unsafe background status has no matching background_jobs.json record")
         if file_problems:
             if rel in resolved_agent_status_paths:
@@ -631,7 +646,16 @@ def _check_agent_status_files(paths: WorkflowPaths) -> dict[str, Any]:
 
 
 def _check_validation_files(paths: WorkflowPaths) -> dict[str, Any]:
-    files = _recent_files(paths.results_dir, "validation.json")
+    # Only run-root validation.json files are authoritative LoopPlane
+    # validations. Workers may place domain-specific files with the same name
+    # in nested evidence directories; interpreting those against LoopPlane's
+    # schema both corrupts the health signal and pressures experiments to
+    # overwrite their own schema identity.
+    files = [
+        path
+        for path in _recent_files(paths.results_dir, "validation.json")
+        if path.parent.parent.name == "runs"
+    ]
     if not files:
         return _check("validations", PASS, "No validation.json files are present yet.", count=0)
     problems: list[str] = []
@@ -934,14 +958,49 @@ def _runner_lock_states(inspections: Sequence[Mapping[str, Any]], state: str) ->
     return [dict(inspection) for inspection in inspections if inspection.get("state") == state]
 
 
-def _background_registry_run_ids(paths: WorkflowPaths) -> set[str]:
+def _background_registry_identities(paths: WorkflowPaths) -> tuple[set[str], set[str]]:
     data, error = _read_json(paths.runtime_dir / "background_jobs.json")
     if error:
-        return set()
+        return set(), set()
     jobs = _jobs_from_background_registry(data)
     if jobs is None:
-        return set()
-    return {str(job.get("run_id") or "") for job in jobs if isinstance(job, Mapping) and job.get("run_id")}
+        return set(), set()
+    return (
+        {
+            str(job.get("run_id") or "")
+            for job in jobs
+            if isinstance(job, Mapping) and job.get("run_id")
+        },
+        {
+            str(job.get("job_id") or "")
+            for job in jobs
+            if isinstance(job, Mapping) and job.get("job_id")
+        },
+    )
+
+
+def _agent_status_background_job_ids(data: Mapping[str, Any]) -> set[str]:
+    records: list[Mapping[str, Any]] = []
+    for field in ("background_jobs", "background_job_records"):
+        value = data.get(field)
+        if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+            records.extend(item for item in value if isinstance(item, Mapping))
+    background = data.get("background")
+    if isinstance(background, Mapping):
+        value = background.get("jobs")
+        if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+            records.extend(item for item in value if isinstance(item, Mapping))
+    background_state = data.get("background_state")
+    if isinstance(background_state, Mapping):
+        for field in ("active_background_jobs", "background_jobs", "jobs"):
+            value = background_state.get(field)
+            if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+                records.extend(item for item in value if isinstance(item, Mapping))
+    return {
+        str(record.get("job_id") or "")
+        for record in records
+        if record.get("job_id")
+    }
 
 
 def _resolved_failure_agent_status_paths(paths: WorkflowPaths) -> set[str]:

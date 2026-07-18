@@ -51,10 +51,24 @@ are recorded in `{{context_manifest_path}}`.
 
 ## Your Job
 
+Self-repair is the default and highest-priority action. Routine code defects,
+test failures, data geometry/eligibility errors, numerical exceptions, Slurm
+failures, stale dependencies, and reproducible retry/resume work must be
+diagnosed and repaired autonomously within the task. They are not reasons to
+ask a human to inspect code or choose a debugging step. Escalation is reserved
+for missing external credentials or permissions, inaccessible data, external
+coordination, or a scientifically material scope decision not authorized by
+the brief and plan. Exhaust distinct safe repairs and the configured retry
+budget before using a human-blocked status.
+
 1. Read `{{context_manifest_path}}`, the target task block, and existing task
    evidence before expanding to broader workflow context.
 2. Inspect existing artifacts, logs, validations, reports, and latest pointers
    for the target task.
+   Before starting or submitting long-running work, query the LoopPlane
+   background registry for this task. If a matching job is still active,
+   adopt and monitor that job, preserve its run/ledger, and return a
+   `running_background` handoff; never launch a duplicate task execution.
 3. Determine whether the task is missing, partial, blocked, or already
    satisfied.
 4. If work is required, execute the smallest meaningful step first.

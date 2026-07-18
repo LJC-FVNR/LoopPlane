@@ -582,6 +582,83 @@ class CliAdapterFixtureIntegrationTest(unittest.TestCase):
         assert match is not None
         self.assertEqual(match["reason_class"], "billing_required")
 
+    def test_prompt_billing_instruction_is_not_billing_evidence(self) -> None:
+        match = _match_builtin_classifier(
+            {
+                "stderr": (
+                    "Account rule: if the Slurm account has insufficient balance, credits, "
+                    "or billing quota, retry the paid account.\n"
+                ),
+                "stdout": "",
+                "final_output": "",
+            }
+        )
+
+        self.assertIsNone(match)
+
+    def test_model_capacity_is_retryable_provider_overload(self) -> None:
+        match = _match_builtin_classifier(
+            {
+                "stderr": "ERROR: Selected model is at capacity. Please try a different model.\n",
+                "stdout": "",
+                "final_output": "",
+            }
+        )
+
+        self.assertIsNotNone(match)
+        assert match is not None
+        self.assertEqual(match["reason_class"], "provider_overloaded")
+        self.assertEqual(match["cooldown_seconds"], 300)
+
+    def test_slurm_tres_billing_field_does_not_override_terminal_capacity_error(self) -> None:
+        match = _match_builtin_classifier(
+            {
+                "stderr": (
+                    "ReqTRES=cpu=832,mem=8231000M,node=13,billing=328352,gres/gpu=32\n"
+                    "ERROR: Selected model is at capacity. Please try a different model.\n"
+                ),
+                "stdout": "",
+                "final_output": "",
+            }
+        )
+
+        self.assertIsNotNone(match)
+        assert match is not None
+        self.assertEqual(match["reason_class"], "provider_overloaded")
+        self.assertFalse(match.get("requires_attention", False))
+
+    def test_invalid_cli_argument_is_manual_runner_configuration_error(self) -> None:
+        match = _match_builtin_classifier(
+            {
+                "stderr": "error: unexpected argument '--effort' found\n",
+                "stdout": "",
+                "final_output": "",
+            }
+        )
+
+        self.assertIsNotNone(match)
+        assert match is not None
+        self.assertEqual(match["reason_class"], "runner_configuration_error")
+        self.assertTrue(match["requires_attention"])
+
+    def test_terminal_capacity_error_wins_over_earlier_availability_language(self) -> None:
+        match = _match_builtin_classifier(
+            {
+                "stderr": (
+                    "Example source text: HTTP 402 payment required.\n"
+                    "worker continued processing\n"
+                    "ERROR: Selected model is at capacity. Please try a different model.\n"
+                ),
+                "stdout": "",
+                "final_output": "",
+            }
+        )
+
+        self.assertIsNotNone(match)
+        assert match is not None
+        self.assertEqual(match["reason_class"], "provider_overloaded")
+        self.assertIn("at capacity", match["message"])
+
     def test_bare_numeric_status_like_file_sizes_are_not_availability_evidence(self) -> None:
         match = _match_builtin_classifier(
             {
@@ -605,6 +682,48 @@ class CliAdapterFixtureIntegrationTest(unittest.TestCase):
         self.assertIsNotNone(match)
         assert match is not None
         self.assertEqual(match["reason_class"], "rate_limited")
+
+    def test_model_capacity_wins_over_prompt_auth_words(self) -> None:
+        match = _match_builtin_classifier(
+            {
+                "stderr": (
+                    "user\n"
+                    "Final verification rejects unauthorized skipped work.\n"
+                    "ERROR: Selected model is at capacity. Please try a different model.\n"
+                ),
+                "stdout": "",
+                "final_output": "",
+            }
+        )
+
+        self.assertIsNotNone(match)
+        assert match is not None
+        self.assertEqual(match["reason_class"], "provider_overloaded")
+        self.assertEqual(match["cooldown_seconds"], 300)
+
+    def test_prompt_prose_with_unauthorized_is_not_auth_evidence(self) -> None:
+        match = _match_builtin_classifier(
+            {
+                "stderr": "Hidden bytes or unauthorized GPUs invalidate the objective.\n",
+                "stdout": "",
+                "final_output": "",
+            }
+        )
+
+        self.assertIsNone(match)
+
+    def test_standalone_unauthorized_error_remains_auth_evidence(self) -> None:
+        match = _match_builtin_classifier(
+            {
+                "stderr": "ERROR: Unauthorized\n",
+                "stdout": "",
+                "final_output": "",
+            }
+        )
+
+        self.assertIsNotNone(match)
+        assert match is not None
+        self.assertEqual(match["reason_class"], "auth_required")
 
     def test_shell_adapter_accepts_custom_runner_availability_classifier(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

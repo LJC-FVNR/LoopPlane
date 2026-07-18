@@ -690,9 +690,9 @@ class CliSmokeMatrixTest(unittest.TestCase):
             [
                 "loopplane skill install --target .",
                 'loopplane write-brief --text "Add tests, fix failing behavior, run a smoke benchmark, and produce a final report." --force',
-                'loopplane configure-agent --role worker --adapter codex_cli --command "$CODEX_BIN"',
-                'loopplane configure-agent --role planner --adapter codex_cli --command "$CODEX_BIN"',
-                'loopplane configure-agent --role auditor --adapter codex_cli --command "$CODEX_BIN"',
+                "loopplane configure-agent --role worker --adapter codex_cli --command codex",
+                "loopplane configure-agent --role planner --adapter codex_cli --command codex",
+                "loopplane configure-agent --role auditor --adapter codex_cli --command codex",
                 "loopplane doctor-agent --runner worker",
                 "loopplane doctor-agent --runner planner",
                 "loopplane doctor-agent --runner auditor",
@@ -709,11 +709,10 @@ class CliSmokeMatrixTest(unittest.TestCase):
             project.mkdir()
             env = os.environ.copy()
             env["PATH"] = f"{CLI_ADAPTER_FIXTURE_BIN}{os.pathsep}{env.get('PATH', '')}"
-            shell_variables = {"CODEX_BIN": str(CLI_ADAPTER_FIXTURE_BIN / "codex")}
             runs: list[SmokeRun] = []
             try:
                 for command in commands:
-                    args = materialize_shell_variables(command_tokens(command), shell_variables)[1:]
+                    args = command_tokens(command)[1:]
                     completed = run_cli(args, cwd=project, env=env, timeout=30.0)
                     run = SmokeRun(
                         spec_line=command,

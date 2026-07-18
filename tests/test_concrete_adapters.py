@@ -1099,6 +1099,23 @@ class ConcreteAdapterTest(unittest.TestCase):
 
             self.assertEqual(invocation.count("--json"), 1)
 
+    def test_codex_cli_translates_legacy_effort_flag_to_config_override(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = runner_config(
+                adapter="codex_cli",
+                command="codex",
+                args=("--effort", "max"),
+                adapter_options={"reasoning_effort": "xhigh"},
+            )
+
+            invocation, _stdin = CodexCliAdapter().build_invocation(adapter_input(root, config))
+
+            self.assertNotIn("--effort", invocation)
+            self.assertIn("-c", invocation)
+            self.assertIn('model_reasoning_effort="max"', invocation)
+            self.assertNotIn('model_reasoning_effort="xhigh"', invocation)
+
     def test_claude_code_cli_doctor_inspects_configuration_without_task_execution(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

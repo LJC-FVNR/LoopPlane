@@ -89,6 +89,17 @@ the LoopPlane prompt on stdin, adds `--ask-for-approval never` and
 policy. Non-read-only roles default to `danger-full-access`; read-only runners
 keep `read-only` unless configuration overrides it.
 
+`codex_executable_resolver.py` keeps that command stable across editor-extension
+upgrades. Doctor probes and task execution share the same resolver: an explicit
+executable `LOOPPLANE_CODEX_BIN` override wins, then an available configured
+command, then `codex` on the child `PATH`, then the newest executable Codex
+binary under the user's VS Code / VS Code Server extension directories. The
+automatic fallback applies only to a program actually named `codex`; arbitrary
+missing commands are not replaced. A recovered stale path is an auditable
+doctor warning rather than `waiting_config`, and `adapter_result.json` records
+the configured program, resolved path, source, and recovery flag under
+`adapter_metadata.codex_executable_resolution`.
+
 `interactive_terminal` is not representable by these captured subprocess
 adapters. Their doctor checks report `waiting_config` for that mode until the
 runner is reconfigured or a terminal-capable adapter is registered.

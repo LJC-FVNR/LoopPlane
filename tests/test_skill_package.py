@@ -133,6 +133,7 @@ def _env_with_selected_cli_fixtures(root: Path, executables: tuple[str, ...]) ->
         "LOOPPLANE_HOME": (root / "loopplane-home").as_posix(),
         "HOME": empty_home.as_posix(),
         "PATH": bin_dir.as_posix(),
+        "VSCODE_AGENT_FOLDER": "",
     }
 
 
@@ -148,6 +149,7 @@ def _env_without_agent_cli(root: Path) -> dict[str, str]:
         "LOOPPLANE_HOME": (root / "loopplane-home").as_posix(),
         "HOME": empty_home.as_posix(),
         "PATH": bin_dir.as_posix(),
+        "VSCODE_AGENT_FOLDER": "",
     }
 
 
@@ -1721,6 +1723,8 @@ class SkillPackageInstallTest(unittest.TestCase):
             local_runners = json.loads(
                 (project / ".loopplane" / "config" / "local" / "agent_runners.local.json").read_text(encoding="utf-8")
             )["runners"]
+            self.assertEqual(local_runners["worker"]["command"], "codex")
+            self.assertEqual(local_runners["worker"]["doctor"]["check_command"], "codex --version")
             self.assertTrue(Path(local_runners["worker_fallback"]["command"].split()[0]).is_absolute())
             self.assertTrue(local_runners["worker_fallback"]["enabled"])
             self.assertNotIn("summary_fallback", local_runners)
@@ -1898,7 +1902,19 @@ class SkillPackageInstallTest(unittest.TestCase):
             codex.chmod(codex.stat().st_mode | 0o111)
             claude.chmod(claude.stat().st_mode | 0o111)
 
-            with patch("runtime.skill_package.shutil.which", return_value=None), patch("runtime.skill_package.Path.home", return_value=home):
+            with (
+                patch.dict(
+                    os.environ,
+                    {
+                        "HOME": home.as_posix(),
+                        "PATH": "",
+                        "LOOPPLANE_CODEX_BIN": "",
+                        "VSCODE_AGENT_FOLDER": "",
+                    },
+                ),
+                patch("runtime.skill_package.shutil.which", return_value=None),
+                patch("runtime.skill_package.Path.home", return_value=home),
+            ):
                 discovered_codex = _discover_install_cli_program("codex")
                 discovered_claude = _discover_install_cli_program("claude")
 

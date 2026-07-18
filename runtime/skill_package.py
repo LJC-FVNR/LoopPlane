@@ -25,6 +25,7 @@ from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
+from runtime.adapters.codex_executable_resolver import resolve_codex_executable
 from runtime.agent_runner_cli import doctor_agent_runners
 from runtime.agent_runners import (
     AgentRunnerConfigError,
@@ -235,6 +236,7 @@ PACKAGE_FILE_REQUIREMENT_GROUPS: tuple[dict[str, Any], ...] = (
             "runtime/adapters/base.py",
             "runtime/adapters/shell_adapter.py",
             "runtime/adapters/codex_cli_adapter.py",
+            "runtime/adapters/codex_executable_resolver.py",
             "runtime/adapters/claude_code_cli_adapter.py",
             "runtime/adapters/noop_adapter.py",
             "runtime/adapters/README.md",
@@ -3170,6 +3172,7 @@ def _run_recommended_cli_fixture_flow(
     try:
         adapter = adapter_class()
         doctor = adapter.doctor(adapter_input)
+        doctor_payload = doctor.to_dict()
         output = adapter.run(adapter_input)
     except Exception as error:  # pragma: no cover - negative tests assert serialized failure behavior.
         problems.append("fixture_flow_exception")
@@ -3256,7 +3259,7 @@ def _run_recommended_cli_fixture_flow(
         {
             "status": "pass" if not problems else "fail",
             "doctor_status": doctor.status,
-            "doctor_checks": [dict(check) for check in doctor.checks],
+            "doctor_checks": doctor_payload["checks"],
             "exit_code": output.exit_code,
             "timed_out": output.timed_out,
             "adapter_result_path": paths.adapter_result_path.as_posix(),
@@ -9044,8 +9047,12 @@ def _auto_configure_install_cli_runners(
 
     runner_by_id = {runner.runner_id: runner for runner in runners}
     default_runner = runner_by_id.get(default_runner_id) or _first_install_worker_runner(runners)
-    if default_runner is not None:
-        default_command = shlex.quote(discovered_by_adapter[default_adapter].as_posix())  # type: ignore[union-attr]
+    default_discovered = discovered_by_adapter.get(default_adapter)
+    if default_runner is not None and default_discovered is not None:
+        default_command = _install_runner_command(
+            default_adapter,
+            default_discovered,
+        )
         overrides[default_runner.runner_id] = _install_runner_override(
             default_runner,
             default_command,
@@ -9058,7 +9065,7 @@ def _auto_configure_install_cli_runners(
             continue
         if adapter == default_adapter:
             continue
-        command = shlex.quote(discovered.as_posix())
+        command = _install_runner_command(adapter, discovered)
         for runner in runners:
             if runner.adapter != adapter:
                 continue
@@ -9098,6 +9105,12 @@ def _auto_configure_install_cli_runners(
     }
 
 
+def _install_runner_command(adapter: str, discovered: Path) -> str:
+    if adapter == "codex_cli":
+        return "codex"
+    return shlex.quote(discovered.as_posix())
+
+
 def _install_default_adapter(discovered_by_adapter: Mapping[str, Path | None]) -> str | None:
     for adapter in INSTALL_TIME_DEFAULT_ADAPTER_ORDER:
         if discovered_by_adapter.get(adapter) is not None:
@@ -9116,6 +9129,14 @@ def _first_install_worker_runner(runners: Sequence[RunnerConfig]) -> RunnerConfi
 
 
 def _discover_install_cli_program(program: str) -> Path | None:
+    if program == "codex":
+        resolution = resolve_codex_executable(
+            "codex",
+            env=os.environ,
+            cwd=Path.cwd(),
+        )
+        return Path(resolution.resolved_path) if resolution.resolved_path is not None else None
+
     discovered = shutil.which(program)
     if discovered:
         return Path(discovered).resolve()
@@ -9212,9 +9233,9 @@ def _runner_readiness_next_steps(project: Path, adapters: Sequence[str]) -> list
     steps: list[str] = []
     if not adapters or "codex_cli" in adapters:
         steps.append(
-            "Find and configure Codex CLI before planning: "
-            f"CODEX_BIN=$(command -v codex) && python3 scripts/loopplane configure-agent --project {shlex.quote(project.as_posix())} "
-            '--runner worker --role worker --adapter codex_cli --command "$CODEX_BIN" && '
+            "Configure the stable Codex CLI command before planning: "
+            f"python3 scripts/loopplane configure-agent --project {shlex.quote(project.as_posix())} "
+            "--runner worker --role worker --adapter codex_cli --command codex && "
             f"python3 scripts/loopplane doctor-agent --project {shlex.quote(project.as_posix())} --runner worker"
         )
     if "claude_code_cli" in adapters:

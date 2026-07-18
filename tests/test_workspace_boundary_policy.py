@@ -15,6 +15,7 @@ from runtime.path_resolution import WorkflowPaths, load_workflow_config
 from runtime.reconciliation import run_reconciler
 from runtime.scheduler import run_scheduler
 from runtime.validation import run_validator
+from runtime.workspace_boundary_policy import evaluate_worker_write_boundary
 from tests.test_human_summaries import configure_fake_summary_agent
 from tests.test_validation import disable_default_validator_agent
 
@@ -167,6 +168,56 @@ def write_forged_passing_validation(run_dir: Path) -> None:
 
 
 class WorkerWriteBoundaryPolicyTest(unittest.TestCase):
+    def test_prior_run_evidence_reference_resolves_from_current_run(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _repo, service_a, _service_b, paths, workflow = init_monorepo_workspace(tmp)
+            write_plan(paths, workflow)
+            run_dir = paths.results_dir / "T001" / "runs" / "run_current"
+            prior_evidence = paths.results_dir / "T001" / "runs" / "run_prior" / "records" / "result.json"
+            prior_evidence.parent.mkdir(parents=True, exist_ok=True)
+            prior_evidence.write_text("{}\n", encoding="utf-8")
+
+            policy = evaluate_worker_write_boundary(
+                service_a,
+                paths,
+                task_id="T001",
+                run_dir=run_dir,
+                agent_status={
+                    "key_outputs": ["../run_prior/records/result.json"],
+                    "evidence_satisfies": [
+                        {"evidence": ["../run_prior/records/result.json"]}
+                    ],
+                },
+            )
+
+            self.assertTrue(policy["ok"], json.dumps(policy, indent=2, sort_keys=True))
+            self.assertEqual(policy["status"], "pass")
+            self.assertTrue(all(item["inside_boundary"] for item in policy["checked_paths"]))
+            self.assertIn(
+                prior_evidence.relative_to(service_a).as_posix(),
+                {item["path"] for item in policy["checked_paths"]},
+            )
+
+    def test_prior_run_style_traversal_outside_workspace_remains_denied(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _repo, service_a, service_b, paths, workflow = init_monorepo_workspace(tmp)
+            write_plan(paths, workflow)
+            run_dir = paths.results_dir / "T001" / "runs" / "run_current"
+            outside = service_b / "not_worker_evidence.json"
+            reported = os.path.relpath(outside, start=run_dir).replace(os.sep, "/")
+
+            policy = evaluate_worker_write_boundary(
+                service_a,
+                paths,
+                task_id="T001",
+                run_dir=run_dir,
+                agent_status={"key_outputs": [reported]},
+            )
+
+            self.assertFalse(policy["ok"])
+            self.assertEqual(policy["status"], "violation")
+            self.assertIn("../service-b/not_worker_evidence.json", json.dumps(policy, sort_keys=True))
+
     def test_validator_and_reconciler_deny_out_of_boundary_worker_write_by_default(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             _repo, service_a, service_b, paths, workflow = init_monorepo_workspace(tmp)

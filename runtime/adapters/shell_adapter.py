@@ -87,7 +87,7 @@ class ShellAdapter(AgentAdapter):
         pre_run_files = snapshot_adapter_files(adapter_input)
         boundary_snapshot = snapshot_adapter_workspace_boundary(adapter_input)
         started_at = utc_timestamp()
-        argv, stdin_text = self.build_invocation(adapter_input)
+        argv, stdin_text, invocation_metadata = self.prepare_invocation(adapter_input)
         policy_decision = enforce_command_policy(
             role=adapter_input.role,
             command=argv,
@@ -106,6 +106,7 @@ class ShellAdapter(AgentAdapter):
                 boundary_snapshot=boundary_snapshot,
                 adapter_input_path=adapter_input_path,
                 adapter_metadata={
+                    **invocation_metadata,
                     "argv": argv,
                     "delivery_mode": adapter_input.prompt_delivery.get("mode"),
                     "policy_decision": _policy_decision_dict(policy_decision),
@@ -183,6 +184,7 @@ class ShellAdapter(AgentAdapter):
                     adapter_input_path=adapter_input_path,
                     adapter_metadata=with_runner_resource_lock_metadata(
                         {
+                            **invocation_metadata,
                             "argv": argv,
                             "delivery_mode": adapter_input.prompt_delivery.get("mode"),
                             "policy_decision": _policy_decision_dict(policy_decision),
@@ -213,6 +215,7 @@ class ShellAdapter(AgentAdapter):
                     adapter_input_path=adapter_input_path,
                     adapter_metadata=with_runner_resource_lock_metadata(
                         {
+                            **invocation_metadata,
                             "argv": argv,
                             "delivery_mode": adapter_input.prompt_delivery.get("mode"),
                             "policy_decision": _policy_decision_dict(policy_decision),
@@ -250,6 +253,7 @@ class ShellAdapter(AgentAdapter):
                 adapter_input_path=adapter_input_path,
                 adapter_metadata=with_runner_resource_lock_metadata(
                     {
+                        **invocation_metadata,
                         "argv": argv,
                         "delivery_mode": adapter_input.prompt_delivery.get("mode"),
                         "policy_decision": _policy_decision_dict(policy_decision),
@@ -281,6 +285,13 @@ class ShellAdapter(AgentAdapter):
 
     def build_invocation(self, adapter_input: AdapterInput) -> tuple[list[str], str | None]:
         return build_shell_invocation(adapter_input)
+
+    def prepare_invocation(
+        self,
+        adapter_input: AdapterInput,
+    ) -> tuple[list[str], str | None, Mapping[str, Any]]:
+        argv, stdin_text = self.build_invocation(adapter_input)
+        return argv, stdin_text, {}
 
     def make_stdout_transform(self, adapter_input: AdapterInput) -> "StdoutTransform | None":
         """Return a line transform for the child's stdout, or None for raw passthrough.
@@ -384,6 +395,7 @@ def shell_doctor_checks(
     adapter_input: AdapterInput,
     *,
     invocation_builder: Any = build_shell_invocation,
+    executable_resolver: Any = None,
 ) -> tuple[Mapping[str, Any], ...]:
     checks: list[Mapping[str, Any]] = []
     doctor_config = _doctor_config(adapter_input)
@@ -429,20 +441,37 @@ def shell_doctor_checks(
         )
     if command_parts:
         program = command_parts[0]
-        resolved_program = shutil.which(program, path=process_env.get("PATH"))
+        resolution = _resolve_doctor_executable(
+            program,
+            process_env=process_env,
+            cwd=adapter_input.cwd,
+            executable_resolver=executable_resolver,
+        )
+        resolved_program = resolution.get("resolved_path")
         command_available = resolved_program is not None
+        recovered = command_available and resolution.get("recovered") is True
+        if recovered:
+            command_status = "warning"
+            command_message = f"Recovered unavailable command {program} as {resolved_program}."
+            command_code = "command_recovered"
+        elif command_available:
+            command_status = DOCTOR_STATUS_OK
+            command_message = f"Command program is available: {program}"
+            command_code = "command_available"
+        else:
+            command_status = DOCTOR_STATUS_WAITING_CONFIG
+            command_message = f"Command program was not found on PATH: {program}"
+            command_code = "command_missing"
         checks.append(
             _doctor_check(
                 "command_exists",
-                DOCTOR_STATUS_OK if command_available else DOCTOR_STATUS_WAITING_CONFIG,
-                (
-                    f"Command program is available: {program}"
-                    if command_available
-                    else f"Command program was not found on PATH: {program}"
-                ),
-                "command_available" if command_available else "command_missing",
+                command_status,
+                command_message,
+                command_code,
                 program=program,
                 resolved_path=resolved_program,
+                resolution_source=resolution.get("source"),
+                recovered=recovered,
             )
         )
 
@@ -497,11 +526,46 @@ def shell_doctor_checks(
                     failure_code=failure_code,
                     success_message=success_message,
                     failure_message=failure_message,
+                    executable_resolver=executable_resolver,
                 )
             )
 
-        checks.append(_authentication_check(adapter_input, doctor_config, process_env))
+        checks.append(
+            _authentication_check(
+                adapter_input,
+                doctor_config,
+                process_env,
+                executable_resolver=executable_resolver,
+            )
+        )
     return tuple(checks)
+
+
+def _resolve_doctor_executable(
+    program: str,
+    *,
+    process_env: Mapping[str, str],
+    cwd: str,
+    executable_resolver: Any,
+) -> dict[str, Any]:
+    if executable_resolver is not None:
+        resolution = executable_resolver(program, env=process_env, cwd=cwd)
+        if isinstance(resolution, Mapping):
+            return dict(resolution)
+        to_dict = getattr(resolution, "to_dict", None)
+        if callable(to_dict):
+            data = to_dict()
+            if isinstance(data, Mapping):
+                return dict(data)
+
+    resolved_path = shutil.which(program, path=process_env.get("PATH"))
+    return {
+        "configured_program": program,
+        "invocation_program": program,
+        "resolved_path": resolved_path,
+        "source": "path" if resolved_path is not None else "unresolved",
+        "recovered": False,
+    }
 
 
 def _aggregate_doctor_status(checks: tuple[Mapping[str, Any], ...]) -> str:
@@ -606,6 +670,8 @@ def _authentication_check(
     adapter_input: AdapterInput,
     doctor_config: Mapping[str, Any],
     process_env: Mapping[str, str],
+    *,
+    executable_resolver: Any = None,
 ) -> Mapping[str, Any]:
     requires_auth = doctor_config.get("requires_auth") is True
     if not requires_auth:
@@ -639,6 +705,7 @@ def _authentication_check(
             failure_code="authentication_unavailable",
             success_message="Authentication check succeeded.",
             failure_message="Authentication check failed.",
+            executable_resolver=executable_resolver,
         )
 
     if auth_env_vars:
@@ -667,6 +734,7 @@ def _run_doctor_command_check(
     failure_code: str,
     success_message: str,
     failure_message: str,
+    executable_resolver: Any = None,
 ) -> Mapping[str, Any]:
     expanded_command = _expand_template(command, adapter_input)
     try:
@@ -689,11 +757,23 @@ def _run_doctor_command_check(
             command=expanded_command,
         )
 
+    configured_argv = list(argv)
+    process_env = _process_env(adapter_input, adapter_input.output_paths())
+    resolution = _resolve_doctor_executable(
+        argv[0],
+        process_env=process_env,
+        cwd=adapter_input.cwd,
+        executable_resolver=executable_resolver,
+    )
+    invocation_program = resolution.get("invocation_program")
+    if isinstance(invocation_program, str) and invocation_program:
+        argv[0] = invocation_program
+
     try:
         completed = subprocess.run(
             argv,
             cwd=adapter_input.cwd,
-            env=_process_env(adapter_input, adapter_input.output_paths()),
+            env=process_env,
             text=True,
             capture_output=True,
             timeout=_doctor_command_timeout_seconds(adapter_input),
@@ -706,7 +786,9 @@ def _run_doctor_command_check(
             f"{failure_message} Command timed out.",
             failure_code,
             command=expanded_command,
+            configured_argv=configured_argv,
             argv=argv,
+            executable_resolution=resolution,
             timed_out=True,
             stdout_excerpt=_excerpt(_coerce_text(error.stdout)),
             stderr_excerpt=_excerpt(_coerce_text(error.stderr)),
@@ -719,7 +801,9 @@ def _run_doctor_command_check(
             f"{failure_message} {type(error).__name__}: {error}",
             failure_code,
             command=expanded_command,
+            configured_argv=configured_argv,
             argv=argv,
+            executable_resolution=resolution,
             error_type=type(error).__name__,
         )
 
@@ -730,7 +814,9 @@ def _run_doctor_command_check(
             success_message,
             success_code,
             command=expanded_command,
+            configured_argv=configured_argv,
             argv=argv,
+            executable_resolution=resolution,
             exit_code=completed.returncode,
             stdout_excerpt=_excerpt(completed.stdout),
             stderr_excerpt=_excerpt(completed.stderr),
@@ -741,7 +827,9 @@ def _run_doctor_command_check(
         f"{failure_message} Exit code {completed.returncode}.",
         failure_code,
         command=expanded_command,
+        configured_argv=configured_argv,
         argv=argv,
+        executable_resolution=resolution,
         exit_code=completed.returncode,
         stdout_excerpt=_excerpt(completed.stdout),
         stderr_excerpt=_excerpt(completed.stderr),
@@ -1037,6 +1125,12 @@ def _process_env(adapter_input: AdapterInput, paths: Any) -> dict[str, str]:
     if adapter_input.task_evidence_run_dir is not None:
         env["LOOPPLANE_TASK_EVIDENCE_RUN_DIR"] = adapter_input.task_evidence_run_dir.as_posix()
     return env
+
+
+def adapter_process_env(adapter_input: AdapterInput) -> dict[str, str]:
+    """Return the exact environment used by shell-family child processes."""
+
+    return _process_env(adapter_input, adapter_input.output_paths())
 
 
 
