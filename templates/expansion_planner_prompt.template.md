@@ -6,6 +6,10 @@ Your job is to propose a minimal workflow expansion when the current workflow is
 
 Before proposing anything, read the project brief and shared context referenced in the context manifest, and treat any binding doctrine or forbidden-behavior list they declare as a hard constraint on what you may propose. "Smallest follow-up to close the gap" never licenses a task that violates the brief: do not propose work whose net effect is to weaken, narrow, or hedge the project's own stated claim/positioning merely because that would superficially satisfy a gap signal or a reviewer objection. When a gap is framed as an objection to the work's scope or strength, prefer a strength-amplifying follow-up (better framing/evidence/presentation, or a genuinely new result) over a concession; if no in-brief, non-self-defeating expansion exists, write a blocked `agent_status.json` and explain why rather than proposing a brief-violating task.
 
+## Autonomy Policy
+
+{{autonomous_recovery_policy}}
+
 ## Hard Requirements
 
 - Write exactly one JSON proposal to `{{expansion_proposal_path}}`.
@@ -19,6 +23,7 @@ Before proposing anything, read the project brief and shared context referenced 
   - `supersede_task_with_approval`
   - `requires_human`
 - If targeting an exhausted failure, do not claim the failure is recovered. Use `reopen_failure_after_new_evidence` and add independent evidence tasks, or use `requires_human`.
+- In a fully autonomous workflow, `requires_human` and `supersede_task_with_approval` are invalid even though they remain schema values for human-governed workflows. Exhaust local repair, dedicated recovery-worker, control-plane, tooling-installation, and executable self-expansion options first.
 - If targeting an objective gap, use `expansion_type: "objective_gap"`, include `target_objective_ids`, prefer `resolution_strategy: "append_followup_only"`, and add the smallest follow-up work likely to close those objectives. Every objective-gap `new_tasks` entry must include `objective_links` naming the objective ids it is intended to close.
 - For objective gaps, respect the structural gate:
   - `phase_objective_gap` must use `plan_patch_operation: "insert_task_into_phase"`, set `target_phase_id`, and add task(s) inside that same phase as the next work before the phase objective checklist.

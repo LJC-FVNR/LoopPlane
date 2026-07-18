@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import socket
 import shutil
 import subprocess
 import sys
@@ -1390,6 +1391,55 @@ class SchedulerSelectionTest(unittest.TestCase):
             self.assertEqual(action["selected"]["runner_role"], "worker")
             self.assertEqual(action["selected"]["failure_id"], "fail1")
             self.assertEqual(action["selected"]["task_id"], "P0.T001")
+
+    def test_dedicated_recovery_runner_gets_one_retry_after_budget_exhaustion(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "Capability-upgrade recovery retry.")
+            write_active_plan(project, {"P0.T001": " ", "P1.T001": " "})
+            config_path = project / ".loopplane" / "config" / "agent_runners.json"
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+            config["runners"]["recovery_worker"] = {
+                "role": "recovery_worker",
+                "inherits": "worker",
+                "timeout_seconds": 21600,
+            }
+            config_path.write_text(json.dumps(config, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            registry = {
+                "failures": [
+                    {
+                        "failure_id": "fail_exhausted",
+                        "task_id": "P0.T001",
+                        "status": "exhausted",
+                        "failure_class": "validation_failed",
+                        "recoverable": True,
+                        "recovery_attempts": 1,
+                        "max_recovery_attempts": 1,
+                        "last_recovery_runner_id": "worker",
+                        "recovery_runner_ids_attempted": ["worker"],
+                        "first_seen_at": "2026-06-10T00:00:00Z",
+                    }
+                ]
+            }
+            (project / ".loopplane" / "runtime" / "failure_registry.json").write_text(
+                json.dumps(registry, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+
+            action = select_next_action(load_scheduler_snapshot(project))
+
+            self.assertEqual(action["action"], "run_recovery")
+            self.assertEqual(action["selected"]["runner_id"], "recovery_worker")
+            self.assertTrue(action["selected"]["capability_upgrade_retry"])
+
+            registry["failures"][0]["last_recovery_runner_id"] = "recovery_worker"
+            registry["failures"][0]["recovery_runner_ids_attempted"].append("recovery_worker")
+            (project / ".loopplane" / "runtime" / "failure_registry.json").write_text(
+                json.dumps(registry, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            next_action = select_next_action(load_scheduler_snapshot(project))
+            self.assertNotEqual(next_action["action"], "run_recovery")
 
     def test_worker_selection_uses_first_executable_task(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2822,6 +2872,77 @@ class WorkerRunExecutionTest(unittest.TestCase):
 
 
 class FailureRegistryRecoveryTest(unittest.TestCase):
+    def test_terminal_action_failure_is_deduplicated_and_later_success_recovers_it(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "Deduplicate terminal objective-verifier failures.")
+            context_result = load_scheduler_context(project)
+            self.assertTrue(context_result["ok"], context_result)
+            context = context_result["context"]
+            failure_result = {
+                "run_id": "run_objective_failed",
+                "ended_at": "2026-06-10T00:00:00Z",
+                "objective_scope": "phase",
+                "objective_phase_id": "P1",
+                "classification": "missing_agent_status",
+                "status": "failed_agent",
+                "adapter_exit_code": 1,
+                "adapter_timed_out": False,
+                "message": "Objective verifier did not produce agent status.",
+            }
+
+            scheduler_module._record_action_failure(
+                paths=context.paths,
+                workflow_id=context.workflow_id,
+                project=project,
+                result=failure_result,
+                failure_class="objective_verifier_failed",
+            )
+            failure_result["run_id"] = "run_objective_retry_failed"
+            failure_result["ended_at"] = "2026-06-10T00:01:00Z"
+            scheduler_module._record_action_failure(
+                paths=context.paths,
+                workflow_id=context.workflow_id,
+                project=project,
+                result=failure_result,
+                failure_class="objective_verifier_failed",
+            )
+            failure_result["run_id"] = "run_objective_observed_again"
+            failure_result["ended_at"] = "2026-06-10T00:02:00Z"
+            scheduler_module._record_action_failure(
+                paths=context.paths,
+                workflow_id=context.workflow_id,
+                project=project,
+                result=failure_result,
+                failure_class="objective_verifier_failed",
+            )
+
+            registry_path = project / ".loopplane" / "runtime" / "failure_registry.json"
+            failures = json.loads(registry_path.read_text(encoding="utf-8"))["failures"]
+            self.assertEqual(len(failures), 1)
+            self.assertEqual(failures[0]["status"], "exhausted")
+            self.assertEqual(failures[0]["attempts"], 3)
+            self.assertEqual(failures[0]["repeat_observations_after_terminal"], 1)
+
+            scheduler_module._resolve_action_failure(
+                paths=context.paths,
+                workflow_id=context.workflow_id,
+                result={
+                    "run_id": "run_objective_passed",
+                    "ended_at": "2026-06-10T00:03:00Z",
+                    "objective_scope": "phase",
+                    "objective_phase_id": "P1",
+                    "status": "completed",
+                },
+                failure_class="objective_verifier_failed",
+                scope_key="objective_verifier:phase:P1",
+            )
+
+            recovered = json.loads(registry_path.read_text(encoding="utf-8"))["failures"]
+            self.assertEqual(len(recovered), 1)
+            self.assertEqual(recovered[0]["status"], "recovered")
+            self.assertEqual(recovered[0]["last_recovery_run_id"], "run_objective_passed")
+
     def test_worker_failure_registers_and_recovery_run_updates_registry(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             project = Path(tmp) / "project"
@@ -3640,6 +3761,33 @@ class SchedulerMainLoopTest(unittest.TestCase):
                     "started_at": timestamp(timedelta(hours=-1)),
                     "heartbeat_at": timestamp(timedelta(hours=-1)),
                     "ttl_seconds": 1,
+                },
+            )
+
+            result = run_scheduler(project, max_ticks=1)
+
+            self.assertNotEqual(result["status"], "duplicate_scheduler", json.dumps(result, indent=2, sort_keys=True))
+            self.assertNotEqual(result["exit_code"], EXIT_DUPLICATE_SCHEDULER)
+            self.assertFalse(owner_path.exists())
+
+    def test_scheduler_reclaims_fresh_dead_local_owner_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "Fresh dead local scheduler lock recovery.")
+            context_result = load_scheduler_context(project)
+            self.assertTrue(context_result["ok"], context_result)
+            context = context_result["context"]
+            owner_path = context.paths.runtime_dir / "lock" / "scheduler_instance_lock" / "owner.json"
+            write_json(
+                owner_path,
+                {
+                    "schema_version": "1.5",
+                    "owner": "local-dead:99999999:deadbeef",
+                    "hostname": socket.gethostname(),
+                    "pid": 99999999,
+                    "started_at": timestamp(),
+                    "heartbeat_at": timestamp(),
+                    "ttl_seconds": 120,
                 },
             )
 

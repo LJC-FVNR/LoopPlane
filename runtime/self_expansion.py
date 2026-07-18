@@ -427,6 +427,23 @@ def apply_expansion_proposal(
     strategy = str(proposal.get("resolution_strategy") or "")
 
     if strategy == "requires_human":
+        approval_policy = load_approval_policy(paths)
+        if _autonomous_recovery_enabled(approval_policy):
+            return _apply_no_mutation_result(
+                project=project,
+                paths=paths,
+                workflow_id=workflow_id,
+                proposal=proposal,
+                proposal_path=proposal_file,
+                status="autonomous_resolution_required",
+                message=(
+                    "Fully autonomous workflow rejected a human handoff; the expansion planner must produce "
+                    "an executable repair or new-evidence recovery path."
+                ),
+                run_id=run_id,
+                runner_id=runner_id,
+                owner=owner,
+            )
         result = _apply_no_mutation_result(
             project=project,
             paths=paths,
@@ -654,6 +671,8 @@ def reopen_expansion_failures(
 def build_expansion_prompt_variables(project_root: Path | str, prepared_run: Any) -> dict[str, str]:
     project, paths, workflow_id, workflow_config = _load_project(project_root)
     policy = load_self_expansion_policy(workflow_config)
+    approval_policy = load_approval_policy(paths)
+    autonomous_recovery = _autonomous_recovery_enabled(approval_policy)
     registry = read_expansion_registry(paths, workflow_id=workflow_id)
     role_output_dir = _path_attr(prepared_run, "role_output_dir")
     selection = _read_json_object_default(role_output_dir / EXPANSION_SELECTION_FILENAME, {})
@@ -699,7 +718,23 @@ def build_expansion_prompt_variables(project_root: Path | str, prepared_run: Any
         "context_manifest_path": _project_relative(project, role_output_dir / EXPANSION_CONTEXT_MANIFEST_FILENAME),
         "context_references_json": json.dumps(prompt_reference_index(context_manifest["references"]), indent=2, sort_keys=True),
         "selected_expansion_candidate": json_summary(selection if isinstance(selection, Mapping) else {}, max_chars=1800),
+        "autonomous_recovery_policy": (
+            "This workflow is fully autonomous: human handoff and approval-only resolution strategies are forbidden. "
+            "Your first priority is to solve the blocker with the available worker, recovery_worker, scheduler, and "
+            "self-expansion capabilities. Use an executable follow-up or new-evidence recovery path; never emit "
+            "requires_human or supersede_task_with_approval. If the ordinary worker lacks host/control-plane authority, "
+            "design evidence work that allows the configured dedicated recovery_worker to retry the exhausted task."
+            if autonomous_recovery
+            else "Human-assisted resolution strategies remain available only when no safe executable repair exists."
+        ),
     }
+
+
+def _autonomous_recovery_enabled(approval_policy: Mapping[str, Any]) -> bool:
+    return (
+        approval_policy.get("enabled") is not True
+        and str(approval_policy.get("default_action_when_disabled") or "") == "auto_authorize"
+    )
 
 
 def _write_expansion_context_manifest(
@@ -775,6 +810,16 @@ def _validate_proposal_mapping(
     strategy = str(proposal.get("resolution_strategy") or "")
     if strategy not in ALLOWED_RESOLUTION_STRATEGIES:
         errors.append(f"resolution_strategy must be one of: {', '.join(sorted(ALLOWED_RESOLUTION_STRATEGIES))}.")
+    approval_policy = load_approval_policy(paths)
+    if _autonomous_recovery_enabled(approval_policy) and strategy in {
+        "requires_human",
+        "supersede_task_with_approval",
+    }:
+        errors.append(
+            "Fully autonomous workflows cannot use human-handoff or approval-only resolution strategies; "
+            "propose executable repair/evidence tasks and use append_followup_only or "
+            "reopen_failure_after_new_evidence."
+        )
     expansion_type = str(proposal.get("expansion_type") or "")
     if expansion_type not in ALLOWED_EXPANSION_TYPES:
         errors.append(f"expansion_type must be one of: {', '.join(sorted(ALLOWED_EXPANSION_TYPES))}.")

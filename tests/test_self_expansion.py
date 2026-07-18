@@ -561,6 +561,27 @@ class SelfExpansionTest(unittest.TestCase):
             self.assertTrue(any("must use append_followup_only" in error for error in result["errors"]), result["errors"])
             self.assertTrue(any("must add structural follow-up tasks" in error for error in result["errors"]), result["errors"])
 
+    def test_fully_autonomous_workflow_rejects_human_handoff_strategy(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "Autonomous expansion must repair itself.")
+            write_plan(project)
+            record_active_plan(project)
+            write_failure(project)
+            proposal_path = write_patch_and_proposal(project)
+            proposal = json.loads(proposal_path.read_text(encoding="utf-8"))
+            proposal["resolution_strategy"] = "requires_human"
+            proposal["new_tasks"] = []
+            proposal_path.write_text(json.dumps(proposal, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+            result = validate_expansion_proposal(project, proposal_path)
+
+            self.assertFalse(result["ok"])
+            self.assertTrue(
+                any("Fully autonomous workflows cannot use" in error for error in result["errors"]),
+                result["errors"],
+            )
+
     def test_phase_objective_gap_followup_must_stay_in_target_phase(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             project = Path(tmp) / "project"
@@ -851,6 +872,8 @@ class SelfExpansionTest(unittest.TestCase):
             self.assertIn("LOOPPLANE_PLAN_APPEND_END", built.content)
             self.assertIn("## Phase <phase-id>: <phase title>", built.content)
             self.assertIn("phase_objective_gap", built.content)
+            self.assertIn("This workflow is fully autonomous", built.content)
+            self.assertIn("never emit requires_human", built.content)
             self.assertNotIn("Produce base artifact", built.content)
             manifest = json.loads((Path(run.role_output_dir) / "expansion_context_manifest.json").read_text(encoding="utf-8"))
             self.assertEqual(manifest["references"]["active_plan"]["path"], "PLAN.md")

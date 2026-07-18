@@ -198,6 +198,16 @@ class AtomicOwnerLock:
         owner = _read_json_object(self.owner_path, default={})
         if not isinstance(owner, Mapping):
             return False
+        pid = _lock_owner_pid(owner)
+        same_host = str(owner.get("hostname") or "") == socket.gethostname()
+        if same_host and pid is not None and _pid_exists(pid) is False:
+            try:
+                self.owner_path.unlink()
+            except FileNotFoundError:
+                return True
+            except OSError:
+                return False
+            return True
         heartbeat = _parse_iso_timestamp(owner.get("heartbeat_at") or owner.get("started_at"))
         if heartbeat is None:
             return False
@@ -205,7 +215,6 @@ class AtomicOwnerLock:
         age_seconds = max(0, int((datetime.now(UTC) - heartbeat).total_seconds()))
         if age_seconds <= ttl_seconds:
             return False
-        pid = _lock_owner_pid(owner)
         if pid is not None and _pid_exists(pid) is True:
             return False
         try:
@@ -1367,6 +1376,32 @@ def select_next_action(snapshot: Mapping[str, Any]) -> dict[str, Any]:
             considered=considered,
         )
     considered.append({"candidate": "self_expansion_resolution", "result": "none"})
+
+    dedicated_recovery_runner = _runner_for_role(snapshot, "recovery_worker")
+    capability_upgrade_failure = (
+        _oldest_exhausted_failure_for_new_recovery_runner(snapshot, dedicated_recovery_runner)
+        if dedicated_recovery_runner is not None
+        else None
+    )
+    if capability_upgrade_failure is not None and dedicated_recovery_runner is not None:
+        return _action(
+            "run_recovery",
+            reason=(
+                "An exhausted task failure has not been attempted by the newly available dedicated recovery runner; "
+                "one autonomous capability-upgrade retry was selected."
+            ),
+            selected={
+                "role": "recovery_worker",
+                "runner_id": dedicated_recovery_runner.runner_id,
+                "runner_role": dedicated_recovery_runner.role,
+                "task_id": capability_upgrade_failure.get("task_id"),
+                "failure_id": _record_id(capability_upgrade_failure),
+                "run_kind": "recovery",
+                "capability_upgrade_retry": True,
+            },
+            considered=considered,
+        )
+    considered.append({"candidate": "dedicated_recovery_capability_upgrade", "result": "none"})
 
     recovery_expansion = expansion_candidate(snapshot, mode="no_executable")
     if (
@@ -3293,6 +3328,53 @@ def _oldest_recoverable_failure(snapshot: Mapping[str, Any]) -> Mapping[str, Any
         if attempts >= budget:
             continue
         created = str(failure.get("first_seen_at") or failure.get("created_at") or failure.get("detected_at") or f"{index:08d}")
+        candidates.append((created, index, failure))
+    if not candidates:
+        return None
+    return sorted(candidates, key=lambda item: (item[0], item[1]))[0][2]
+
+
+def _oldest_exhausted_failure_for_new_recovery_runner(
+    snapshot: Mapping[str, Any],
+    runner: RunnerConfig,
+) -> Mapping[str, Any] | None:
+    from runtime.self_expansion import _failures_waiting_on_expansion_evidence
+
+    registry = snapshot.get("failure_registry")
+    failures = registry.get("failures", []) if isinstance(registry, Mapping) else []
+    tasks = {
+        str(task.get("task_id") or ""): str(task.get("status") or "")
+        for task in snapshot.get("tasks", [])
+        if isinstance(task, Mapping)
+    }
+    deferred_failure_ids = _failures_waiting_on_expansion_evidence(snapshot, tasks)
+    candidates: list[tuple[str, int, Mapping[str, Any]]] = []
+    for index, failure in enumerate(failures):
+        if not isinstance(failure, Mapping):
+            continue
+        if str(failure.get("failure_class") or "") in ACTION_FAILURE_CLASSES:
+            continue
+        if str(failure.get("status") or "").lower() != "exhausted":
+            continue
+        if not str(failure.get("task_id") or ""):
+            continue
+        if str(failure.get("failure_id") or "") in deferred_failure_ids:
+            continue
+        attempted = failure.get("recovery_runner_ids_attempted", [])
+        attempted_ids = {
+            str(item)
+            for item in attempted
+            if str(item)
+        } if isinstance(attempted, Sequence) and not isinstance(attempted, (str, bytes)) else set()
+        last_runner_id = str(failure.get("last_recovery_runner_id") or "")
+        if runner.runner_id == last_runner_id or runner.runner_id in attempted_ids:
+            continue
+        created = str(
+            failure.get("first_seen_at")
+            or failure.get("created_at")
+            or failure.get("detected_at")
+            or f"{index:08d}"
+        )
         candidates.append((created, index, failure))
     if not candidates:
         return None
@@ -6504,6 +6586,7 @@ def _record_action_failure(
             failures = []
             registry["failures"] = failures
         existing: dict[str, Any] | None = None
+        terminal_same_scope: dict[str, Any] | None = None
         for failure in failures:
             if not isinstance(failure, dict):
                 continue
@@ -6512,10 +6595,29 @@ def _record_action_failure(
             if str(failure.get("action_scope_key") or "") != scope_key:
                 continue
             if str(failure.get("status") or "") in FAILURE_TERMINAL_STATUSES:
+                if (
+                    terminal_same_scope is None
+                    and str(failure.get("failure_signature") or "") == signature
+                ):
+                    terminal_same_scope = failure
                 continue
             existing = failure
             break
         if existing is None:
+            if terminal_same_scope is not None:
+                terminal_same_scope["last_seen_at"] = seen_at
+                terminal_same_scope["run_id"] = run_id or terminal_same_scope.get("run_id")
+                terminal_same_scope["attempts"] = _int_value(
+                    terminal_same_scope.get("attempts"), default=0
+                ) + 1
+                terminal_same_scope["repeat_observations_after_terminal"] = _int_value(
+                    terminal_same_scope.get("repeat_observations_after_terminal"), default=0
+                ) + 1
+                terminal_same_scope["run_ids"] = _append_unique_string(
+                    terminal_same_scope.get("run_ids"), run_id
+                )
+                changed = dict(terminal_same_scope)
+                return
             record = {
                 "failure_id": _new_failure_id(),
                 "task_id": "",
@@ -6589,7 +6691,7 @@ def _resolve_action_failure(
                 continue
             if str(failure.get("action_scope_key") or "") != scope_key:
                 continue
-            if str(failure.get("status") or "") in FAILURE_TERMINAL_STATUSES:
+            if str(failure.get("status") or "") in {"recovered", "waived"}:
                 continue
             failure["status"] = "recovered"
             failure["last_seen_at"] = ended_at
@@ -6648,6 +6750,10 @@ def _mark_failure_recovering(
         failure["last_recovery_started_at"] = now
         failure["active_recovery_run_id"] = prepared.run_id
         failure["last_recovery_run_id"] = prepared.run_id
+        failure["last_recovery_runner_id"] = prepared.runner_id
+        failure["recovery_runner_ids_attempted"] = _append_unique_string(
+            failure.get("recovery_runner_ids_attempted"), prepared.runner_id
+        )
         failure["last_recovery_prompt_path"] = _path_for_record(project, prepared.prompt_path)
         failure["last_recovery_role_output_dir"] = _path_for_record(project, prepared.role_output_dir)
         failure["recovery_run_ids"] = _append_unique_string(failure.get("recovery_run_ids"), prepared.run_id)
