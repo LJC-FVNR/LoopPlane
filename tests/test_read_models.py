@@ -1006,6 +1006,39 @@ class ReadModelBuilderIntegrationTest(unittest.TestCase):
             self.assertEqual(third["diagnostics"]["counts"]["run_detail_records_reused"], 0)
             self.assertEqual(third["diagnostics"]["counts"]["run_detail_files_written"], 1)
 
+    def test_rebuild_refreshes_reused_run_detail_envelope_after_event_change(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "Refresh reused run detail envelope.")
+            configure_fake_summary_agent(project)
+            write_plan(project, validation="file_exists: artifacts/result.txt")
+            write_worker_run(project, run_id="run_reuse_event", create_artifact=True)
+            first = rebuild_read_models(project)
+            self.assertTrue(first["ok"], json.dumps(first, indent=2, sort_keys=True))
+            workflow = load_workflow_config(project)
+            paths = WorkflowPaths.from_config(project, workflow)
+            detail_path = next((paths.read_models_dir / "run_details").glob("*.json"))
+            first_detail = json.loads(detail_path.read_text(encoding="utf-8"))
+
+            event = append_event(
+                paths,
+                workflow_id=workflow["workflow_id"],
+                event_type="read_model_test_event",
+                data={"source": "run_detail_envelope_regression"},
+                snapshot_interval=None,
+            )
+            second = rebuild_read_models(project)
+
+            self.assertTrue(second["ok"], json.dumps(second, indent=2, sort_keys=True))
+            self.assertEqual(second["diagnostics"]["counts"]["run_detail_records_reused"], 1)
+            self.assertEqual(second["diagnostics"]["counts"]["run_detail_files_written"], 1)
+            self.assertEqual(second["diagnostics"]["counts"]["run_detail_files_reused_on_disk"], 0)
+            second_detail = json.loads(detail_path.read_text(encoding="utf-8"))
+            self.assertNotEqual(second_detail["source_event_seq"], first_detail["source_event_seq"])
+            self.assertEqual(second_detail["source_event_id"], event["event_id"])
+            strict = read_models_module.strict_read_model_diagnostics(project, compare_rebuild=True)
+            self.assertTrue(strict["ok"], json.dumps(strict, indent=2, sort_keys=True))
+
     def test_rebuild_write_path_uses_single_writer_lock(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             project = Path(tmp) / "project"

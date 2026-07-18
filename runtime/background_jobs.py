@@ -5,6 +5,7 @@ import json
 import os
 import shlex
 import signal
+import socket
 import subprocess
 import sys
 import threading
@@ -40,6 +41,8 @@ RECORDED_PROCESS_KILL_TIMEOUT_SECONDS = 1.0
 DEFAULT_HEARTBEAT_SECONDS = 5.0
 DEFAULT_WATCHDOG_RECENT_CHECK_LIMIT = 5
 SUPERVISOR_SCHEMA_VERSION = "1.0"
+BACKGROUND_REGISTRY_LOCK_TTL_SECONDS = 30
+BACKGROUND_REGISTRY_LOCK_WAIT_SECONDS = 35.0
 
 
 def start_background_job(
@@ -91,6 +94,7 @@ def start_background_job(
     job_dir = paths.runtime_dir / "background_jobs" / job_id
 
     started_at = utc_timestamp()
+    supervisor_host = socket.gethostname()
     timeout_at = _timestamp_after(started_at, timeout_seconds) if timeout_seconds and timeout_seconds > 0 else None
     watchdog_interval = _positive_int(watchdog_interval_seconds) or _positive_int(
         os.environ.get("LOOPPLANE_BACKGROUND_WATCHDOG_INTERVAL_SECONDS")
@@ -125,6 +129,7 @@ def start_background_job(
         "timeout_seconds": timeout_seconds,
         "timeout_at": timeout_at,
         "heartbeat_seconds": DEFAULT_HEARTBEAT_SECONDS,
+        "supervisor_host": supervisor_host,
     }
     if watchdog_interval is not None:
         launch.update(
@@ -159,6 +164,7 @@ def start_background_job(
         "exit_code_file": _path_for_record(project, exit_code_file),
         "launch_path": _path_for_record(project, launch_path),
         "source": "loopplane_background_start",
+        "supervisor_host": supervisor_host,
         "timeout_at": timeout_at,
     }
     if watchdog_interval is not None:
@@ -519,6 +525,30 @@ def supervise_main(argv: Sequence[str] | None = None) -> int:
     return EXIT_INVALID_CONFIG
 
 
+def _supervisor_update_job(
+    paths: Any,
+    *,
+    workflow_id: str,
+    job_id: str,
+    supervisor_log: Path,
+    operation: str,
+    update: Callable[[dict[str, Any]], Mapping[str, Any]],
+    durable: bool,
+) -> dict[str, Any] | None:
+    try:
+        return _update_job(
+            paths,
+            workflow_id=workflow_id,
+            job_id=job_id,
+            update=update,
+            lock_wait_seconds=BACKGROUND_REGISTRY_LOCK_WAIT_SECONDS if durable else 0.0,
+        )
+    except SchedulerLockError as error:
+        disposition = "retry_exhausted" if durable else "update_deferred"
+        _append_log(supervisor_log, f"{operation}_registry_lock_contended {disposition}: {error}")
+        return _registry_job(paths, workflow_id=workflow_id, job_id=job_id)
+
+
 def _run_supervisor(project: Path, *, workflow_id: str, job_id: str, launch_path: Path) -> int:
     loaded = _load_project_paths(project, workflow_id=workflow_id)
     if loaded.get("ok") is not True:
@@ -531,13 +561,18 @@ def _run_supervisor(project: Path, *, workflow_id: str, job_id: str, launch_path
         else {}
     )
     continue_on_fail = execution_config.get("continue_on_fail") is True
+    default_job_dir = paths.runtime_dir / "background_jobs" / job_id
+    supervisor_log = default_job_dir / "supervisor.log"
     try:
         launch = json.loads(launch_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
-        _update_job(
+        _supervisor_update_job(
             paths,
             workflow_id=workflow_id,
             job_id=job_id,
+            supervisor_log=supervisor_log,
+            operation="launch_read_failure",
+            durable=True,
             update=lambda job: _supervisor_terminal_update(
                 job,
                 {
@@ -551,10 +586,13 @@ def _run_supervisor(project: Path, *, workflow_id: str, job_id: str, launch_path
         )
         return EXIT_INVALID_CONFIG
     if not isinstance(launch, Mapping):
-        _update_job(
+        _supervisor_update_job(
             paths,
             workflow_id=workflow_id,
             job_id=job_id,
+            supervisor_log=supervisor_log,
+            operation="launch_validation_failure",
+            durable=True,
             update=lambda job: _supervisor_terminal_update(
                 job,
                 {
@@ -567,7 +605,6 @@ def _run_supervisor(project: Path, *, workflow_id: str, job_id: str, launch_path
             ),
         )
         return EXIT_INVALID_CONFIG
-    default_job_dir = paths.runtime_dir / "background_jobs" / job_id
     supervisor_log = Path(str(launch.get("supervisor_log_path") or default_job_dir / "supervisor.log"))
     _append_log(supervisor_log, f"supervisor_started pid={os.getpid()} job_id={job_id}")
     command = _normalized_command(launch.get("command") if isinstance(launch.get("command"), Sequence) else [])
@@ -587,10 +624,13 @@ def _run_supervisor(project: Path, *, workflow_id: str, job_id: str, launch_path
         env.update({str(key): str(value) for key, value in launch_env.items()})
     if not command:
         _append_log(supervisor_log, "launch_command_missing")
-        _update_job(
+        _supervisor_update_job(
             paths,
             workflow_id=workflow_id,
             job_id=job_id,
+            supervisor_log=supervisor_log,
+            operation="launch_command_failure",
+            durable=True,
             update=lambda job: _supervisor_terminal_update(
                 job,
                 {
@@ -603,14 +643,19 @@ def _run_supervisor(project: Path, *, workflow_id: str, job_id: str, launch_path
             ),
         )
         return EXIT_INVALID_CONFIG
-    initial_job = _update_job(
+    supervisor_host = socket.gethostname()
+    initial_job = _supervisor_update_job(
         paths,
         workflow_id=workflow_id,
         job_id=job_id,
+        supervisor_log=supervisor_log,
+        operation="initial_state",
+        durable=True,
         update=lambda job: _supervisor_running_update(
             job,
             {
                 "supervisor_pid": os.getpid(),
+                "supervisor_host": supervisor_host,
                 "heartbeat_at": utc_timestamp(),
                 "updated_at": utc_timestamp(),
             },
@@ -653,16 +698,20 @@ def _run_supervisor(project: Path, *, workflow_id: str, job_id: str, launch_path
                 start_new_session=True,
             )
             _append_log(supervisor_log, f"command_started pid={process.pid}")
-            started_job = _update_job(
+            started_job = _supervisor_update_job(
                 paths,
                 workflow_id=workflow_id,
                 job_id=job_id,
+                supervisor_log=supervisor_log,
+                operation="command_start",
+                durable=True,
                 update=lambda job: _supervisor_running_update(
                     job,
                     {
                         "pid": process.pid,
                         "child_pid": process.pid,
                         "supervisor_pid": os.getpid(),
+                        "supervisor_host": supervisor_host,
                         "heartbeat_at": utc_timestamp(),
                         "updated_at": utc_timestamp(),
                     },
@@ -714,10 +763,13 @@ def _run_supervisor(project: Path, *, workflow_id: str, job_id: str, launch_path
                         _append_log(supervisor_log, f"watchdog_stopping_job status={final_status}")
                         _terminate_popen_process(process)
                         _write_text_atomic(exit_code_file, f"{process.returncode if process.returncode is not None else -1}\n")
-                        final_job = _update_job(
+                        final_job = _supervisor_update_job(
                             paths,
                             workflow_id=workflow_id,
                             job_id=job_id,
+                            supervisor_log=supervisor_log,
+                            operation="watchdog_terminal",
+                            durable=True,
                             update=lambda job: _supervisor_terminal_update(
                                 job,
                                 _background_terminal_update(
@@ -733,16 +785,20 @@ def _run_supervisor(project: Path, *, workflow_id: str, job_id: str, launch_path
                             _append_log(supervisor_log, f"watchdog_terminal_update_preserved status={preserved_status}")
                         return 0
                     next_watchdog_at = time.monotonic() + watchdog_interval
-                heartbeat_job = _update_job(
+                heartbeat_job = _supervisor_update_job(
                     paths,
                     workflow_id=workflow_id,
                     job_id=job_id,
+                    supervisor_log=supervisor_log,
+                    operation="heartbeat",
+                    durable=False,
                     update=lambda job: _supervisor_running_update(
                         job,
                         {
                             "pid": process.pid,
                             "child_pid": process.pid,
                             "supervisor_pid": os.getpid(),
+                            "supervisor_host": supervisor_host,
                             "heartbeat_at": utc_timestamp(),
                             "updated_at": utc_timestamp(),
                         },
@@ -764,10 +820,13 @@ def _run_supervisor(project: Path, *, workflow_id: str, job_id: str, launch_path
                     pass
     except BaseException as error:
         _append_log(supervisor_log, f"supervisor_error {type(error).__name__}: {error}")
-        _update_job(
+        _supervisor_update_job(
             paths,
             workflow_id=workflow_id,
             job_id=job_id,
+            supervisor_log=supervisor_log,
+            operation="supervisor_failure",
+            durable=True,
             update=lambda job: _supervisor_terminal_update(
                 job,
                 {
@@ -791,10 +850,13 @@ def _run_supervisor(project: Path, *, workflow_id: str, job_id: str, launch_path
         return 0
     if signal_stop.get("signum") is not None:
         _append_log(supervisor_log, f"command_stopped_by_signal signum={signal_stop['signum']} exit_code={exit_code}")
-        _update_job(
+        _supervisor_update_job(
             paths,
             workflow_id=workflow_id,
             job_id=job_id,
+            supervisor_log=supervisor_log,
+            operation="signal_terminal",
+            durable=True,
             update=lambda job: {
                 **job,
                 "status": "cancelled",
@@ -808,10 +870,13 @@ def _run_supervisor(project: Path, *, workflow_id: str, job_id: str, launch_path
         return 0
     final_status = "timed_out" if timed_out else ("completed" if exit_code == 0 else "failed")
     _append_log(supervisor_log, f"command_finished status={final_status} exit_code={exit_code}")
-    final_job = _update_job(
+    final_job = _supervisor_update_job(
         paths,
         workflow_id=workflow_id,
         job_id=job_id,
+        supervisor_log=supervisor_log,
+        operation="command_terminal",
+        durable=True,
         update=lambda job: _supervisor_terminal_update(
             job,
             _background_terminal_update(
@@ -880,10 +945,13 @@ def _run_watchdog_check(
     started_at = utc_timestamp()
     runner_id = _non_empty_text(launch.get("watchdog_runner")) or "inspector"
     _append_log(supervisor_log, f"watchdog_started check_id={check_id} runner={runner_id}")
-    _update_job(
+    _supervisor_update_job(
         paths,
         workflow_id=workflow_id,
         job_id=job_id,
+        supervisor_log=supervisor_log,
+        operation="watchdog_start",
+        durable=False,
         update=lambda job: _job_with_watchdog_update(
             job,
             {
@@ -927,10 +995,13 @@ def _run_watchdog_check(
             "error": f"{type(error).__name__}: {error}",
         }
         _append_log(supervisor_log, f"watchdog_error check_id={check_id} error={type(error).__name__}: {error}")
-        _update_job(
+        _supervisor_update_job(
             paths,
             workflow_id=workflow_id,
             job_id=job_id,
+            supervisor_log=supervisor_log,
+            operation="watchdog_error",
+            durable=False,
             update=lambda job: _job_with_watchdog_update(job, _watchdog_record_update(job, record, "inspector_error")),
         )
         return {"stop_job": False, "status": "running"}
@@ -958,10 +1029,13 @@ def _run_watchdog_check(
         f"recommended_status={record.get('recommended_status') or '-'} "
         f"healthy_progress={record.get('healthy_progress')}",
     )
-    _update_job(
+    _supervisor_update_job(
         paths,
         workflow_id=workflow_id,
         job_id=job_id,
+        supervisor_log=supervisor_log,
+        operation="watchdog_complete",
+        durable=False,
         update=lambda job: _job_with_watchdog_update(
             job,
             _watchdog_record_update(
@@ -1272,24 +1346,27 @@ def _refresh_registry_jobs(project: Path, paths: Any, *, workflow_id: str) -> li
     return refreshed
 
 
-def _update_registry_locked(paths: Any, *, workflow_id: str, update: Callable[[dict[str, Any]], Any]) -> Any:
+def _update_registry_locked(
+    paths: Any,
+    *,
+    workflow_id: str,
+    update: Callable[[dict[str, Any]], Any],
+    lock_wait_seconds: float = BACKGROUND_REGISTRY_LOCK_WAIT_SECONDS,
+) -> Any:
     owner = f"background-cli:{os.getpid()}:{uuid.uuid4().hex[:8]}"
-    lock = AtomicOwnerLock(paths.runtime_dir / "lock" / "background_jobs_lock", owner, ttl_seconds=30)
-    deadline = time.monotonic() + 10.0
-    while True:
-        try:
-            with lock.acquire():
-                registry = _read_registry(paths, workflow_id=workflow_id)
-                result = update(registry)
-                registry["schema_version"] = SCHEMA_VERSION
-                registry["workflow_id"] = workflow_id
-                registry["updated_at"] = utc_timestamp()
-                _write_json_atomic(paths.runtime_dir / BACKGROUND_JOBS_FILENAME, registry)
-                return result
-        except SchedulerLockError:
-            if time.monotonic() >= deadline:
-                raise
-            time.sleep(0.05)
+    lock = AtomicOwnerLock(
+        paths.runtime_dir / "lock" / "background_jobs_lock",
+        owner,
+        ttl_seconds=BACKGROUND_REGISTRY_LOCK_TTL_SECONDS,
+    )
+    with lock.acquire(timeout_seconds=max(0.0, lock_wait_seconds)):
+        registry = _read_registry(paths, workflow_id=workflow_id)
+        result = update(registry)
+        registry["schema_version"] = SCHEMA_VERSION
+        registry["workflow_id"] = workflow_id
+        registry["updated_at"] = utc_timestamp()
+        _write_json_atomic(paths.runtime_dir / BACKGROUND_JOBS_FILENAME, registry)
+        return result
 
 
 def _upsert_job(
@@ -1325,6 +1402,7 @@ def _update_job(
     workflow_id: str,
     job_id: str,
     update: Callable[[dict[str, Any]], Mapping[str, Any]],
+    lock_wait_seconds: float = BACKGROUND_REGISTRY_LOCK_WAIT_SECONDS,
 ) -> dict[str, Any] | None:
     updated: dict[str, Any] | None = None
 
@@ -1342,7 +1420,12 @@ def _update_job(
                 updated = next_job
                 return
 
-    _update_registry_locked(paths, workflow_id=workflow_id, update=mutate)
+    _update_registry_locked(
+        paths,
+        workflow_id=workflow_id,
+        update=mutate,
+        lock_wait_seconds=lock_wait_seconds,
+    )
     return updated
 
 
@@ -1407,6 +1490,8 @@ def _refresh_job(project: Path, paths: Any, job: Mapping[str, Any]) -> dict[str,
             child_pid = _positive_int(refreshed.get("pid") or refreshed.get("child_pid"))
             supervisor_pid = _positive_int(refreshed.get("supervisor_pid"))
             if (
+                _job_pid_probe_may_confirm_liveness(refreshed)
+                and
                 child_pid is not None
                 and supervisor_pid is not None
                 and _pid_exists(child_pid)
@@ -1426,7 +1511,11 @@ def _refresh_job(project: Path, paths: Any, job: Mapping[str, Any]) -> dict[str,
             refreshed["next_prompt_ready"] = False
             return refreshed
         pid = _positive_int(refreshed.get("pid"))
-        if pid is not None and _pid_exists(pid) is False:
+        if (
+            pid is not None
+            and _job_supervisor_is_local(refreshed)
+            and _pid_exists(pid) is False
+        ):
             if _pid_missing_is_within_startup_grace(refreshed, pid=pid, age_seconds=age):
                 refreshed["next_prompt_ready"] = False
                 return refreshed
@@ -1504,6 +1593,7 @@ def _agent_status_job_fragment(job: Mapping[str, Any]) -> dict[str, Any]:
         "wake_next_agent_when",
         "pid",
         "supervisor_pid",
+        "supervisor_host",
         "logs",
         "exit_code_file",
         "command",
@@ -1747,6 +1837,39 @@ def _pid_is_active(pid: int) -> bool | None:
     return not _pid_is_zombie(pid)
 
 
+def _job_supervisor_is_local(job: Mapping[str, Any]) -> bool:
+    """Whether local PID probes are authoritative for this background job.
+
+    Shared workflow state is routinely inspected from login, dashboard, and
+    controller nodes whose PID namespaces are independent.  A missing local
+    PID is evidence only on the host that launched the supervisor.  Legacy
+    records without host provenance therefore rely on their heartbeat and
+    exit-code evidence instead of being falsely marked stale.
+    """
+
+    supervisor_host = _non_empty_text(job.get("supervisor_host"))
+    return supervisor_host is not None and _hostnames_match(supervisor_host, socket.gethostname())
+
+
+def _job_pid_probe_may_confirm_liveness(job: Mapping[str, Any]) -> bool:
+    """Whether positive local PID evidence may preserve a running record.
+
+    PID values are meaningful only in the launching host's namespace. Legacy
+    records without host provenance therefore cannot use either positive or
+    negative PID evidence.
+    """
+
+    return _job_supervisor_is_local(job)
+
+
+def _hostnames_match(left: str, right: str) -> bool:
+    left_normalized = left.strip().lower().rstrip(".")
+    right_normalized = right.strip().lower().rstrip(".")
+    if not left_normalized or not right_normalized:
+        return False
+    return left_normalized == right_normalized or left_normalized.split(".", 1)[0] == right_normalized.split(".", 1)[0]
+
+
 def _terminate_process_group(pid: int) -> bool:
     if pid <= 0:
         return False
@@ -1802,6 +1925,10 @@ def _terminate_popen_process(process: subprocess.Popen[Any], *, timeout_seconds:
 
 
 def _terminate_recorded_processes(job: Mapping[str, Any]) -> list[int]:
+    # PID namespaces are node-local. Acting on PIDs recorded by a supervisor
+    # on another host can signal unrelated processes on this host.
+    if not _job_supervisor_is_local(job):
+        return []
     killed: list[int] = []
     for key in ("child_pid", "pid", "supervisor_pid"):
         pid = _positive_int(job.get(key))

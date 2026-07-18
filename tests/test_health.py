@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import socket
 import subprocess
 import sys
 import tempfile
@@ -375,6 +376,114 @@ class HealthProbeTest(unittest.TestCase):
                     self.assertEqual(result["status"], overall_status, json.dumps(result, indent=2, sort_keys=True))
                     self.assertEqual(check_by_name(result, check_name)["status"], check_status)
                     self.assertTrue(result["requires_attention"])
+
+    def test_terminal_failed_background_is_recovery_warning_not_malformed_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "Terminal background failures are autonomous recovery evidence.")
+            write_json(
+                project / ".loopplane" / "runtime" / "background_jobs.json",
+                {
+                    "schema_version": "1.5",
+                    "jobs": [
+                        {
+                            "job_id": "bg_terminal_failed",
+                            "task_id": "P0.T001",
+                            "run_id": "run_terminal_failed",
+                            "status": "failed",
+                            "next_prompt_ready": False,
+                            "heartbeat_at": "2000-01-01T00:00:00Z",
+                            "pid": 99999999,
+                            "exit_code": 1,
+                        }
+                    ],
+                },
+            )
+
+            result = run_health_probe(project)
+
+            check = check_by_name(result, "background_jobs")
+            self.assertEqual(check["status"], "warn", json.dumps(result, indent=2, sort_keys=True))
+            self.assertIn("autonomous scheduler recovery", json.dumps(check, sort_keys=True))
+            self.assertNotIn("process is not live", json.dumps(check, sort_keys=True))
+            self.assertNotIn("stale heartbeat", json.dumps(check, sort_keys=True))
+
+    def test_remote_background_supervisor_does_not_use_local_pid_namespace(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "Remote background process health relies on its heartbeat.")
+            write_json(
+                project / ".loopplane" / "runtime" / "background_jobs.json",
+                {
+                    "schema_version": "1.5",
+                    "jobs": [
+                        {
+                            "job_id": "bg_remote_running",
+                            "task_id": "P0.T001",
+                            "run_id": "run_remote_running",
+                            "status": "running",
+                            "next_prompt_ready": False,
+                            "heartbeat_at": timestamp(),
+                            "pid": 99999999,
+                            "supervisor_host": f"remote-{socket.gethostname()}",
+                            "wake_next_agent_when": "Wait for remote completion.",
+                        }
+                    ],
+                },
+            )
+
+            result = run_health_probe(project)
+
+            check = check_by_name(result, "background_jobs")
+            self.assertEqual(check["status"], "pass", json.dumps(result, indent=2, sort_keys=True))
+            self.assertNotIn("process is not live", json.dumps(check, sort_keys=True))
+
+    def test_adopted_background_job_matches_agent_status_by_job_id(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "A handoff run may adopt a prior run's background job.")
+            write_json(
+                project / ".loopplane" / "runtime" / "background_jobs.json",
+                {
+                    "schema_version": "1.5",
+                    "jobs": [
+                        {
+                            "job_id": "bg_prior_run",
+                            "task_id": "P0.T001",
+                            "run_id": "run_prior",
+                            "status": "running",
+                            "next_prompt_ready": False,
+                            "heartbeat_at": timestamp(),
+                            "wake_next_agent_when": "Wait for the adopted job.",
+                        }
+                    ],
+                },
+            )
+            write_json(
+                project / ".loopplane" / "results" / "P0.T001" / "runs" / "run_handoff" / "agent_status.json",
+                {
+                    "schema_version": "1.5",
+                    "run_id": "run_handoff",
+                    "task_id": "P0.T001",
+                    "status": "running_background",
+                    "next_prompt_ready": False,
+                    "wake_next_agent_when": "Wait for the adopted job.",
+                    "background_jobs": [
+                        {
+                            "job_id": "bg_prior_run",
+                            "run_id": "run_prior",
+                            "status": "running",
+                            "next_prompt_ready": False,
+                        }
+                    ],
+                },
+            )
+
+            result = run_health_probe(project)
+
+            check = check_by_name(result, "agent_status_files")
+            self.assertEqual(check["status"], "pass", json.dumps(result, indent=2, sort_keys=True))
+            self.assertNotIn("no matching background_jobs.json record", json.dumps(check, sort_keys=True))
 
     def test_nonblocking_inspector_lease_does_not_degrade_workflow_health(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -3172,6 +3172,7 @@ def _run_recommended_cli_fixture_flow(
     try:
         adapter = adapter_class()
         doctor = adapter.doctor(adapter_input)
+        doctor_payload = doctor.to_dict()
         output = adapter.run(adapter_input)
     except Exception as error:  # pragma: no cover - negative tests assert serialized failure behavior.
         problems.append("fixture_flow_exception")
@@ -3258,7 +3259,7 @@ def _run_recommended_cli_fixture_flow(
         {
             "status": "pass" if not problems else "fail",
             "doctor_status": doctor.status,
-            "doctor_checks": [dict(check) for check in doctor.checks],
+            "doctor_checks": doctor_payload["checks"],
             "exit_code": output.exit_code,
             "timed_out": output.timed_out,
             "adapter_result_path": paths.adapter_result_path.as_posix(),
@@ -9232,7 +9233,7 @@ def _runner_readiness_next_steps(project: Path, adapters: Sequence[str]) -> list
     steps: list[str] = []
     if not adapters or "codex_cli" in adapters:
         steps.append(
-            "Configure the stable Codex command before planning: "
+            "Configure the stable Codex CLI command before planning: "
             f"python3 scripts/loopplane configure-agent --project {shlex.quote(project.as_posix())} "
             "--runner worker --role worker --adapter codex_cli --command codex && "
             f"python3 scripts/loopplane doctor-agent --project {shlex.quote(project.as_posix())} --runner worker"

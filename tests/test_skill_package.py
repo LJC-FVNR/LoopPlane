@@ -133,6 +133,7 @@ def _env_with_selected_cli_fixtures(root: Path, executables: tuple[str, ...]) ->
         "LOOPPLANE_HOME": (root / "loopplane-home").as_posix(),
         "HOME": empty_home.as_posix(),
         "PATH": bin_dir.as_posix(),
+        "VSCODE_AGENT_FOLDER": "",
     }
 
 
@@ -148,6 +149,7 @@ def _env_without_agent_cli(root: Path) -> dict[str, str]:
         "LOOPPLANE_HOME": (root / "loopplane-home").as_posix(),
         "HOME": empty_home.as_posix(),
         "PATH": bin_dir.as_posix(),
+        "VSCODE_AGENT_FOLDER": "",
     }
 
 

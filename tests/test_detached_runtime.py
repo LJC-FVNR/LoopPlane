@@ -6,6 +6,7 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+import threading
 import time
 import unittest
 from unittest import mock
@@ -14,7 +15,13 @@ from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
-from runtime.detached import _should_continue_after_tick, load_supervisor_status, run_supervisor
+from runtime.detached import (
+    _action_failure_backoff_seconds,
+    _action_failure_signature,
+    _should_continue_after_tick,
+    load_supervisor_status,
+    run_supervisor,
+)
 from runtime.init_workflow import init_project
 from runtime.plan_objectives import objective_structure_fingerprint, parse_plan_objectives
 from runtime.scheduler import SchedulerLockError
@@ -330,6 +337,121 @@ def write_stale_supervisor_metadata(
 
 
 class DetachedRuntimeTest(unittest.TestCase):
+    def test_expansion_planner_failure_signature_and_backoff_are_stable_and_bounded(self) -> None:
+        selected = {
+            "action": "run_expansion_planner",
+            "ok": False,
+            "execution_result": {
+                "ok": False,
+                "runner_id": "expansion_planner_fallback",
+                "status": "failed_agent",
+                "classification": "missing_agent_status",
+                "adapter_exit_code": 2,
+            },
+        }
+
+        signature = _action_failure_signature({"ok": False, "status": "failed"}, selected)
+
+        self.assertEqual(
+            signature,
+            "run_expansion_planner|expansion_planner_fallback|failed_agent|missing_agent_status|2|False",
+        )
+        self.assertEqual(
+            [_action_failure_backoff_seconds(i, base_seconds=2.0, max_seconds=5.0) for i in range(1, 5)],
+            [2.0, 4.0, 5.0, 5.0],
+        )
+
+    def test_supervisor_circuits_repeated_expansion_planner_failure_after_bounded_backoff(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "Detached expansion-planner circuit breaker.")
+            failed_tick = {
+                "ok": False,
+                "status": "failed",
+                "exit_code": 1,
+                "selected_action": {
+                    "action": "run_expansion_planner",
+                    "ok": False,
+                    "reason": "Expansion planner failed.",
+                    "execution_result": {
+                        "ok": False,
+                        "runner_id": "expansion_planner_fallback",
+                        "status": "failed_agent",
+                        "classification": "missing_agent_status",
+                        "adapter_exit_code": 2,
+                    },
+                },
+            }
+
+            with mock.patch("runtime.detached.run_scheduler", side_effect=[failed_tick] * 3) as scheduler_mock, mock.patch(
+                "runtime.detached.time.sleep"
+            ) as sleep_mock:
+                exit_code = run_supervisor(project)
+
+            self.assertNotEqual(exit_code, 0)
+            self.assertEqual(scheduler_mock.call_count, 3)
+            self.assertEqual([call.args[0] for call in sleep_mock.call_args_list], [2.0, 4.0])
+            status = load_supervisor_status(project)
+            self.assertEqual(status["metadata"]["status"], "requires_attention")
+            self.assertEqual(status["metadata"]["stop_reason"], "repeated_action_failure")
+            self.assertEqual(status["metadata"]["consecutive_action_failures"], 3)
+
+    def test_supervisor_heartbeat_thread_runs_while_scheduler_tick_is_blocked(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "Supervisor heartbeat thread regression.")
+            completed_tick = {
+                "ok": True,
+                "status": "ok",
+                "exit_code": 0,
+                "selected_action": {
+                    "action": "complete",
+                    "reason": "Workflow is complete.",
+                    "selected": {},
+                },
+            }
+            heartbeat_threads: list[str] = []
+
+            import runtime.detached as detached_runtime
+
+            original_heartbeat = detached_runtime._heartbeat
+
+            def record_heartbeat(*args: object, **kwargs: object) -> None:
+                heartbeat_threads.append(threading.current_thread().name)
+                original_heartbeat(*args, **kwargs)
+
+            def blocked_tick(*args: object, **kwargs: object) -> dict[str, object]:
+                time.sleep(0.15)
+                return completed_tick
+
+            with mock.patch(
+                "runtime.detached.SUPERVISOR_HEARTBEAT_INTERVAL_SECONDS",
+                0.05,
+            ), mock.patch(
+                "runtime.detached._heartbeat",
+                side_effect=record_heartbeat,
+            ), mock.patch(
+                "runtime.detached.run_scheduler",
+                side_effect=blocked_tick,
+            ):
+                exit_code = run_supervisor(project)
+
+            self.assertEqual(exit_code, 0)
+            self.assertIn("loopplane-supervisor-heartbeat", heartbeat_threads)
+            status = load_supervisor_status(project)
+            self.assertEqual(status["metadata"]["status"], "completed")
+
+    def test_detached_supervisor_waits_for_retryable_runner_availability(self) -> None:
+        should_continue, reason, exit_code = _should_continue_after_tick(
+            {"ok": True, "exit_code": 0},
+            {"action": "wait_runner_availability", "would_wait": True},
+            None,
+        )
+
+        self.assertTrue(should_continue)
+        self.assertEqual(reason, "wait_runner_availability")
+        self.assertEqual(exit_code, 0)
+
     def test_supervisor_retries_transient_scheduler_authority_lock_contention(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             project = Path(tmp) / "project"
@@ -890,6 +1012,42 @@ class DetachedRuntimeTest(unittest.TestCase):
             self.assertEqual(status["status"], "stale")
             self.assertEqual(status["liveness"], "dead")
             self.assertTrue(status["heartbeat_stale"])
+
+    def test_supervisor_status_uses_fresh_heartbeat_for_remote_foreground_owner(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "Remote foreground supervisor heartbeat fixture.")
+            metadata_path = project / ".loopplane" / "runtime" / "supervisor.json"
+            now = datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+            metadata_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "1.5",
+                        "workflow_id": "wf_test",
+                        "project_root": project.as_posix(),
+                        "status": "running",
+                        "pid": 999999999,
+                        "owner": "remote-compute.invalid:999999999:fixture",
+                        "started_at": now,
+                        "updated_at": now,
+                        "heartbeat_at": now,
+                        "exit_status": None,
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            status = load_supervisor_status(project)
+
+            self.assertEqual(status["status"], "running")
+            self.assertEqual(status["liveness"], "alive")
+            self.assertEqual(status["liveness_source"], "heartbeat")
+            self.assertEqual(status["pid_probe_scope"], "remote")
+            self.assertFalse(status["heartbeat_stale"])
+            self.assertEqual(status["warnings"], [])
 
     def test_supervisor_status_accepts_fresh_owned_active_run_lease_heartbeat(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

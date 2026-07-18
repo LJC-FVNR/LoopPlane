@@ -466,6 +466,66 @@ class AuditorRuntimeTest(unittest.TestCase):
             self.assertIn("audit_report_written", events)
             self.assertIn("auditor_run_finished", events)
 
+    def test_auditor_preserves_fresh_semantic_blocking_findings(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "Preserve semantic plan audit findings.")
+            configure_planner(project)
+            require_plan_auditor(project)
+            plan_result = run_planner(project)
+            self.assertTrue(plan_result["ok"], json.dumps(plan_result, indent=2, sort_keys=True))
+
+            script = r"""
+import json
+import os
+from pathlib import Path
+
+report = {
+    "schema_version": "1.5",
+    "workflow_id": os.environ["LOOPPLANE_WORKFLOW_ID"],
+    "run_id": os.environ["LOOPPLANE_RUN_ID"],
+    "status": "failed",
+    "passed": False,
+    "ready_for_activation": False,
+    "blocking_findings": [
+        {
+            "code": "semantic_gate_missing",
+            "severity": "blocking",
+            "message": "The scientific gate has no observable semantic acceptance check.",
+        }
+    ],
+    "warnings": ["Semantic warning retained."],
+    "recommended_revisions": ["Add an observable semantic gate."],
+}
+Path(os.environ["LOOPPLANE_AUDIT_REPORT_PATH"]).write_text(
+    json.dumps(report, indent=2) + "\n",
+    encoding="utf-8",
+)
+"""
+            configure_auditor(
+                project,
+                adapter="shell",
+                command=sys.executable,
+                args=["-c", script],
+                prompt_delivery={"mode": "stdin"},
+            )
+
+            result = run_auditor(project)
+
+            self.assertFalse(result["ok"], json.dumps(result, indent=2, sort_keys=True))
+            self.assertEqual(result["status"], "failed")
+            report = json.loads(
+                (project / ".loopplane" / "planning" / "audit_report.json").read_text(encoding="utf-8")
+            )
+            self.assertTrue(report["semantic_report_fresh"])
+            self.assertTrue(report["semantic_report_merged"])
+            self.assertIn(
+                "semantic_gate_missing",
+                {finding["code"] for finding in report["blocking_findings"]},
+            )
+            self.assertIn("Semantic warning retained.", report["warnings"])
+            self.assertIn("Add an observable semantic gate.", report["recommended_revisions"])
+
     def test_auditor_fixture_catches_missing_acceptance_criteria(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             project = Path(tmp) / "project"

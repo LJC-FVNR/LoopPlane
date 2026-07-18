@@ -93,13 +93,14 @@ def _build_codex_invocation(
 
     configured_args = [*command_parts[1:], *(_expand_template(value, adapter_input) for value in adapter_input.args)]
     approval_args, configured_args = _extract_approval_args(configured_args)
+    legacy_effort, configured_args = _extract_legacy_effort_args(configured_args)
     if not approval_args:
         approval_args = ["--ask-for-approval", "never"]
     if configured_args and configured_args[0] in {"exec", "e"}:
         configured_args = configured_args[1:]
 
     argv = [command_parts[0], *approval_args, "exec", *configured_args]
-    _append_default_exec_flags(argv, adapter_input)
+    _append_default_exec_flags(argv, adapter_input, explicit_effort=legacy_effort)
     argv.append("-")
     return argv, adapter_input.prompt_content, resolution
 
@@ -118,8 +119,13 @@ def _resolve_configured_codex(adapter_input: AdapterInput) -> ExecutableResoluti
     )
 
 
-def _append_default_exec_flags(argv: list[str], adapter_input: AdapterInput) -> None:
-    _append_codex_model_flags(argv, adapter_input)
+def _append_default_exec_flags(
+    argv: list[str],
+    adapter_input: AdapterInput,
+    *,
+    explicit_effort: str | None = None,
+) -> None:
+    _append_codex_model_flags(argv, adapter_input, explicit_effort=explicit_effort)
     if not _has_any_flag(argv, {"--ask-for-approval", "-a"}):
         argv.extend(("--ask-for-approval", "never"))
     if not _has_any_flag(argv, {"--skip-git-repo-check"}):
@@ -132,12 +138,20 @@ def _append_default_exec_flags(argv: list[str], adapter_input: AdapterInput) -> 
         argv.extend(("--sandbox", sandbox))
 
 
-def _append_codex_model_flags(argv: list[str], adapter_input: AdapterInput) -> None:
+def _append_codex_model_flags(
+    argv: list[str],
+    adapter_input: AdapterInput,
+    *,
+    explicit_effort: str | None = None,
+) -> None:
     options = _adapter_options(adapter_input)
     model = _option_text(options, ("model", "codex_model"))
     if model and not _has_any_flag(argv, {"--model", "-m"}):
         argv.extend(("--model", model))
-    effort = _option_text(options, ("reasoning_effort", "model_reasoning_effort", "codex_reasoning_effort", "effort"))
+    effort = explicit_effort or _option_text(
+        options,
+        ("reasoning_effort", "model_reasoning_effort", "codex_reasoning_effort", "effort"),
+    )
     config_key = _option_text(options, ("reasoning_effort_config_key", "codex_reasoning_effort_config_key"))
     if not config_key:
         config_key = "model_reasoning_effort"
@@ -195,6 +209,39 @@ def _extract_approval_args(args: list[str]) -> tuple[list[str], list[str]]:
         remaining.append(arg)
         index += 1
     return approval_args, remaining
+
+
+def _extract_legacy_effort_args(args: list[str]) -> tuple[str | None, list[str]]:
+    """Translate the legacy ``--effort`` convenience flag into Codex config.
+
+    Some machine-local runner profiles predate the Codex CLI's current surface
+    and pass ``--effort VALUE`` after ``codex exec``.  Current Codex rejects that
+    argument, while the equivalent ``-c model_reasoning_effort=VALUE`` remains
+    supported.  Treat the legacy form as an explicit override instead of
+    forwarding an invocation that is guaranteed to fail.
+    """
+
+    effort: str | None = None
+    remaining: list[str] = []
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        if arg == "--effort":
+            if index + 1 >= len(args) or not str(args[index + 1]).strip():
+                raise AdapterContractError("--effort requires a non-empty value")
+            effort = str(args[index + 1]).strip()
+            index += 2
+            continue
+        if arg.startswith("--effort="):
+            value = arg.split("=", 1)[1].strip()
+            if not value:
+                raise AdapterContractError("--effort requires a non-empty value")
+            effort = value
+            index += 1
+            continue
+        remaining.append(arg)
+        index += 1
+    return effort, remaining
 
 
 def _has_any_flag(argv: list[str], flags: set[str]) -> bool:

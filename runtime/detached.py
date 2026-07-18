@@ -6,6 +6,7 @@ import os
 import socket
 import subprocess
 import sys
+import threading
 import time
 import uuid
 from collections.abc import Mapping, Sequence
@@ -28,6 +29,7 @@ SUPERVISOR_LOG_DIRNAME = "supervisor"
 SUPERVISOR_STDOUT_FILENAME = "supervisor_stdout.log"
 SUPERVISOR_STDERR_FILENAME = "supervisor_stderr.log"
 SUPERVISOR_HEARTBEAT_TTL_SECONDS = 120
+SUPERVISOR_METADATA_LOCK = threading.RLock()
 
 
 def _positive_float_from_env(name: str, default: float) -> float:
@@ -41,6 +43,10 @@ def _positive_float_from_env(name: str, default: float) -> float:
 
 
 DEFAULT_POLL_INTERVAL_SECONDS = _positive_float_from_env("LOOPPLANE_SUPERVISOR_POLL_INTERVAL_SECONDS", 0.2)
+SUPERVISOR_HEARTBEAT_INTERVAL_SECONDS = _positive_float_from_env(
+    "LOOPPLANE_SUPERVISOR_HEARTBEAT_INTERVAL_SECONDS",
+    SUPERVISOR_HEARTBEAT_TTL_SECONDS / 4,
+)
 BACKGROUND_WAIT_INTERVAL_SECONDS = _positive_float_from_env("LOOPPLANE_BACKGROUND_WAIT_INTERVAL_SECONDS", 60.0)
 TERMINAL_SUPERVISOR_STATUSES = frozenset(
     {
@@ -59,10 +65,29 @@ ACTIVE_SUPERVISOR_STATUSES = frozenset(
         "waiting_config",
         "waiting_approval",
         "waiting_background",
+        "waiting_runner_availability",
     }
 )
-RECOVERABLE_WAIT_ACTIONS = frozenset({"wait_paused", "wait_config", "wait_approval"})
+RECOVERABLE_WAIT_ACTIONS = frozenset(
+    {"wait_paused", "wait_config", "wait_approval", "wait_runner_availability"}
+)
 RECOVERABLE_WAIT_INTERVAL_SECONDS = 1.0
+RUNNER_AVAILABILITY_WAIT_INTERVAL_SECONDS = _positive_float_from_env(
+    "LOOPPLANE_RUNNER_AVAILABILITY_WAIT_INTERVAL_SECONDS", 30.0
+)
+ACTION_FAILURE_BACKOFF_BASE_SECONDS = _positive_float_from_env(
+    "LOOPPLANE_ACTION_FAILURE_BACKOFF_BASE_SECONDS", 2.0
+)
+ACTION_FAILURE_BACKOFF_MAX_SECONDS = _positive_float_from_env(
+    "LOOPPLANE_ACTION_FAILURE_BACKOFF_MAX_SECONDS", 60.0
+)
+ACTION_FAILURE_MAX_REPEATS = max(
+    1,
+    int(_positive_float_from_env("LOOPPLANE_ACTION_FAILURE_MAX_REPEATS", 3.0)),
+)
+SUPERVISOR_CIRCUIT_BREAKER_ACTIONS = frozenset(
+    {"run_expansion_planner", "run_phase_objective_verifier", "run_final_objective_verifier"}
+)
 
 
 def start_detached_scheduler(project_root: Path | str) -> dict[str, Any]:
@@ -217,6 +242,7 @@ def run_supervisor(project_root: Path | str, *, poll_interval_seconds: float = D
             "project_root": project.as_posix(),
             "status": "running",
             "pid": os.getpid(),
+            "host": socket.gethostname(),
             "process_handle": {"pid": os.getpid()},
             "owner": owner,
             "started_at": _existing_started_at(paths) or utc_timestamp(),
@@ -232,6 +258,22 @@ def run_supervisor(project_root: Path | str, *, poll_interval_seconds: float = D
     exit_status = "completed"
     stop_reason = "complete"
     poll_interval = max(0.05, float(poll_interval_seconds))
+    heartbeat_stop = threading.Event()
+    heartbeat_thread = threading.Thread(
+        target=_supervisor_heartbeat_loop,
+        args=(paths,),
+        kwargs={
+            "owner": owner,
+            "stop_event": heartbeat_stop,
+            "interval_seconds": SUPERVISOR_HEARTBEAT_INTERVAL_SECONDS,
+        },
+        name="loopplane-supervisor-heartbeat",
+        daemon=True,
+    )
+    heartbeat_thread.start()
+    previous_action_failure_signature: str | None = None
+    consecutive_action_failures = 0
+    action_failure_repeat_limit = _action_failure_repeat_limit(context["workflow"])
     try:
         while True:
             _heartbeat(paths, owner=owner, status="running")
@@ -260,6 +302,28 @@ def run_supervisor(project_root: Path | str, *, poll_interval_seconds: float = D
             action = str(selected.get("action") or "")
             follow_up = _complete_worker_follow_up(project, selected)
             should_continue, reason, loop_exit_code = _should_continue_after_tick(result, selected, follow_up)
+            action_failure_signature = _action_failure_signature(result, selected)
+            action_failure_backoff_seconds: float | None = None
+            if action_failure_signature is None:
+                previous_action_failure_signature = None
+                consecutive_action_failures = 0
+            else:
+                if action_failure_signature == previous_action_failure_signature:
+                    consecutive_action_failures += 1
+                else:
+                    previous_action_failure_signature = action_failure_signature
+                    consecutive_action_failures = 1
+                if consecutive_action_failures >= action_failure_repeat_limit:
+                    should_continue = False
+                    reason = "repeated_action_failure"
+                    loop_exit_code = EXIT_GENERIC_FAILURE
+                else:
+                    should_continue = True
+                    reason = "action_failure_backoff"
+                    loop_exit_code = EXIT_SUCCESS
+                    action_failure_backoff_seconds = _action_failure_backoff_seconds(
+                        consecutive_action_failures
+                    )
             supervisor_update = {
                 "status": _supervisor_status_after_tick(action, should_continue=should_continue, reason=reason),
                 "updated_at": utc_timestamp(),
@@ -268,6 +332,10 @@ def run_supervisor(project_root: Path | str, *, poll_interval_seconds: float = D
                 "last_action": action,
                 "last_exit_code": scheduler_exit_code(result),
                 "last_loop_reason": reason,
+                "action_failure_signature": action_failure_signature,
+                "consecutive_action_failures": consecutive_action_failures,
+                "action_failure_repeat_limit": action_failure_repeat_limit,
+                "action_failure_backoff_seconds": action_failure_backoff_seconds,
             }
             if follow_up is not None:
                 supervisor_update["last_follow_up"] = follow_up
@@ -279,7 +347,13 @@ def run_supervisor(project_root: Path | str, *, poll_interval_seconds: float = D
                 stop_reason = reason
                 break
 
-            time.sleep(_poll_interval_after_tick(action, poll_interval))
+            time.sleep(
+                _poll_interval_after_tick(
+                    action,
+                    poll_interval,
+                    failure_backoff_seconds=action_failure_backoff_seconds,
+                )
+            )
     except BaseException as error:
         exit_code = EXIT_GENERIC_FAILURE
         exit_status = "failed"
@@ -299,6 +373,8 @@ def run_supervisor(project_root: Path | str, *, poll_interval_seconds: float = D
         )
         raise
     finally:
+        heartbeat_stop.set()
+        heartbeat_thread.join(timeout=max(1.0, SUPERVISOR_HEARTBEAT_INTERVAL_SECONDS * 2))
         _merge_supervisor_metadata(
             paths,
             {
@@ -351,20 +427,28 @@ def load_supervisor_status(project_root: Path | str) -> dict[str, Any]:
         }
 
     pid = _positive_int(metadata.get("pid"))
-    alive = _pid_exists(pid) if pid is not None else None
-    liveness = "alive" if alive is True else ("dead" if alive is False else "unknown")
     metadata_status = str(metadata.get("status") or "unknown")
     metadata_heartbeat_stale = _heartbeat_is_stale(metadata.get("heartbeat_at"))
     active_run_lease_id = _fresh_supervisor_owned_active_run_lease(paths, supervisor_pid=pid)
     heartbeat_covered_by_active_run_lease = bool(
-        metadata_heartbeat_stale and alive is True and active_run_lease_id
+        metadata_heartbeat_stale and active_run_lease_id
     )
     heartbeat_stale = metadata_heartbeat_stale and not heartbeat_covered_by_active_run_lease
+    active_or_unknown = metadata_status in ACTIVE_SUPERVISOR_STATUSES or metadata_status == "unknown"
+    supervisor_host = _supervisor_host(metadata)
+    host_is_local = _host_is_local(supervisor_host)
+    pid_probe_scope = "remote" if host_is_local is False else ("local" if host_is_local is True else "unknown")
+    if host_is_local is False:
+        alive = True if active_or_unknown and not heartbeat_stale else None
+        liveness_source = "heartbeat" if alive is True else None
+    else:
+        alive = _pid_exists(pid) if pid is not None else None
+        liveness_source = "pid" if alive is not None else None
+    liveness = "alive" if alive is True else ("dead" if alive is False else "unknown")
     status = metadata_status
     warnings: list[str] = []
     status_problems: list[str] = []
     missing_fields = _missing_supervisor_metadata_fields(metadata)
-    active_or_unknown = metadata_status in ACTIVE_SUPERVISOR_STATUSES or metadata_status == "unknown"
     if metadata_status not in TERMINAL_SUPERVISOR_STATUSES and alive is False:
         status = "stale"
         status_problems.append("dead_process")
@@ -387,7 +471,10 @@ def load_supervisor_status(project_root: Path | str) -> dict[str, Any]:
         "metadata_path": _path_for_record(project, metadata_path),
         "metadata": dict(metadata),
         "pid": pid,
+        "supervisor_host": supervisor_host,
+        "pid_probe_scope": pid_probe_scope,
         "liveness": liveness,
+        "liveness_source": liveness_source,
         "heartbeat_stale": heartbeat_stale,
         "metadata_heartbeat_stale": metadata_heartbeat_stale,
         "heartbeat_covered_by_active_run_lease": heartbeat_covered_by_active_run_lease,
@@ -526,6 +613,56 @@ def _auto_follow_up_from_execution(execution: Mapping[str, Any]) -> dict[str, An
     }
 
 
+def _action_failure_signature(result: Mapping[str, Any], selected: Mapping[str, Any]) -> str | None:
+    action = str(selected.get("action") or "")
+    if action not in SUPERVISOR_CIRCUIT_BREAKER_ACTIONS:
+        return None
+    execution = selected.get("execution_result")
+    execution_mapping = execution if isinstance(execution, Mapping) else {}
+    failed = (
+        result.get("ok") is False
+        or selected.get("ok") is False
+        or execution_mapping.get("ok") is False
+    )
+    if not failed:
+        return None
+    return "|".join(
+        (
+            action,
+            str(execution_mapping.get("runner_id") or ""),
+            str(execution_mapping.get("status") or result.get("status") or ""),
+            str(execution_mapping.get("classification") or ""),
+            str(execution_mapping.get("adapter_exit_code") or result.get("exit_code") or ""),
+            str(bool(execution_mapping.get("adapter_timed_out"))),
+        )
+    )
+
+
+def _action_failure_repeat_limit(workflow: Mapping[str, Any]) -> int:
+    policy = workflow.get("self_expansion")
+    configured = policy.get("max_repeated_signature_count") if isinstance(policy, Mapping) else None
+    # ``max_repeated_signature_count`` bounds semantic plan expansion, where a
+    # relatively generous budget can be useful.  Repeating the same failed
+    # planner/verifier process is an infrastructure failure and must have a
+    # much tighter independent ceiling.  Respect a stricter workflow limit,
+    # but never inherit a looser one (the generated default is currently 100).
+    workflow_limit = _positive_int(configured)
+    if workflow_limit is None:
+        return ACTION_FAILURE_MAX_REPEATS
+    return min(workflow_limit, ACTION_FAILURE_MAX_REPEATS)
+
+
+def _action_failure_backoff_seconds(
+    consecutive_failures: int,
+    *,
+    base_seconds: float = ACTION_FAILURE_BACKOFF_BASE_SECONDS,
+    max_seconds: float = ACTION_FAILURE_BACKOFF_MAX_SECONDS,
+) -> float:
+    if consecutive_failures <= 0:
+        return 0.0
+    return min(max(0.05, float(max_seconds)), max(0.05, float(base_seconds)) * (2 ** (consecutive_failures - 1)))
+
+
 def _should_continue_after_tick(
     result: Mapping[str, Any],
     selected: Mapping[str, Any],
@@ -627,12 +764,22 @@ def _supervisor_status_after_tick(action: str, *, should_continue: bool, reason:
         "wait_paused": "paused",
         "wait_config": "waiting_config",
         "wait_approval": "waiting_approval",
+        "wait_runner_availability": "waiting_runner_availability",
     }.get(action, "running")
 
 
-def _poll_interval_after_tick(action: str, poll_interval: float) -> float:
+def _poll_interval_after_tick(
+    action: str,
+    poll_interval: float,
+    *,
+    failure_backoff_seconds: float | None = None,
+) -> float:
+    if failure_backoff_seconds is not None:
+        return max(poll_interval, failure_backoff_seconds)
     if action == "wait_background_job":
         return BACKGROUND_WAIT_INTERVAL_SECONDS
+    if action == "wait_runner_availability":
+        return max(poll_interval, RUNNER_AVAILABILITY_WAIT_INTERVAL_SECONDS)
     if action in RECOVERABLE_WAIT_ACTIONS:
         return max(poll_interval, RECOVERABLE_WAIT_INTERVAL_SECONDS)
     return poll_interval
@@ -646,6 +793,7 @@ def _exit_status_for_reason(reason: str) -> str:
         "wait_config": "waiting_config",
         "wait_approval": "waiting_approval",
         "requires_attention": "requires_attention",
+        "repeated_action_failure": "requires_attention",
         "wait_no_executable_work": "requires_attention",
         "follow_up_failed": "failed",
         "scheduler_failed": "failed",
@@ -836,17 +984,29 @@ def _relative_log_paths(project: Path, logs: Mapping[str, Path]) -> dict[str, st
     return {key: _path_for_record(project, path) for key, path in logs.items()}
 
 
-def _heartbeat(paths: WorkflowPaths, *, owner: str, status: str) -> None:
-    _merge_supervisor_metadata(
-        paths,
-        {
-            "status": status,
-            "owner": owner,
-            "updated_at": utc_timestamp(),
-            "heartbeat_at": utc_timestamp(),
-            "pid": os.getpid(),
-        },
-    )
+def _heartbeat(paths: WorkflowPaths, *, owner: str, status: str | None) -> None:
+    updates: dict[str, Any] = {
+        "owner": owner,
+        "updated_at": utc_timestamp(),
+        "heartbeat_at": utc_timestamp(),
+        "pid": os.getpid(),
+        "host": socket.gethostname(),
+    }
+    if status is not None:
+        updates["status"] = status
+    _merge_supervisor_metadata(paths, updates)
+
+
+def _supervisor_heartbeat_loop(
+    paths: WorkflowPaths,
+    *,
+    owner: str,
+    stop_event: threading.Event,
+    interval_seconds: float,
+) -> None:
+    interval = max(0.05, float(interval_seconds))
+    while not stop_event.wait(interval):
+        _heartbeat(paths, owner=owner, status=None)
 
 
 def _existing_started_at(paths: WorkflowPaths) -> str | None:
@@ -857,14 +1017,15 @@ def _existing_started_at(paths: WorkflowPaths) -> str | None:
 
 
 def _merge_supervisor_metadata(paths: WorkflowPaths, updates: Mapping[str, Any]) -> dict[str, Any]:
-    metadata_path = _supervisor_metadata_path(paths)
-    existing = _read_json(metadata_path, default={})
-    metadata = dict(existing) if isinstance(existing, Mapping) else {}
-    metadata.update(_json_safe(updates))
-    metadata["schema_version"] = str(metadata.get("schema_version") or SCHEMA_VERSION)
-    metadata["updated_at"] = str(metadata.get("updated_at") or utc_timestamp())
-    _write_json_atomic(metadata_path, metadata)
-    return metadata
+    with SUPERVISOR_METADATA_LOCK:
+        metadata_path = _supervisor_metadata_path(paths)
+        existing = _read_json(metadata_path, default={})
+        metadata = dict(existing) if isinstance(existing, Mapping) else {}
+        metadata.update(_json_safe(updates))
+        metadata["schema_version"] = str(metadata.get("schema_version") or SCHEMA_VERSION)
+        metadata["updated_at"] = str(metadata.get("updated_at") or utc_timestamp())
+        _write_json_atomic(metadata_path, metadata)
+        return metadata
 
 
 def _failure(project: Path, message: str, *, started_at: str) -> dict[str, Any]:
@@ -971,12 +1132,34 @@ def _missing_supervisor_metadata_fields(metadata: Mapping[str, Any]) -> list[str
         missing.append("pid")
     if not isinstance(metadata.get("heartbeat_at"), str) or not str(metadata.get("heartbeat_at") or "").strip():
         missing.append("heartbeat_at")
-    if not isinstance(metadata.get("command"), Sequence) or isinstance(metadata.get("command"), (str, bytes)):
-        missing.append("command")
-    log_paths = metadata.get("log_paths")
-    if not isinstance(log_paths, Mapping) or not log_paths.get("stdout") or not log_paths.get("stderr"):
-        missing.append("log_paths")
     return missing
+
+
+def _supervisor_host(metadata: Mapping[str, Any]) -> str | None:
+    explicit = str(metadata.get("host") or "").strip()
+    if explicit:
+        return explicit
+    owner = str(metadata.get("owner") or "").strip()
+    parts = owner.rsplit(":", 2)
+    if len(parts) == 3 and parts[0].strip():
+        return parts[0].strip()
+    return None
+
+
+def _host_is_local(host: str | None) -> bool | None:
+    if not host:
+        return None
+
+    def aliases(value: str) -> set[str]:
+        normalized = value.strip().lower().rstrip(".")
+        if not normalized:
+            return set()
+        return {normalized, normalized.split(".", 1)[0]}
+
+    local_aliases: set[str] = set()
+    for value in (socket.gethostname(), socket.getfqdn()):
+        local_aliases.update(aliases(value))
+    return bool(local_aliases.intersection(aliases(host)))
 
 
 def _workflow_config_problem(project: Path, message: str) -> dict[str, Any]:
