@@ -34,6 +34,23 @@ def run_loopplane(*args: str) -> dict[str, object]:
 
 
 class ControlRequestCliTest(unittest.TestCase):
+    def test_resume_foreground_owner_records_request_without_detached_launch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "Externally owned foreground supervisor.")
+
+            result = run_loopplane(
+                "resume",
+                "--foreground-owner",
+                "--project",
+                str(project),
+            )
+
+            self.assertEqual(result["status"], "pending")
+            self.assertEqual(result["request"]["type"], "resume")
+            self.assertNotIn("detached_resume", result)
+            self.assertFalse((project / ".loopplane" / "runtime" / "supervisor.json").exists())
+
     def test_status_matches_response_for_control_request_without_id(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             project = Path(tmp) / "project"
@@ -181,6 +198,32 @@ class ControlRequestCliTest(unittest.TestCase):
                 json.dumps(attention_state, indent=2, sort_keys=True) + "\n",
                 encoding="utf-8",
             )
+            runner_health_path = project / ".loopplane" / "runtime" / "runner_health.json"
+            runner_health_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "1.5",
+                        "workflow_id": workflow_id,
+                        "runners": {
+                            "worker": {
+                                "runner_id": "worker",
+                                "events": [],
+                                "availability_hold": {
+                                    "status": "active",
+                                    "reason_class": "billing_required",
+                                    "recoverability": "manual",
+                                    "scope": {"type": "runner", "key": "worker"},
+                                    "requires_attention": True,
+                                },
+                            }
+                        },
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
 
             resume = run_loopplane("resume", "--project", str(project))
             self.assertEqual(resume["request"]["type"], "resume")
@@ -197,6 +240,12 @@ class ControlRequestCliTest(unittest.TestCase):
             self.assertIsNone(resumed_state["scheduler"]["active_background_job_id"])
             self.assertIsNone(resumed_state["scheduler"]["active_background_job_status"])
             self.assertIsNone(resumed_state["scheduler"]["wake_next_agent_when"])
+            self.assertEqual(len(resume_response["cleared_runner_availability_holds"]), 1)
+            resumed_health = json.loads(runner_health_path.read_text(encoding="utf-8"))
+            cleared_hold = resumed_health["runners"]["worker"]["availability_hold"]
+            self.assertEqual(cleared_hold["status"], "cleared")
+            self.assertEqual(cleared_hold["cleared_by_control_type"], "resume")
+            self.assertEqual(cleared_hold["cleared_by_control_request_id"], resume_response["request_id"])
             self.assertEqual(registry_status(), "running")
             runnable_action = select_next_action(load_scheduler_snapshot(project))
             self.assertEqual(runnable_action["action"], "run_worker")

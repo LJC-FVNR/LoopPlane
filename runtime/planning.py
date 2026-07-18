@@ -10,6 +10,11 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Mapping
 
 from runtime.active_projections import sync_active_workflow_projections
+from runtime.activation_prerequisites import (
+    build_activation_audit_binding,
+    preflight_activation_prerequisite,
+    verify_activation_checkpoint,
+)
 from runtime.adapters.base import AdapterContractError, AdapterInput, utc_timestamp
 from runtime.adapters.registry import AdapterLookupError, get_adapter
 from runtime.agent_runners import SCHEMA_VERSION, AgentRunnerConfigError, load_agent_runners
@@ -542,6 +547,7 @@ def run_auditor(project_root: Path | str, *, runner_id: str | None = None) -> di
         env=adapter_env,
     )
     adapter_input.write_json(run_dir / ADAPTER_INPUT_FILENAME)
+    audit_report_sha256_before = _sha256_file(audit_report_path)
 
     try:
         adapter_output = adapter.run(adapter_input)
@@ -593,8 +599,23 @@ def run_auditor(project_root: Path | str, *, runner_id: str | None = None) -> di
         },
     )
 
+    audit_report_sha256_after = _sha256_file(audit_report_path)
+    semantic_audit_report_fresh = audit_report_sha256_after != audit_report_sha256_before
+    semantic_audit_report, semantic_audit_problem = _read_optional_json_object(audit_report_path)
+    if not semantic_audit_report_fresh:
+        semantic_audit_report = None
+        semantic_audit_problem = None
+
     structural_report = inspect_plan_draft(plan_draft_path, workflow_id=workflow_id)
     readiness_report, readiness_problem = _read_optional_json_object(readiness_report_path)
+    activation_binding = build_activation_audit_binding(
+        project_root=project,
+        planning_dir=paths.planning_dir,
+        workflow_id=workflow_id,
+        plan_draft_path=plan_draft_path,
+        readiness_report_path=readiness_report_path,
+        readiness_report=readiness_report,
+    )
     audit_report = _audit_report(
         workflow_id=workflow_id,
         run_id=run_id,
@@ -609,6 +630,10 @@ def run_auditor(project_root: Path | str, *, runner_id: str | None = None) -> di
         structural_report=structural_report,
         readiness_report=readiness_report,
         readiness_problem=readiness_problem,
+        semantic_audit_report=semantic_audit_report,
+        semantic_audit_problem=semantic_audit_problem,
+        semantic_audit_report_fresh=semantic_audit_report_fresh,
+        activation_binding=activation_binding,
         generated_at=utc_timestamp(),
     )
     _write_json(audit_report_path, audit_report)
@@ -1091,6 +1116,56 @@ def activate_plan(project_root: Path | str, *, source_plan_file: Path | str | No
                 blocker_codes=["plan_draft_unreadable"],
             )
 
+    activation_prerequisite = preflight_activation_prerequisite(
+        project_root=project,
+        planning_dir=paths.planning_dir,
+        workflow_id=workflow_id,
+        plan_draft_path=activation_draft_path,
+        readiness_report_path=readiness_report_path,
+        readiness_report=readiness_report,
+        audit_report_path=audit_report_path,
+        audit_report=audit_report,
+    )
+    if activation_prerequisite.get("ok") is not True:
+        return _finish_activation(
+            project=project,
+            paths=paths,
+            workflow_id=workflow_id,
+            run_id=run_id,
+            run_dir=run_dir,
+            node_summary_path=node_summary_path,
+            summary_path=summary_path,
+            event_paths=event_paths,
+            started_at=started_at,
+            ok=False,
+            status="blocked",
+            message="Plan activation blocked by the fail-closed activation prerequisite.",
+            plan_draft_path=plan_draft_path,
+            plan_file=plan_file,
+            readiness_report_path=readiness_report_path,
+            audit_report_path=audit_report_path,
+            activation_events_path=paths.planning_dir / ACTIVATION_EVENTS_FILENAME,
+            structural_report=structural_report,
+            readiness_report=readiness_report,
+            audit_report=audit_report,
+            before_checkpoint=None,
+            after_checkpoint=None,
+            errors=[str(error) for error in activation_prerequisite.get("errors", [])],
+            warnings=warnings + [str(warning) for warning in activation_prerequisite.get("warnings", [])],
+            blocker_codes=[str(code) for code in activation_prerequisite.get("blocker_codes", [])],
+        )
+    if activation_prerequisite.get("required") is True:
+        _append_event(
+            event_paths,
+            workflow_id=workflow_id,
+            run_id=run_id,
+            event_type="activation_prerequisite_preflight_passed",
+            data={
+                "prerequisite_path": activation_prerequisite.get("prerequisite_path"),
+                "pinned_path_count": len(activation_prerequisite.get("expected_checkpoint_hashes", {})),
+            },
+        )
+
     active_plan_text = _activated_plan_text(draft_text, activated_at=utc_timestamp(), run_id=run_id)
     overwrite_problem = _protected_plan_overwrite_problem(plan_file, active_plan_text, workflow_id=workflow_id)
     if overwrite_problem:
@@ -1172,6 +1247,48 @@ def activate_plan(project_root: Path | str, *, source_plan_file: Path | str | No
             errors=[str(error) for error in before_checkpoint.get("errors", [])],
             warnings=warnings + [str(warning) for warning in before_checkpoint.get("warnings", [])],
             blocker_codes=["before_plan_activation_checkpoint_failed"],
+        )
+
+    activation_checkpoint = verify_activation_checkpoint(
+        project_root=project,
+        checkpoint_result=before_checkpoint,
+        prerequisite_result=activation_prerequisite,
+    )
+    if activation_checkpoint.get("ok") is not True:
+        return _finish_activation(
+            project=project,
+            paths=paths,
+            workflow_id=workflow_id,
+            run_id=run_id,
+            run_dir=run_dir,
+            node_summary_path=node_summary_path,
+            summary_path=summary_path,
+            event_paths=event_paths,
+            started_at=started_at,
+            ok=False,
+            status="checkpoint_failed",
+            message="Plan activation checkpoint did not contain the exact audited prerequisite bytes.",
+            plan_draft_path=plan_draft_path,
+            plan_file=plan_file,
+            readiness_report_path=readiness_report_path,
+            audit_report_path=audit_report_path,
+            activation_events_path=paths.planning_dir / ACTIVATION_EVENTS_FILENAME,
+            structural_report=structural_report,
+            readiness_report=readiness_report,
+            audit_report=audit_report,
+            before_checkpoint=before_checkpoint,
+            after_checkpoint=None,
+            errors=[str(error) for error in activation_checkpoint.get("errors", [])],
+            warnings=warnings,
+            blocker_codes=[str(code) for code in activation_checkpoint.get("blocker_codes", [])],
+        )
+    if activation_checkpoint.get("required") is True:
+        _append_event(
+            event_paths,
+            workflow_id=workflow_id,
+            run_id=run_id,
+            event_type="activation_checkpoint_bytes_verified",
+            data={"verified_paths": list(activation_checkpoint.get("verified_paths", []))},
         )
 
     plan_file.parent.mkdir(parents=True, exist_ok=True)
@@ -3070,6 +3187,10 @@ def _audit_report(
     structural_report: Mapping[str, Any],
     readiness_report: Mapping[str, Any] | None,
     readiness_problem: str | None,
+    semantic_audit_report: Mapping[str, Any] | None,
+    semantic_audit_problem: str | None,
+    semantic_audit_report_fresh: bool,
+    activation_binding: Mapping[str, Any],
     generated_at: str,
 ) -> dict[str, Any]:
     blocking_findings: list[dict[str, str]] = []
@@ -3094,10 +3215,113 @@ def _audit_report(
     if readiness_problem:
         warnings.append(readiness_problem)
 
+    if activation_binding.get("required") is True and activation_binding.get("ok") is not True:
+        binding_errors = activation_binding.get("errors")
+        binding_codes = activation_binding.get("blocker_codes")
+        errors_list = list(binding_errors) if isinstance(binding_errors, list) else []
+        codes_list = list(binding_codes) if isinstance(binding_codes, list) else []
+        for index, message in enumerate(errors_list):
+            code = codes_list[index] if index < len(codes_list) else "activation_prerequisite_binding_failed"
+            blocking_findings.append(
+                {
+                    "code": str(code),
+                    "severity": "blocking",
+                    "message": str(message),
+                }
+            )
+
+    semantic_revisions: list[str] = []
+    semantic_report_merged = False
+    if semantic_audit_report_fresh:
+        if semantic_audit_problem:
+            blocking_findings.append(
+                {
+                    "code": "auditor_semantic_report_invalid",
+                    "severity": "blocking",
+                    "message": semantic_audit_problem,
+                }
+            )
+        elif semantic_audit_report is not None:
+            report_workflow_id = semantic_audit_report.get("workflow_id")
+            report_run_id = semantic_audit_report.get("run_id")
+            if report_workflow_id != workflow_id or report_run_id != run_id:
+                blocking_findings.append(
+                    {
+                        "code": "auditor_semantic_report_identity_mismatch",
+                        "severity": "blocking",
+                        "message": (
+                            "Auditor-authored audit_report.json did not match the active "
+                            f"workflow/run ({workflow_id}, {run_id})."
+                        ),
+                    }
+                )
+            else:
+                semantic_report_merged = True
+                raw_findings = semantic_audit_report.get("blocking_findings", [])
+                if not isinstance(raw_findings, list):
+                    blocking_findings.append(
+                        {
+                            "code": "auditor_semantic_findings_invalid",
+                            "severity": "blocking",
+                            "message": "Auditor-authored blocking_findings must be a list.",
+                        }
+                    )
+                else:
+                    for index, raw_finding in enumerate(raw_findings):
+                        if not isinstance(raw_finding, Mapping):
+                            blocking_findings.append(
+                                {
+                                    "code": "auditor_semantic_finding_invalid",
+                                    "severity": "blocking",
+                                    "message": f"Auditor-authored blocking finding {index} is not an object.",
+                                }
+                            )
+                            continue
+                        message = str(raw_finding.get("message") or "").strip()
+                        if not message:
+                            blocking_findings.append(
+                                {
+                                    "code": "auditor_semantic_finding_invalid",
+                                    "severity": "blocking",
+                                    "message": f"Auditor-authored blocking finding {index} has no message.",
+                                }
+                            )
+                            continue
+                        blocking_findings.append(
+                            {
+                                "code": str(raw_finding.get("code") or "auditor_semantic_finding"),
+                                "severity": "blocking",
+                                "message": message,
+                            }
+                        )
+
+                semantic_failed = (
+                    semantic_audit_report.get("passed") is False
+                    or str(semantic_audit_report.get("status") or "").lower() in {"fail", "failed"}
+                    or semantic_audit_report.get("ready_for_activation") is False
+                )
+                if semantic_failed and not raw_findings:
+                    blocking_findings.append(
+                        {
+                            "code": "auditor_semantic_rejection",
+                            "severity": "blocking",
+                            "message": "The auditor rejected activation without enumerating a blocking finding.",
+                        }
+                    )
+
+                raw_warnings = semantic_audit_report.get("warnings", [])
+                if isinstance(raw_warnings, list):
+                    warnings.extend(str(item) for item in raw_warnings if str(item).strip())
+                raw_revisions = semantic_audit_report.get("recommended_revisions", [])
+                if isinstance(raw_revisions, list):
+                    semantic_revisions.extend(str(item) for item in raw_revisions if str(item).strip())
+
     passed = not blocking_findings
     readiness_status = readiness_report.get("status") if isinstance(readiness_report, Mapping) else None
     recommended_revisions = [_recommended_revision(finding["message"]) for finding in blocking_findings]
-    return {
+    recommended_revisions.extend(semantic_revisions)
+    recommended_revisions = list(dict.fromkeys(recommended_revisions))
+    report = {
         "schema_version": SCHEMA_VERSION,
         "workflow_id": workflow_id,
         "run_id": run_id,
@@ -3118,10 +3342,18 @@ def _audit_report(
         "summary": dict(structural_report.get("summary", {})),
         "checked_fields": [field for field, _aliases in REQUIRED_TASK_FIELDS],
         "blocking_findings": blocking_findings,
-        "warnings": warnings,
+        "warnings": list(dict.fromkeys(warnings)),
         "recommended_revisions": recommended_revisions,
+        "semantic_report_fresh": semantic_audit_report_fresh,
+        "semantic_report_merged": semantic_report_merged,
+        "activation_prerequisite_required": activation_binding.get("required") is True,
+        "activation_prerequisite_binding_ok": activation_binding.get("ok") is True,
         "structural_checks": dict(structural_report),
     }
+    activation_bindings = activation_binding.get("bindings")
+    if activation_binding.get("required") is True and isinstance(activation_bindings, Mapping):
+        report["activation_bindings"] = dict(activation_bindings)
+    return report
 
 
 def _audit_finding_code(message: str) -> str:

@@ -6,6 +6,7 @@ import re
 import shutil
 import socket
 import threading
+import time
 import uuid
 from contextlib import contextmanager
 from hashlib import sha256
@@ -125,6 +126,8 @@ TRANSIENT_RUN_FAILURE_STATUSES = frozenset({"failed_agent", "failed_system"})
 BACKGROUND_JOBS_FILENAME = "background_jobs.json"
 BACKGROUND_JOB_HEARTBEAT_TTL_SECONDS = 600
 BACKGROUND_JOB_PID_STARTUP_GRACE_SECONDS = 15
+BACKGROUND_REGISTRY_LOCK_TTL_SECONDS = 30
+BACKGROUND_REGISTRY_LOCK_WAIT_SECONDS = 35.0
 ALLOWED_BACKGROUND_JOB_STATUSES = frozenset(
     {
         "pending",
@@ -163,7 +166,23 @@ class AtomicOwnerLock:
     def owner_path(self) -> Path:
         return self.lock_dir / OWNER_FILENAME
 
-    def acquire(self) -> "HeldOwnerLock":
+    def acquire(
+        self,
+        *,
+        timeout_seconds: float = 0.0,
+        poll_interval_seconds: float = 0.05,
+    ) -> "HeldOwnerLock":
+        deadline = time.monotonic() + max(0.0, float(timeout_seconds))
+        while True:
+            try:
+                return self._acquire_once()
+            except SchedulerLockError:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise
+                time.sleep(min(max(0.001, float(poll_interval_seconds)), remaining))
+
+    def _acquire_once(self) -> "HeldOwnerLock":
         self.lock_dir.mkdir(parents=True, exist_ok=True)
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
         metadata = _owner_metadata(self.owner, self.ttl_seconds)
@@ -181,47 +200,60 @@ class AtomicOwnerLock:
         else:  # pragma: no cover - loop always raises or breaks.
             raise SchedulerLockError(f"lock is already held: {self.owner_path}") from last_error
         try:
-            os.write(fd, encoded)
+            _write_all(fd, encoded)
             os.fsync(fd)
         except BaseException:
+            _unlink_owned_lock_path(self.owner_path, fd=fd, lock_id=None)
             os.close(fd)
-            try:
-                self.owner_path.unlink()
-            except FileNotFoundError:
-                pass
             raise
-        return HeldOwnerLock(self, fd)
+        return HeldOwnerLock(self, fd, metadata)
 
     def _reclaim_stale_owner(self) -> bool:
-        if not self.owner_path.exists():
+        try:
+            observed_stat = self.owner_path.stat()
+        except FileNotFoundError:
             return True
+        except OSError:
+            return False
         owner = _read_json_object(self.owner_path, default={})
         if not isinstance(owner, Mapping):
             return False
         heartbeat = _parse_iso_timestamp(owner.get("heartbeat_at") or owner.get("started_at"))
         if heartbeat is None:
-            return False
+            heartbeat = datetime.fromtimestamp(observed_stat.st_mtime, UTC)
         ttl_seconds = max(1, _int_value(owner.get("ttl_seconds"), default=self.ttl_seconds))
         age_seconds = max(0, int((datetime.now(UTC) - heartbeat).total_seconds()))
         if age_seconds <= ttl_seconds:
             return False
-        pid = _lock_owner_pid(owner)
-        if pid is not None and _pid_exists(pid) is True:
-            return False
-        try:
-            self.owner_path.unlink()
-        except FileNotFoundError:
-            return True
-        except OSError:
-            return False
-        return True
+        owner_host = _non_empty_text(owner.get("hostname"))
+        if owner_host is not None and _hostnames_match(owner_host, socket.gethostname()):
+            pid = _lock_owner_pid(owner)
+            if pid is not None and _pid_exists(pid) is True:
+                expected_start = _non_empty_text(owner.get("process_start_time"))
+                observed_start = _process_start_time(pid)
+                if not (
+                    expected_start is not None
+                    and expected_start.startswith("proc:")
+                    and observed_start is not None
+                    and observed_start != expected_start
+                ):
+                    return False
+        return _unlink_lock_path_if_unchanged(
+            self.owner_path,
+            observed_stat=observed_stat,
+            lock_id=_non_empty_text(owner.get("lock_id")),
+            heartbeat_at=_non_empty_text(owner.get("heartbeat_at")),
+        )
 
 
 class HeldOwnerLock:
-    def __init__(self, lock: AtomicOwnerLock, fd: int) -> None:
+    def __init__(self, lock: AtomicOwnerLock, fd: int, metadata: Mapping[str, Any]) -> None:
         self.lock = lock
         self.fd = fd
+        self.metadata = dict(metadata)
+        self.lock_id = str(metadata["lock_id"])
         self.released = False
+        self._heartbeat_error: SchedulerLockError | None = None
         self._metadata_lock = threading.Lock()
 
     def __enter__(self) -> "HeldOwnerLock":
@@ -234,8 +266,36 @@ class HeldOwnerLock:
         with self._metadata_lock:
             if self.released:
                 return
-            metadata = _owner_metadata(self.lock.owner, self.lock.ttl_seconds)
-            self.lock.owner_path.write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            if self._heartbeat_error is not None:
+                raise self._heartbeat_error
+            try:
+                self._assert_current_owner()
+                self.metadata["heartbeat_at"] = utc_timestamp()
+                encoded = (json.dumps(self.metadata, indent=2, sort_keys=True) + "\n").encode("utf-8")
+                os.lseek(self.fd, 0, os.SEEK_SET)
+                os.ftruncate(self.fd, 0)
+                _write_all(self.fd, encoded)
+                os.fsync(self.fd)
+                self._assert_current_owner()
+            except (OSError, SchedulerLockError) as error:
+                if isinstance(error, SchedulerLockError):
+                    lock_error = error
+                else:
+                    lock_error = SchedulerLockError(f"lock heartbeat failed: {self.lock.owner_path}: {error}")
+                self._heartbeat_error = lock_error
+                raise lock_error from error
+
+    def _assert_current_owner(self) -> None:
+        try:
+            descriptor_stat = os.fstat(self.fd)
+            path_stat = self.lock.owner_path.stat()
+        except OSError as error:
+            raise SchedulerLockError(f"lock ownership was lost: {self.lock.owner_path}") from error
+        if (descriptor_stat.st_dev, descriptor_stat.st_ino) != (path_stat.st_dev, path_stat.st_ino):
+            raise SchedulerLockError(f"lock ownership was replaced: {self.lock.owner_path}")
+        owner = _read_json_object(self.lock.owner_path, default={})
+        if not isinstance(owner, Mapping) or str(owner.get("lock_id") or "") != self.lock_id:
+            raise SchedulerLockError(f"lock ownership token changed: {self.lock.owner_path}")
 
     @contextmanager
     def keepalive(self, *, interval_seconds: float | None = None):
@@ -248,7 +308,7 @@ class HeldOwnerLock:
             while not stop.wait(interval):
                 try:
                     self.heartbeat()
-                except OSError:
+                except (OSError, SchedulerLockError):
                     return
 
         thread = threading.Thread(target=_run, name="loopplane-scheduler-lock-heartbeat", daemon=True)
@@ -260,16 +320,14 @@ class HeldOwnerLock:
             thread.join(timeout=max(1.0, interval + 1.0))
 
     def release(self) -> None:
-        if self.released:
-            return
-        self.released = True
-        try:
-            os.close(self.fd)
-        finally:
+        with self._metadata_lock:
+            if self.released:
+                return
+            self.released = True
             try:
-                self.lock.owner_path.unlink()
-            except FileNotFoundError:
-                pass
+                _unlink_owned_lock_path(self.lock.owner_path, fd=self.fd, lock_id=self.lock_id)
+            finally:
+                os.close(self.fd)
 
 
 @dataclass(frozen=True)
@@ -533,12 +591,21 @@ def run_scheduler(
             held_lock.heartbeat()
             validation_failures = _ingest_failed_validations(context.paths, workflow_id=context.workflow_id)
             snapshot = load_scheduler_snapshot(project)
+            background_failures = _ingest_failed_background_jobs(
+                context.paths,
+                workflow_id=context.workflow_id,
+                background_jobs=snapshot.get("background_jobs", []),
+                tasks=snapshot.get("tasks", []),
+            )
+            if background_failures:
+                snapshot = load_scheduler_snapshot(project)
             _record_manual_plan_change_if_needed(snapshot, owner=owner)
             selected = select_next_action(snapshot)
             selected_action_name = str(selected.get("action") or "")
             collapse_wait_tick = (
                 ticks == 1
                 and not validation_failures
+                and not background_failures
                 and _is_collapsible_scheduler_wait_action(selected)
             )
             if not collapse_wait_tick:
@@ -565,6 +632,19 @@ def run_scheduler(
                         "owner": owner,
                         "source": "validation_ingest",
                         "failure_ids": [failure["failure_id"] for failure in validation_failures],
+                    },
+                )
+            if background_failures:
+                append_event(
+                    context.paths,
+                    workflow_id=context.workflow_id,
+                    event_type="failure_registry_updated",
+                    data={
+                        "owner": owner,
+                        "source": "background_job_ingest",
+                        "failure_ids": [
+                            failure["failure_id"] for failure in background_failures
+                        ],
                     },
                 )
             if selected_action_name != "complete" and not collapse_wait_tick:
@@ -1294,31 +1374,44 @@ def select_next_action(snapshot: Mapping[str, Any]) -> dict[str, Any]:
     if background_job is not None:
         attention_problem = _background_job_attention_problem(background_job)
         if attention_problem is not None:
+            delegated_failure = _failure_for_background_job(snapshot, background_job)
+            if delegated_failure is None:
+                return _action(
+                    "requires_attention",
+                    reason=attention_problem["reason"],
+                    selected={
+                        "type": "background_job_needs_recovery",
+                        "job_id": _record_id(background_job),
+                        "task_id": background_job.get("task_id"),
+                        "run_id": background_job.get("run_id"),
+                        "job": background_job,
+                        "run_kind": "background_job_recovery",
+                        "message": attention_problem["reason"],
+                    },
+                    would_wait=True,
+                    blocking_conditions=["requires_attention", attention_problem["blocking_condition"]],
+                    considered=considered,
+                )
+            considered.append(
+                {
+                    "candidate": "background_job",
+                    "result": (
+                        "delegated_to_autonomous_recovery:"
+                        + str(delegated_failure.get("status") or "unrecovered")
+                    ),
+                }
+            )
+        else:
             return _action(
-                "requires_attention",
-                reason=attention_problem["reason"],
-                selected={
-                    "type": "background_job_needs_recovery",
-                    "job_id": _record_id(background_job),
-                    "task_id": background_job.get("task_id"),
-                    "run_id": background_job.get("run_id"),
-                    "job": background_job,
-                    "run_kind": "background_job_recovery",
-                    "message": attention_problem["reason"],
-                },
+                "wait_background_job",
+                reason="An active background job is not safe to continue past yet.",
+                selected={"job_id": _record_id(background_job), "job": background_job, "run_kind": "background_wait"},
                 would_wait=True,
-                blocking_conditions=["requires_attention", attention_problem["blocking_condition"]],
+                blocking_conditions=["background_job_not_ready"],
                 considered=considered,
             )
-        return _action(
-            "wait_background_job",
-            reason="An active background job is not safe to continue past yet.",
-            selected={"job_id": _record_id(background_job), "job": background_job, "run_kind": "background_wait"},
-            would_wait=True,
-            blocking_conditions=["background_job_not_ready"],
-            considered=considered,
-        )
-    considered.append({"candidate": "background_job", "result": "none"})
+    else:
+        considered.append({"candidate": "background_job", "result": "none"})
 
     config_problem = _config_wait(snapshot)
     if config_problem is not None:
@@ -3190,15 +3283,30 @@ def _next_approval_required_task(snapshot: Mapping[str, Any]) -> Mapping[str, An
 
 
 def _background_job_not_ready(snapshot: Mapping[str, Any]) -> Mapping[str, Any] | None:
+    deferred_problem_jobs: list[Mapping[str, Any]] = []
     for job in snapshot.get("background_jobs", []):
         status = str(job.get("status", "running")).lower()
         next_prompt_ready = job.get("next_prompt_ready")
         if status in BACKGROUND_JOB_SAFE_STATUSES and next_prompt_ready is not False:
             continue
-        if next_prompt_ready is False or status in ALLOWED_BACKGROUND_JOB_STATUSES:
+        if status in {"pending", "running"}:
             return job
-        return {**dict(job), "status": "needs_recovery", "status_problem": f"invalid_status:{status}"}
-    return None
+        if status in ALLOWED_BACKGROUND_JOB_STATUSES or next_prompt_ready is False:
+            deferred_problem_jobs.append(job)
+            continue
+        deferred_problem_jobs.append(
+            {
+                **dict(job),
+                "status": "needs_recovery",
+                "status_problem": f"invalid_status:{status}",
+            }
+        )
+    # A historical failed job may already have been recovered by launching a
+    # replacement background job. Registry insertion order must not let that
+    # terminal record mask the live replacement and dispatch a duplicate
+    # worker. Active work is selected above; only then consider terminal or
+    # malformed records for recovery/attention handling.
+    return deferred_problem_jobs[0] if deferred_problem_jobs else None
 
 
 def _background_job_attention_problem(job: Mapping[str, Any]) -> dict[str, str] | None:
@@ -3215,6 +3323,22 @@ def _background_job_attention_problem(job: Mapping[str, Any]) -> dict[str, str] 
             "It cannot become safe by scheduler polling alone; recover or manually resolve the background job before continuing."
         ),
     }
+
+
+def _failure_for_background_job(
+    snapshot: Mapping[str, Any], job: Mapping[str, Any]
+) -> Mapping[str, Any] | None:
+    job_id = _record_id(job)
+    if not job_id:
+        return None
+    registry = snapshot.get("failure_registry")
+    failures = registry.get("failures", []) if isinstance(registry, Mapping) else []
+    for failure in failures:
+        if not isinstance(failure, Mapping):
+            continue
+        if str(failure.get("source_background_job_id") or "") == job_id:
+            return failure
+    return None
 
 
 def _active_run_lease_not_ready(snapshot: Mapping[str, Any]) -> Mapping[str, Any] | None:
@@ -3605,6 +3729,15 @@ def _handle_control_request(
         scheduler_update["last_read_model_rebuild_status"] = rebuild_result.get("status")
         message = "Read models rebuilt by control request." if response_status == "applied" else "Read model rebuild failed."
         response_details["read_model_rebuild"] = dict(rebuild_result)
+    if clear_resolved_attention:
+        cleared_holds = _clear_manual_runner_availability_holds(
+            paths,
+            workflow_id=str(snapshot.get("workflow_id") or ""),
+            request_id=request_id,
+            control_type=action,
+        )
+        if cleared_holds:
+            response_details["cleared_runner_availability_holds"] = cleared_holds
     resulting_status = runtime_status or current_status
     response = {
         "schema_version": SCHEMA_VERSION,
@@ -3665,6 +3798,69 @@ def _handle_control_request(
         requires_attention=[] if clear_resolved_attention else None,
     )
     return response
+
+
+def _clear_manual_runner_availability_holds(
+    paths: WorkflowPaths,
+    *,
+    workflow_id: str,
+    request_id: str,
+    control_type: str,
+) -> list[dict[str, Any]]:
+    """Release acknowledged manual holds at a start/resume boundary.
+
+    A manual availability hold otherwise prevents the success event that would
+    clear it, creating a permanent scheduler deadlock.  Start/resume is already
+    the explicit acknowledgement boundary for repaired attention conditions.
+    Automatic cooldown holds are intentionally left untouched.
+    """
+
+    if not workflow_id:
+        return []
+    cleared_at = utc_timestamp()
+
+    def update(health: dict[str, Any]) -> list[dict[str, Any]]:
+        cleared: list[dict[str, Any]] = []
+        runners = health.get("runners")
+        if not isinstance(runners, dict):
+            return cleared
+        for runner_id, record in runners.items():
+            if not isinstance(record, dict):
+                continue
+            hold = record.get("availability_hold")
+            if not isinstance(hold, Mapping) or hold.get("status") != "active":
+                continue
+            if hold.get("requires_attention") is not True:
+                continue
+            released = dict(hold)
+            released.update(
+                {
+                    "status": "cleared",
+                    "cleared_at": cleared_at,
+                    "cleared_by_control_request_id": request_id,
+                    "cleared_by_control_type": control_type,
+                }
+            )
+            record["availability_hold"] = released
+            cleared.append({"runner_id": str(runner_id), "hold": _json_safe_object(released)})
+        if cleared:
+            health["updated_at"] = cleared_at
+        return cleared
+
+    cleared_holds = _update_runner_health_locked(paths, workflow_id=workflow_id, update=update)
+    for item in cleared_holds:
+        append_event(
+            paths,
+            workflow_id=workflow_id,
+            event_type="runner_availability_hold_cleared",
+            data={
+                "runner_id": item.get("runner_id"),
+                "hold": item.get("hold"),
+                "cleared_by_control_request_id": request_id,
+                "cleared_by_control_type": control_type,
+            },
+        )
+    return cleared_holds
 
 
 def _load_runner_and_adapter(project: Path, runner_id: str | None) -> tuple[RunnerConfig, Any]:
@@ -5090,23 +5286,39 @@ def _finish_worker_execution(
         runtime_status = "waiting_background_job"
     else:
         runtime_status = f"{prepared.role}_run_finished" if ok else f"{prepared.role}_run_failed"
+    autonomous_background_recovery = bool(
+        isinstance(failure_registry_update, Mapping)
+        and str(failure_registry_update.get("failure_class") or "")
+        == "background_job_failed"
+    )
+    scheduler_update = {
+        "last_action": scheduler_action,
+        "owner": owner,
+        "last_run_id": prepared.run_id,
+        "last_task_id": prepared.task_id,
+        "last_runner_id": prepared.runner_id,
+        "last_worker_status": status,
+        "last_worker_classification": classification,
+        "last_next_prompt_ready": _agent_next_prompt_ready(agent_status_record),
+        "wake_next_agent_when": _agent_wake_next_agent_when(agent_status_record),
+        "active_run_id": None,
+        "active_node_id": None,
+        "active_task_id": None,
+    }
+    if autonomous_background_recovery:
+        scheduler_update.update(
+            {
+                "requires_attention_id": None,
+                "requires_attention_type": None,
+                "active_background_job_id": None,
+                "active_background_job_status": None,
+            }
+        )
     _update_runtime_state(
         paths,
         status=runtime_status,
-        scheduler_update={
-            "last_action": scheduler_action,
-            "owner": owner,
-            "last_run_id": prepared.run_id,
-            "last_task_id": prepared.task_id,
-            "last_runner_id": prepared.runner_id,
-            "last_worker_status": status,
-            "last_worker_classification": classification,
-            "last_next_prompt_ready": _agent_next_prompt_ready(agent_status_record),
-            "wake_next_agent_when": _agent_wake_next_agent_when(agent_status_record),
-            "active_run_id": None,
-            "active_node_id": None,
-            "active_task_id": None,
-        },
+        scheduler_update=scheduler_update,
+        requires_attention=[] if autonomous_background_recovery else None,
     )
     return result
 
@@ -5812,8 +6024,12 @@ def _update_background_registry_locked(
     update: Any,
 ) -> Any:
     owner = f"background-registry:{os.getpid()}:{uuid.uuid4().hex[:8]}"
-    lock = AtomicOwnerLock(paths.runtime_dir / "lock" / "background_jobs_lock", owner, ttl_seconds=30)
-    with lock.acquire():
+    lock = AtomicOwnerLock(
+        paths.runtime_dir / "lock" / "background_jobs_lock",
+        owner,
+        ttl_seconds=BACKGROUND_REGISTRY_LOCK_TTL_SECONDS,
+    )
+    with lock.acquire(timeout_seconds=BACKGROUND_REGISTRY_LOCK_WAIT_SECONDS):
         registry, error = _read_background_job_registry(paths.runtime_dir / BACKGROUND_JOBS_FILENAME, workflow_id=workflow_id)
         if error:
             registry.setdefault("registry_errors", []).append(error)
@@ -6407,6 +6623,125 @@ def _ingest_failed_validations(paths: WorkflowPaths, *, workflow_id: str) -> lis
             failure = _upsert_failure(registry, candidate)
             if failure is not None:
                 changed.append(dict(failure))
+
+    _update_failure_registry_locked(paths, workflow_id=workflow_id, update=update)
+    return changed
+
+
+def _ingest_failed_background_jobs(
+    paths: WorkflowPaths,
+    *,
+    workflow_id: str,
+    background_jobs: object,
+    tasks: object,
+) -> list[dict[str, Any]]:
+    """Turn task-associated background failures into autonomous recovery work.
+
+    A failed supervised command is ordinary task execution evidence, not a human
+    approval boundary.  Valid task-associated records therefore enter the same
+    bounded recovery queue as worker and validation failures.  Malformed records
+    without a resolvable task remain conservative ``requires_attention`` cases.
+    """
+
+    if not isinstance(background_jobs, Sequence) or isinstance(
+        background_jobs, (str, bytes)
+    ):
+        return []
+    task_records = {
+        str(task.get("task_id") or ""): task
+        for task in tasks
+        if isinstance(task, Mapping) and str(task.get("task_id") or "")
+    } if isinstance(tasks, Sequence) and not isinstance(tasks, (str, bytes)) else {}
+    candidates: list[dict[str, Any]] = []
+    seen_at = utc_timestamp()
+    for job in background_jobs:
+        if not isinstance(job, Mapping):
+            continue
+        status = str(job.get("status") or "").strip().lower()
+        if status not in BACKGROUND_JOB_ATTENTION_STATUSES:
+            continue
+        task_id = str(job.get("task_id") or "").strip()
+        task = task_records.get(task_id)
+        job_id = _record_id(job)
+        if task is None or not job_id:
+            continue
+        run_id = str(job.get("run_id") or "")
+        exit_code = job.get("exit_code")
+        status_problem = str(job.get("status_problem") or "").strip()
+        if status == "needs_recovery" and status_problem.startswith("invalid_status:"):
+            # An unrecognized producer status is a malformed control record,
+            # not a safely classified task failure. Keep the conservative
+            # attention path until the record itself can be interpreted.
+            continue
+        summary = f"Background job {job_id} for {task_id} ended with status {status}"
+        if exit_code is not None:
+            summary += f" and exit code {exit_code}"
+        if status_problem:
+            summary += f" ({status_problem})"
+        summary += ". Inspect its recorded command and logs, repair the task, run the smallest validation, and resume it idempotently."
+        task_budget = _int_value(
+            task.get("max_attempts"), default=DEFAULT_MAX_RECOVERY_ATTEMPTS
+        )
+        candidates.append(
+            {
+                "failure_id": _new_failure_id(),
+                "task_id": task_id,
+                "run_id": run_id,
+                "status": "unrecovered",
+                "failure_class": "background_job_failed",
+                "failure_signature": ":".join(
+                    (
+                        "background_job_failed",
+                        status or "unknown",
+                        f"exit_{exit_code}",
+                        status_problem or "no_status_problem",
+                    )
+                ),
+                "summary": summary,
+                "first_seen_at": seen_at,
+                "last_seen_at": seen_at,
+                "attempts": 1,
+                "recovery_attempts": 0,
+                "max_recovery_attempts": max(
+                    DEFAULT_MAX_RECOVERY_ATTEMPTS, task_budget
+                ),
+                "budget_remaining": True,
+                "recoverable": True,
+                "run_ids": [run_id] if run_id else [],
+                "source_background_job_id": job_id,
+                "source_background_status": status,
+                "source_background_exit_code": exit_code,
+                "source_agent_status_path": job.get("source_agent_status_path"),
+                "background_command": job.get("command"),
+                "background_command_hash": job.get("command_hash"),
+                "background_logs": list(job.get("logs") or []),
+                "background_exit_code_file": job.get("exit_code_file"),
+            }
+        )
+    if not candidates:
+        return []
+
+    changed: list[dict[str, Any]] = []
+
+    def update(registry: dict[str, Any]) -> None:
+        failures = registry.setdefault("failures", [])
+        if not isinstance(failures, list):
+            failures = []
+            registry["failures"] = failures
+        known_background_ids = {
+            str(failure.get("source_background_job_id") or "")
+            for failure in failures
+            if isinstance(failure, Mapping)
+        }
+        for candidate in candidates:
+            source_id = str(candidate.get("source_background_job_id") or "")
+            if source_id in known_background_ids:
+                continue
+            record = dict(candidate)
+            _refresh_failure_budget(record)
+            failures.append(record)
+            known_background_ids.add(source_id)
+            changed.append(dict(record))
 
     _update_failure_registry_locked(paths, workflow_id=workflow_id, update=update)
     return changed
@@ -8552,16 +8887,20 @@ def _fsync_directory(path: Path) -> None:
 
 def _owner_metadata(owner: str, ttl_seconds: int) -> dict[str, Any]:
     now = utc_timestamp()
-    return {
+    metadata: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
+        "lock_id": uuid.uuid4().hex,
         "owner": owner,
         "hostname": socket.gethostname(),
         "pid": os.getpid(),
-        "process_start_time": _process_start_time(),
         "started_at": now,
         "heartbeat_at": now,
         "ttl_seconds": ttl_seconds,
     }
+    process_start_time = _process_start_time(os.getpid())
+    if process_start_time is not None:
+        metadata["process_start_time"] = process_start_time
+    return metadata
 
 
 def _lock_owner_pid(owner: Mapping[str, Any]) -> int | None:
@@ -8575,12 +8914,97 @@ def _lock_owner_pid(owner: Mapping[str, Any]) -> int | None:
     return None
 
 
-def _process_start_time() -> str:
+def _process_start_time(pid: int) -> str | None:
     try:
-        stat = Path(f"/proc/{os.getpid()}").stat()
-        return datetime.fromtimestamp(stat.st_ctime, UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+        stat_fields = (Path("/proc") / str(pid) / "stat").read_text(encoding="utf-8").rsplit(") ", 1)[1].split()
+        return f"proc:{stat_fields[19]}"
+    except (OSError, IndexError):
+        return None
+
+
+def _hostnames_match(left: str, right: str) -> bool:
+    left_normalized = left.strip().lower().rstrip(".")
+    right_normalized = right.strip().lower().rstrip(".")
+    if not left_normalized or not right_normalized:
+        return False
+    return left_normalized == right_normalized or left_normalized.split(".", 1)[0] == right_normalized.split(".", 1)[0]
+
+
+def _unlink_owned_lock_path(path: Path, *, fd: int, lock_id: str | None) -> bool:
+    try:
+        descriptor_stat = os.fstat(fd)
+        path_stat = path.stat()
+    except FileNotFoundError:
+        return True
     except OSError:
-        return utc_timestamp()
+        return False
+    if (descriptor_stat.st_dev, descriptor_stat.st_ino) != (path_stat.st_dev, path_stat.st_ino):
+        return False
+    if lock_id is not None:
+        owner = _read_json_object(path, default={})
+        if not isinstance(owner, Mapping) or str(owner.get("lock_id") or "") != lock_id:
+            return False
+    try:
+        current_stat = path.stat()
+        if (descriptor_stat.st_dev, descriptor_stat.st_ino) != (current_stat.st_dev, current_stat.st_ino):
+            return False
+        path.unlink()
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def _unlink_lock_path_if_unchanged(
+    path: Path,
+    *,
+    observed_stat: os.stat_result,
+    lock_id: str | None,
+    heartbeat_at: str | None,
+) -> bool:
+    try:
+        current_stat = path.stat()
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    observed_version = (
+        observed_stat.st_dev,
+        observed_stat.st_ino,
+        observed_stat.st_size,
+        observed_stat.st_mtime_ns,
+    )
+    current_version = (
+        current_stat.st_dev,
+        current_stat.st_ino,
+        current_stat.st_size,
+        current_stat.st_mtime_ns,
+    )
+    if current_version != observed_version:
+        return False
+    current_owner = _read_json_object(path, default={})
+    if not isinstance(current_owner, Mapping):
+        return False
+    if lock_id is not None and _non_empty_text(current_owner.get("lock_id")) != lock_id:
+        return False
+    if heartbeat_at is not None and _non_empty_text(current_owner.get("heartbeat_at")) != heartbeat_at:
+        return False
+    try:
+        final_stat = path.stat()
+        if (
+            final_stat.st_dev,
+            final_stat.st_ino,
+            final_stat.st_size,
+            final_stat.st_mtime_ns,
+        ) != current_version:
+            return False
+        path.unlink()
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    return True
 
 
 def _scheduler_owner() -> str:

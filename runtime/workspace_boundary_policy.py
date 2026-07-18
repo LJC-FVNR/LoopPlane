@@ -140,9 +140,9 @@ def _collect_worker_path_records(
     if isinstance(agent_status, Mapping):
         _extend_project_path_records(records, project, run_dir, agent_status.get("project_changes"), "agent_status.project_changes")
         _extend_project_path_records(records, project, run_dir, agent_status.get("changed_files"), "agent_status.changed_files")
-        _extend_output_path_records(records, project, run_dir, agent_status.get("key_outputs"), "agent_status.key_outputs")
+        _extend_evidence_path_records(records, project, run_dir, agent_status.get("key_outputs"), "agent_status.key_outputs")
         for index, claim in enumerate(_mapping_items(agent_status.get("evidence_satisfies"))):
-            _extend_output_path_records(
+            _extend_evidence_path_records(
                 records,
                 project,
                 run_dir,
@@ -208,6 +208,37 @@ def _extend_output_path_records(
                     "reported_path": path_value,
                     "source": source,
                     "resolved_path": _resolve_run_path(project, run_dir, path_value),
+                }
+            )
+
+
+def _extend_evidence_path_records(
+    records: list[dict[str, Any]],
+    project: Path,
+    run_dir: Path,
+    value: Any,
+    source: str,
+) -> None:
+    """Collect evidence references, including paths relative to this run.
+
+    Worker evidence may intentionally refer to an earlier sibling run using
+    ``../run_previous/...``.  Adapter ``produced_files`` metadata has different
+    semantics—its relative paths are project-relative—so this resolver is kept
+    separate from the write-observation path resolver.
+    """
+
+    for item in _path_items(value):
+        for path_value in _item_paths(item):
+            normalized = path_value.strip().replace("\\", "/")
+            if normalized == ".." or normalized.startswith("../") or normalized.startswith("./../"):
+                resolved = (run_dir / normalized).resolve()
+            else:
+                resolved = _resolve_run_path(project, run_dir, path_value)
+            records.append(
+                {
+                    "reported_path": path_value,
+                    "source": source,
+                    "resolved_path": resolved,
                 }
             )
 

@@ -223,8 +223,18 @@ def run_validator(
             deterministic_result=result,
             write=write,
         )
+        if validator_agent is None and validator_agent_policy.get("required") is True:
+            validator_agent = {
+                "status": "agent_unavailable",
+                "ok": False,
+                "error": "validator agent is unavailable or disabled",
+            }
         if validator_agent is not None:
-            result = _merge_validator_agent_result(result, validator_agent)
+            result = _merge_validator_agent_result(
+                result,
+                validator_agent,
+                required=validator_agent_policy.get("required") is True,
+            )
     if write:
         _write_validation(worker_run_dir, result)
     return result
@@ -238,15 +248,21 @@ def _validator_agent_policy(
 ) -> dict[str, Any]:
     mode = _validator_agent_mode(workflow_config)
     status = str(deterministic_result.get("status") or "").strip().lower()
+    high_risk_required = _validator_agent_for_high_risk(workflow_config) and task.risk == "high"
     if mode == "disabled":
-        return {"mode": mode, "run": False, "reason": "validator_agent_disabled"}
+        return {"mode": mode, "run": False, "required": False, "reason": "validator_agent_disabled"}
     if mode == "always":
-        return {"mode": mode, "run": True, "reason": "configured_always"}
+        return {"mode": mode, "run": True, "required": True, "reason": "configured_always"}
     if status not in PASSING_STATUSES:
-        return {"mode": mode, "run": True, "reason": "deterministic_validation_not_passing"}
-    if _validator_agent_for_high_risk(workflow_config) and task.risk == "high":
-        return {"mode": mode, "run": True, "reason": "high_risk_task"}
-    return {"mode": mode, "run": False, "reason": "deterministic_validation_passed"}
+        return {
+            "mode": mode,
+            "run": True,
+            "required": high_risk_required,
+            "reason": "deterministic_validation_not_passing",
+        }
+    if high_risk_required:
+        return {"mode": mode, "run": True, "required": True, "reason": "high_risk_task"}
+    return {"mode": mode, "run": False, "required": False, "reason": "deterministic_validation_passed"}
 
 
 def _validator_agent_mode(workflow_config: Mapping[str, Any]) -> str:
@@ -513,7 +529,12 @@ def _validator_evidence_prompt_summary(deterministic_result: Mapping[str, Any]) 
     }
 
 
-def _merge_validator_agent_result(result: Mapping[str, Any], validator_agent: Mapping[str, Any]) -> dict[str, Any]:
+def _merge_validator_agent_result(
+    result: Mapping[str, Any],
+    validator_agent: Mapping[str, Any],
+    *,
+    required: bool = False,
+) -> dict[str, Any]:
     merged = dict(result)
     deterministic_status = str(merged.get("status") or "blocked")
     review = validator_agent.get("review") if isinstance(validator_agent.get("review"), Mapping) else {}
@@ -524,7 +545,13 @@ def _merge_validator_agent_result(result: Mapping[str, Any], validator_agent: Ma
     material_gaps = _list_strings(review.get("material_gaps"))
 
     if validator_agent.get("ok") is not True:
-        if deterministic_status in PASSING_STATUSES:
+        if required:
+            status = "blocked"
+            failures.append(
+                "Required validator agent failed: "
+                f"{validator_agent.get('error') or 'unknown error'}"
+            )
+        elif deterministic_status in PASSING_STATUSES:
             status = deterministic_status
             warnings.append(
                 "Validator agent failed after deterministic validation passed; "

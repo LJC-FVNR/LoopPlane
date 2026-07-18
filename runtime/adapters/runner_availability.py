@@ -15,6 +15,8 @@ DEFAULT_COOLDOWNS = {
     "provider_overloaded": 300,
 }
 RETRY_AT_BUFFER_SECONDS = 60
+BUILTIN_DIAGNOSTIC_TAIL_LINES = 80
+BUILTIN_DIAGNOSTIC_TAIL_CHARS = 65_536
 BUILTIN_ADAPTERS = frozenset({"codex_cli", "claude_code_cli"})
 BUILTIN_PATTERNS = (
     {
@@ -22,7 +24,10 @@ BUILTIN_PATTERNS = (
         # A bare ``402`` commonly appears as a source/prompt line number (for
         # example ``402- - approval: not_required``).  Require HTTP/error
         # context before treating the numeric status as billing evidence.
-        "pattern": r"\b(?:billing|payment required|spend limit|monthly budget|(?:http(?: status)?|status(?: code)?|error)\s*[:=#-]?\s*402)\b",
+        # Do not treat a bare mention of "billing" as a provider diagnostic.
+        # Agent transcripts routinely contain billing/account instructions and
+        # source text that are unrelated to the runner's terminal failure.
+        "pattern": r"\b(?:payment required|billing (?:required|disabled|error|failure)|(?:spend limit|monthly budget) (?:reached|exceeded|exhausted)|(?:http(?: status)?|status(?: code)?|error)\s*[:=#-]?\s*402)\b",
         "requires_attention": True,
     },
     {
@@ -42,8 +47,13 @@ BUILTIN_PATTERNS = (
     },
     {
         "reason_class": "provider_overloaded",
-        "pattern": r"\b(?:overloaded|server overloaded|temporarily unavailable|overloaded_error|(?:http(?: status)?|status(?: code)?|error)\s*[:=#-]?\s*(?:503|529))\b",
+        "pattern": r"\b(?:selected model is at capacity|model (?:is )?(?:currently )?at capacity|overloaded|server overloaded|temporarily unavailable|overloaded_error|(?:http(?: status)?|status(?: code)?|error)\s*[:=#-]?\s*(?:503|529))\b",
         "cooldown_seconds": DEFAULT_COOLDOWNS["provider_overloaded"],
+    },
+    {
+        "reason_class": "runner_configuration_error",
+        "pattern": r"\b(?:unexpected argument|unrecognized arguments?|unknown option|invalid (?:option|argument))\b[^\n]*",
+        "requires_attention": True,
     },
     {
         "reason_class": "auth_required",
@@ -177,20 +187,28 @@ def _match_custom_classifier(policy: Mapping[str, Any], sources: Mapping[str, st
 
 def _match_builtin_classifier(sources: Mapping[str, str]) -> dict[str, Any] | None:
     text_by_source = {
-        "stderr": sources.get("stderr", ""),
-        "final_output": sources.get("final_output", ""),
-        "stdout": sources.get("stdout", ""),
+        "stderr": _diagnostic_tail(sources.get("stderr", "")),
+        "final_output": _diagnostic_tail(sources.get("final_output", "")),
+        "stdout": _diagnostic_tail(sources.get("stdout", "")),
     }
-    for pattern in BUILTIN_PATTERNS:
-        for source_name, text in text_by_source.items():
-            found = _regex_search(str(pattern["pattern"]), text)
-            if found:
-                return {
-                    **pattern,
-                    "source": source_name,
-                    "matched_pattern": pattern["pattern"],
-                    "message": _matched_line(text, found),
-                }
+    # Availability diagnostics are terminal errors.  Within each preferred
+    # source, use the latest matching diagnostic instead of allowing the
+    # declaration order of patterns to select an earlier phrase quoted by the
+    # agent.  stderr remains preferred over fallback final output and stdout.
+    for source_name, text in text_by_source.items():
+        latest: tuple[int, Mapping[str, Any], re.Match[str]] | None = None
+        for pattern in BUILTIN_PATTERNS:
+            found = _last_regex_match(str(pattern["pattern"]), text)
+            if found is not None and (latest is None or found.start() > latest[0]):
+                latest = (found.start(), pattern, found)
+        if latest is not None:
+            _, pattern, found = latest
+            return {
+                **pattern,
+                "source": source_name,
+                "matched_pattern": pattern["pattern"],
+                "message": _matched_line(text, found),
+            }
     return None
 
 
@@ -199,6 +217,20 @@ def _regex_search(pattern: str, text: str) -> re.Match[str] | None:
         return re.search(pattern, text, flags=re.IGNORECASE)
     except re.error:
         return None
+
+
+def _last_regex_match(pattern: str, text: str) -> re.Match[str] | None:
+    try:
+        matches = re.finditer(pattern, text, flags=re.IGNORECASE)
+        return next(reversed(list(matches)), None)
+    except re.error:
+        return None
+
+
+def _diagnostic_tail(text: str) -> str:
+    lines = text.splitlines()
+    tail = "\n".join(lines[-BUILTIN_DIAGNOSTIC_TAIL_LINES:])
+    return tail[-BUILTIN_DIAGNOSTIC_TAIL_CHARS:]
 
 
 def _matched_line(text: str, found: re.Match[str]) -> str:

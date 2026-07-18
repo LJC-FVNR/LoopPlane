@@ -38,7 +38,19 @@ def set_validator_agent_mode(project: Path, mode: str) -> None:
     workflow_path.write_text(json.dumps(workflow, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
-def write_plan(project: Path, *, validation: str = "file_exists: artifacts/result.txt") -> None:
+def require_validator_agent_for_high_risk(project: Path) -> None:
+    workflow_path = project / ".loopplane" / "config" / "workflow.json"
+    workflow = json.loads(workflow_path.read_text(encoding="utf-8"))
+    workflow.setdefault("validation", {})["validator_agent_for_high_risk"] = True
+    workflow_path.write_text(json.dumps(workflow, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def write_plan(
+    project: Path,
+    *,
+    validation: str = "file_exists: artifacts/result.txt",
+    risk: str = "low",
+) -> None:
     disable_default_validator_agent(project)
     workflow = json.loads((project / ".loopplane" / "config" / "workflow.json").read_text(encoding="utf-8"))
     plan = f"""# Project Plan
@@ -59,7 +71,7 @@ def write_plan(project: Path, *, validation: str = "file_exists: artifacts/resul
   - evidence: .loopplane/results/T001/
   - latest: .loopplane/results/T001/latest.json
   - depends_on: []
-  - risk: low
+  - risk: {risk}
   - validation: {validation}
   - max_attempts: 3
   - approval: not_required
@@ -374,7 +386,7 @@ class AuthoritativeValidatorTest(unittest.TestCase):
             self.assertEqual(validation["accepted_task_ids"], ["T001"])
             self.assertEqual(validation["rejected_task_ids"], [])
 
-    def test_validator_agent_always_mode_preserves_advisory_fallback_on_pass(self) -> None:
+    def test_validator_agent_always_mode_fails_closed_when_agent_unavailable(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             project = Path(tmp) / "project"
             init_project(project, "Validator fallback fixture.")
@@ -385,14 +397,41 @@ class AuthoritativeValidatorTest(unittest.TestCase):
 
             validation = run_validator(project, task_id="T001", run_dir=run_dir)
 
-            self.assertEqual(validation["status"], "pass", json.dumps(validation, indent=2, sort_keys=True))
+            self.assertEqual(validation["status"], "blocked", json.dumps(validation, indent=2, sort_keys=True))
             self.assertEqual(validation["deterministic_validation_status"], "pass")
             self.assertEqual(validation["validator_agent_policy"]["mode"], "always")
+            self.assertTrue(validation["validator_agent_policy"]["required"])
             self.assertEqual(len(validation["validator_agent"]["attempts"]), 2)
-            self.assertEqual(validation["accepted_task_ids"], ["T001"])
-            self.assertEqual(validation["rejected_task_ids"], [])
+            self.assertEqual(validation["accepted_task_ids"], [])
+            self.assertEqual(validation["rejected_task_ids"], ["T001"])
             self.assertTrue(
-                any("using deterministic validation as advisory fallback" in warning for warning in validation["warnings"]),
+                any("Required validator agent failed" in failure for failure in validation["failures"]),
+                json.dumps(validation, indent=2, sort_keys=True),
+            )
+
+    def test_required_high_risk_validator_agent_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "Required high-risk validator fixture.")
+            write_plan(
+                project,
+                validation="file_exists: artifacts/result.txt; command_exit_code: 0",
+                risk="high",
+            )
+            require_validator_agent_for_high_risk(project)
+            configure_broken_validator_agent(project)
+            run_dir = write_worker_run(project, create_artifact=True)
+
+            validation = run_validator(project, task_id="T001", run_dir=run_dir)
+
+            self.assertEqual(validation["status"], "blocked", json.dumps(validation, indent=2, sort_keys=True))
+            self.assertEqual(validation["deterministic_validation_status"], "pass")
+            self.assertTrue(validation["validator_agent_policy"]["required"])
+            self.assertEqual(validation["validator_agent_policy"]["reason"], "high_risk_task")
+            self.assertEqual(validation["accepted_task_ids"], [])
+            self.assertEqual(validation["rejected_task_ids"], ["T001"])
+            self.assertTrue(
+                any("Required validator agent failed" in failure for failure in validation["failures"]),
                 json.dumps(validation, indent=2, sort_keys=True),
             )
 

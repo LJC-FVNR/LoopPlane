@@ -3,13 +3,16 @@ from __future__ import annotations
 import json
 import os
 import signal
+import socket
 import subprocess
 import sys
 import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
+import runtime.background_jobs as background_jobs_runtime
 from runtime.adapters.base import utc_timestamp
 from runtime.background_jobs import (
     cancel_background_job,
@@ -22,7 +25,7 @@ from runtime.background_jobs import (
 )
 from runtime.init_workflow import init_project
 from runtime.path_resolution import WorkflowPaths, load_workflow_config
-from runtime.scheduler import load_scheduler_snapshot, select_next_action
+from runtime.scheduler import SchedulerLockError, load_scheduler_snapshot, select_next_action
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -211,6 +214,153 @@ class BackgroundJobRuntimeTest(unittest.TestCase):
             self.assertTrue(status["jobs"][0]["next_prompt_ready"])
             self.assertEqual(status["jobs"][0]["exit_code"], 0)
             self.assertEqual(marker.read_text(encoding="utf-8"), "done")
+
+    def test_supervisor_defers_contended_heartbeat_without_stopping_child(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "Transient registry contention must not stop healthy work.")
+            workflow_config = load_workflow_config(project)
+            workflow_id = str(workflow_config["workflow_id"])
+            paths = WorkflowPaths.from_config(project, workflow_config)
+            job_id = "heartbeat_lock_contention_fixture"
+            job_dir = paths.runtime_dir / "background_jobs" / job_id
+            job_dir.mkdir(parents=True, exist_ok=True)
+            marker = project / "heartbeat_lock_contention_done.txt"
+            launch_path = job_dir / "launch.json"
+            launch_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "1.0",
+                        "project_root": project.as_posix(),
+                        "workflow_id": workflow_id,
+                        "job_id": job_id,
+                        "command": [
+                            sys.executable,
+                            "-c",
+                            (
+                                "import time; from pathlib import Path; time.sleep(0.8); "
+                                f"Path({str(marker)!r}).write_text('done', encoding='utf-8')"
+                            ),
+                        ],
+                        "cwd": project.as_posix(),
+                        "stdout_path": (job_dir / "stdout.log").as_posix(),
+                        "stderr_path": (job_dir / "stderr.log").as_posix(),
+                        "supervisor_log_path": (job_dir / "supervisor.log").as_posix(),
+                        "exit_code_file": (job_dir / "exit_code.txt").as_posix(),
+                        "heartbeat_seconds": 0.5,
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            now = utc_timestamp()
+            self._write_background_registry(
+                paths,
+                workflow_id,
+                [
+                    {
+                        "job_id": job_id,
+                        "workflow_id": workflow_id,
+                        "status": "running",
+                        "next_prompt_ready": False,
+                        "started_at": now,
+                        "heartbeat_at": now,
+                        "launch_path": launch_path.relative_to(project).as_posix(),
+                    }
+                ],
+            )
+            real_update_job = background_jobs_runtime._update_job
+            update_calls = 0
+
+            def contend_once(*args: object, **kwargs: object) -> object:
+                nonlocal update_calls
+                update_calls += 1
+                if update_calls == 3:
+                    raise SchedulerLockError("transient heartbeat lock contention")
+                return real_update_job(*args, **kwargs)
+
+            with mock.patch.object(background_jobs_runtime, "_update_job", side_effect=contend_once):
+                exit_code = _run_supervisor(project, workflow_id=workflow_id, job_id=job_id, launch_path=launch_path)
+
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(marker.read_text(encoding="utf-8"), "done")
+            status = list_background_jobs(project, job_id=job_id)
+            self.assertEqual(status["jobs"][0]["status"], "completed")
+            supervisor_log = (job_dir / "supervisor.log").read_text(encoding="utf-8")
+            self.assertIn("heartbeat_registry_lock_contended update_deferred", supervisor_log)
+
+    def test_supervisor_terminal_lock_contention_keeps_exit_code_evidence_recoverable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "Terminal registry contention must not erase command completion.")
+            workflow_config = load_workflow_config(project)
+            workflow_id = str(workflow_config["workflow_id"])
+            paths = WorkflowPaths.from_config(project, workflow_config)
+            job_id = "terminal_lock_contention_fixture"
+            job_dir = paths.runtime_dir / "background_jobs" / job_id
+            job_dir.mkdir(parents=True, exist_ok=True)
+            exit_code_file = job_dir / "exit_code.txt"
+            launch_path = job_dir / "launch.json"
+            launch_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "1.0",
+                        "project_root": project.as_posix(),
+                        "workflow_id": workflow_id,
+                        "job_id": job_id,
+                        "command": [sys.executable, "-c", "print('completed')"],
+                        "cwd": project.as_posix(),
+                        "stdout_path": (job_dir / "stdout.log").as_posix(),
+                        "stderr_path": (job_dir / "stderr.log").as_posix(),
+                        "supervisor_log_path": (job_dir / "supervisor.log").as_posix(),
+                        "exit_code_file": exit_code_file.as_posix(),
+                        "heartbeat_seconds": 0.1,
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            now = utc_timestamp()
+            self._write_background_registry(
+                paths,
+                workflow_id,
+                [
+                    {
+                        "job_id": job_id,
+                        "workflow_id": workflow_id,
+                        "status": "running",
+                        "next_prompt_ready": False,
+                        "started_at": now,
+                        "heartbeat_at": now,
+                        "exit_code_file": exit_code_file.relative_to(project).as_posix(),
+                        "launch_path": launch_path.relative_to(project).as_posix(),
+                    }
+                ],
+            )
+            real_update_job = background_jobs_runtime._update_job
+
+            def contend_on_completed_update(*args: object, **kwargs: object) -> object:
+                update = kwargs["update"]
+                candidate = update({"job_id": job_id, "status": "running", "next_prompt_ready": False})
+                if candidate.get("status") == "completed":
+                    raise SchedulerLockError("terminal lock contention")
+                return real_update_job(*args, **kwargs)
+
+            with mock.patch.object(background_jobs_runtime, "_update_job", side_effect=contend_on_completed_update):
+                supervisor_exit_code = _run_supervisor(
+                    project,
+                    workflow_id=workflow_id,
+                    job_id=job_id,
+                    launch_path=launch_path,
+                )
+
+            self.assertEqual(supervisor_exit_code, 0)
+            self.assertEqual(exit_code_file.read_text(encoding="utf-8").strip(), "0")
+            supervisor_log = (job_dir / "supervisor.log").read_text(encoding="utf-8")
+            self.assertIn("command_terminal_registry_lock_contended retry_exhausted", supervisor_log)
+            status = list_background_jobs(project, job_id=job_id)
+            self.assertEqual(status["jobs"][0]["status"], "completed")
+            self.assertTrue(status["jobs"][0]["next_prompt_ready"])
 
     def test_continue_on_fail_releases_failed_background_job_without_hiding_failure(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -627,6 +777,7 @@ class BackgroundJobRuntimeTest(unittest.TestCase):
                             "heartbeat_at": now,
                             "pid": process.pid,
                             "child_pid": process.pid,
+                            "supervisor_host": socket.gethostname(),
                         }
                     ],
                 )
@@ -669,6 +820,177 @@ class BackgroundJobRuntimeTest(unittest.TestCase):
             self.assertEqual(status["jobs"][0]["status"], "needs_recovery")
             self.assertEqual(status["jobs"][0]["status_problem"], "missing_parseable_heartbeat")
 
+    def test_fresh_remote_heartbeat_does_not_use_local_pid_namespace(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "Remote background supervisors use heartbeat evidence.")
+            workflow_config = load_workflow_config(project)
+            workflow_id = str(workflow_config["workflow_id"])
+            paths = WorkflowPaths.from_config(project, workflow_config)
+            now = utc_timestamp()
+            self._write_background_registry(
+                paths,
+                workflow_id,
+                [
+                    {
+                        "job_id": "remote_pid_namespace_fixture",
+                        "workflow_id": workflow_id,
+                        "status": "running",
+                        "next_prompt_ready": False,
+                        "started_at": now,
+                        "heartbeat_at": now,
+                        "pid": 999_999_999,
+                        "supervisor_pid": 999_999_998,
+                        "supervisor_host": f"remote-{socket.gethostname()}",
+                    }
+                ],
+            )
+
+            status = list_background_jobs(project, job_id="remote_pid_namespace_fixture")
+
+            job = status["jobs"][0]
+            self.assertEqual(job["status"], "running")
+            self.assertFalse(job["next_prompt_ready"])
+            self.assertNotIn("status_problem", job)
+
+    def test_stale_remote_heartbeat_is_not_preserved_by_colliding_local_pids(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "Remote PID collisions must not prove background liveness.")
+            workflow_config = load_workflow_config(project)
+            workflow_id = str(workflow_config["workflow_id"])
+            paths = WorkflowPaths.from_config(project, workflow_config)
+            self._write_background_registry(
+                paths,
+                workflow_id,
+                [
+                    {
+                        "job_id": "remote_stale_pid_collision_fixture",
+                        "workflow_id": workflow_id,
+                        "status": "running",
+                        "next_prompt_ready": False,
+                        "started_at": "2000-01-01T00:00:00Z",
+                        "heartbeat_at": "2000-01-01T00:00:00Z",
+                        "pid": os.getpid(),
+                        "child_pid": os.getpid(),
+                        "supervisor_pid": os.getpid(),
+                        "supervisor_host": f"remote-{socket.gethostname()}",
+                    }
+                ],
+            )
+
+            status = list_background_jobs(project, job_id="remote_stale_pid_collision_fixture")
+
+            job = status["jobs"][0]
+            self.assertEqual(job["status"], "stale")
+            self.assertEqual(job["status_problem"], "stale_heartbeat")
+            self.assertFalse(job["next_prompt_ready"])
+
+    def test_legacy_stale_record_cannot_use_unscoped_pid_liveness(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "Legacy PID records lack a trustworthy host namespace.")
+            workflow_config = load_workflow_config(project)
+            workflow_id = str(workflow_config["workflow_id"])
+            paths = WorkflowPaths.from_config(project, workflow_config)
+            self._write_background_registry(
+                paths,
+                workflow_id,
+                [
+                    {
+                        "job_id": "legacy_stale_pid_collision_fixture",
+                        "workflow_id": workflow_id,
+                        "status": "running",
+                        "next_prompt_ready": False,
+                        "started_at": "2000-01-01T00:00:00Z",
+                        "heartbeat_at": "2000-01-01T00:00:00Z",
+                        "pid": os.getpid(),
+                        "child_pid": os.getpid(),
+                        "supervisor_pid": os.getpid(),
+                    }
+                ],
+            )
+
+            status = list_background_jobs(project, job_id="legacy_stale_pid_collision_fixture")
+
+            job = status["jobs"][0]
+            self.assertEqual(job["status"], "stale")
+            self.assertEqual(job["status_problem"], "stale_heartbeat")
+
+    def test_manual_remote_resolution_never_signals_node_local_pids(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "Remote background resolution must respect PID namespaces.")
+            workflow_config = load_workflow_config(project)
+            workflow_id = str(workflow_config["workflow_id"])
+            paths = WorkflowPaths.from_config(project, workflow_config)
+            now = utc_timestamp()
+            self._write_background_registry(
+                paths,
+                workflow_id,
+                [
+                    {
+                        "job_id": "remote_resolution_fixture",
+                        "workflow_id": workflow_id,
+                        "status": "stale",
+                        "next_prompt_ready": False,
+                        "started_at": now,
+                        "heartbeat_at": now,
+                        "pid": os.getpid(),
+                        "child_pid": os.getpid(),
+                        "supervisor_pid": os.getpid(),
+                        "supervisor_host": f"remote-{socket.gethostname()}",
+                    }
+                ],
+            )
+
+            with mock.patch.object(background_jobs_runtime, "_terminate_recorded_pid") as terminate:
+                result = complete_background_job(
+                    project,
+                    "remote_resolution_fixture",
+                    status="needs_recovery",
+                    reason="controller host exited",
+                )
+
+            self.assertTrue(result["ok"], json.dumps(result, indent=2, sort_keys=True))
+            terminate.assert_not_called()
+            status = list_background_jobs(project, job_id="remote_resolution_fixture")
+            self.assertEqual(status["jobs"][0]["status"], "needs_recovery")
+            self.assertEqual(status["jobs"][0]["manual_reason"], "controller host exited")
+
+    def test_fresh_local_heartbeat_still_detects_missing_process(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "Local background supervisors retain PID liveness checks.")
+            workflow_config = load_workflow_config(project)
+            workflow_id = str(workflow_config["workflow_id"])
+            paths = WorkflowPaths.from_config(project, workflow_config)
+            now = utc_timestamp()
+            self._write_background_registry(
+                paths,
+                workflow_id,
+                [
+                    {
+                        "job_id": "local_missing_pid_fixture",
+                        "workflow_id": workflow_id,
+                        "status": "running",
+                        "next_prompt_ready": False,
+                        "started_at": now,
+                        "heartbeat_at": now,
+                        "pid": 999_999_999,
+                        "supervisor_pid": 999_999_998,
+                        "supervisor_host": socket.gethostname(),
+                    }
+                ],
+            )
+
+            status = list_background_jobs(project, job_id="local_missing_pid_fixture")
+
+            job = status["jobs"][0]
+            self.assertEqual(job["status"], "stale")
+            self.assertEqual(job["status_problem"], "process_not_live")
+            self.assertFalse(job["next_prompt_ready"])
+
     def test_live_synchronous_watchdog_covers_stale_heartbeat(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             project = Path(tmp) / "project"
@@ -688,6 +1010,7 @@ class BackgroundJobRuntimeTest(unittest.TestCase):
                         "heartbeat_at": "2000-01-01T00:00:00Z",
                         "pid": os.getpid(),
                         "supervisor_pid": os.getpid(),
+                        "supervisor_host": socket.gethostname(),
                         "status_problem": "stale_heartbeat",
                         "watchdog": {
                             "enabled": True,

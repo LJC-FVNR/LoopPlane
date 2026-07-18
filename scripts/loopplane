@@ -1899,6 +1899,12 @@ def run_start(args: argparse.Namespace) -> int:
 
 
 def run_resume(args: argparse.Namespace) -> int:
+    if getattr(args, "foreground_owner", False):
+        # A Slurm/systemd controller that immediately enters
+        # ``runtime.detached supervisor`` must remain the sole supervisor
+        # owner.  Record the durable resume boundary without also spawning a
+        # detached process that would race the external foreground owner.
+        return run_control_request(args)
     try:
         result = resume_detached_scheduler(Path(args.project or "."))
     except (OSError, json.JSONDecodeError, WorkflowPathError) as error:
@@ -2963,6 +2969,11 @@ def add_execution_commands(subparsers: argparse._SubParsersAction[argparse.Argum
         description="Append a durable resume control request for the scheduler to apply.",
     )
     resume.add_argument("--project", metavar="<path>", help="Project path. Defaults to the current directory.")
+    resume.add_argument(
+        "--foreground-owner",
+        action="store_true",
+        help="Record resume without launching a detached supervisor; the caller must immediately run the supervisor.",
+    )
     _add_nested_workspace_options(resume)
     resume.add_argument("--json", action="store_true", help="Emit a machine-readable control request report.")
     resume.set_defaults(handler=run_resume, command_path=("resume",), control_type="resume")

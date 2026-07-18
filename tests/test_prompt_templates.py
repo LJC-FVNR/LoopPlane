@@ -28,6 +28,17 @@ class PromptTemplateGitBoundaryTest(unittest.TestCase):
                 self.assertIn("not as the leadership-facing human summary", text)
                 self.assertIn("human summary is generated separately", text)
 
+    def test_worker_and_recovery_prompts_adopt_live_background_work(self) -> None:
+        for name in ("worker_prompt.template.md", "recovery_prompt.template.md"):
+            with self.subTest(template=name):
+                text = (TEMPLATES / name).read_text(encoding="utf-8")
+                normalized = " ".join(text.split())
+
+                self.assertIn("background registry", text)
+                self.assertIn("adopt and monitor", text)
+                self.assertIn("running_background", text)
+                self.assertIn("never launch a duplicate", normalized)
+
     def test_shared_context_template_includes_worker_git_boundaries(self) -> None:
         text = (TEMPLATES / "SHARED_CONTEXT.template.md").read_text(encoding="utf-8")
 

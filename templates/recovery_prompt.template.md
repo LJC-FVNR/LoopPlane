@@ -60,8 +60,31 @@ are recorded in `{{context_manifest_path}}`.
 
 ## Your Job
 
+### Autonomy and escalation boundary
+
+Self-repair is the default and highest-priority action. Code defects, failed
+tests, data-shape or eligibility errors, numerical exceptions, missing
+reproducible artifacts, Slurm submission/runtime failures, stale dependencies,
+and idempotent retry/resume work are not reasons to ask a human to inspect code
+or choose the next debugging step. Inspect the recorded evidence, identify the
+root cause, patch it within scope, run the smallest meaningful check, and resume
+only the affected work while preserving prior successful outputs and failure
+records.
+
+Use a human-facing escalation status only when continuation truly requires an
+external credential, permission, inaccessible/nonpublic data, coordination with
+another person or organization, or a scientifically material scope choice not
+authorized by the brief and plan. Exhaust distinct safe repair paths and the
+configured retry budget before treating a technical failure as non-recoverable.
+Do not use `requires_attention`, `needs_human`, or equivalent language merely
+because diagnosis or repair requires reading code and logs.
+
 1. Identify the failure signature.
 2. Avoid repeating failed actions without new information.
+   Query the LoopPlane background registry before any retry or submission. If
+   a matching recovery job is active, adopt and monitor it, preserve its
+   run/ledger, and return a `running_background` handoff; never launch a
+   duplicate recovery execution.
 3. Attempt targeted repair.
 4. Run the smallest meaningful validation.
 5. Write recovery evidence under `{{task_evidence_run_dir}}`.

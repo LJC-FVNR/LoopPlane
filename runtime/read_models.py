@@ -954,12 +954,21 @@ def _write_run_detail_models(
             current_paths.add(detail_path.resolve())
         except OSError:
             current_paths.add(detail_path.absolute())
+        detail_record = _run_detail_record(record)
         if record.get("detail_reused") is True and detail_path.is_file():
+            existing = _read_json_object(detail_path, default=None)
+            if (
+                isinstance(existing, Mapping)
+                and _read_model_comparison_value(existing)
+                == _read_model_comparison_value(detail_record)
+            ):
+                counts["run_detail_files_reused_on_disk"] += 1
+                continue
+        if _atomic_write_json_if_changed(detail_path, detail_record):
+            written.append(_path_for_record(paths.project_root, detail_path))
+            counts["run_detail_files_written"] += 1
+        else:
             counts["run_detail_files_reused_on_disk"] += 1
-            continue
-        _atomic_write_json(detail_path, _run_detail_record(record))
-        written.append(_path_for_record(paths.project_root, detail_path))
-        counts["run_detail_files_written"] += 1
     for existing in sorted(run_details_dir.glob("*.json")):
         try:
             existing_key = existing.resolve()
