@@ -1535,6 +1535,33 @@ class SchedulerSelectionTest(unittest.TestCase):
             self.assertEqual(action["selected"]["failure_id"], "fail1")
             self.assertEqual(action["selected"]["task_id"], "P0.T001")
 
+    def test_recovery_waits_until_failed_tasks_dependencies_are_completed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "Do prerequisite work before recovering a dependent task.")
+            write_active_plan(project, {"P0.T001": " ", "P1.T001": " "})
+            write_json(
+                project / ".loopplane" / "runtime" / "failure_registry.json",
+                {
+                    "failures": [
+                        {
+                            "failure_id": "fail_dependent",
+                            "task_id": "P1.T001",
+                            "status": "unrecovered",
+                            "recoverable": True,
+                            "recovery_attempts": 0,
+                            "max_recovery_attempts": 2,
+                            "first_seen_at": "2026-06-10T00:00:00Z",
+                        }
+                    ]
+                },
+            )
+
+            action = select_next_action(load_scheduler_snapshot(project))
+
+            self.assertEqual(action["action"], "run_worker")
+            self.assertEqual(action["selected"]["task_id"], "P0.T001")
+
     def test_dedicated_recovery_runner_gets_one_retry_after_budget_exhaustion(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             project = Path(tmp) / "project"
@@ -1583,6 +1610,44 @@ class SchedulerSelectionTest(unittest.TestCase):
             )
             next_action = select_next_action(load_scheduler_snapshot(project))
             self.assertNotEqual(next_action["action"], "run_recovery")
+
+    def test_capability_upgrade_retry_waits_for_failed_tasks_dependencies(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "Gate capability-upgrade recovery on task prerequisites.")
+            write_active_plan(project, {"P0.T001": " ", "P1.T001": " "})
+            config_path = project / ".loopplane" / "config" / "agent_runners.json"
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+            config["runners"]["recovery_worker"] = {
+                "role": "recovery_worker",
+                "inherits": "worker",
+                "timeout_seconds": 21600,
+            }
+            config_path.write_text(json.dumps(config, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            write_json(
+                project / ".loopplane" / "runtime" / "failure_registry.json",
+                {
+                    "failures": [
+                        {
+                            "failure_id": "fail_dependent_exhausted",
+                            "task_id": "P1.T001",
+                            "status": "exhausted",
+                            "failure_class": "validation_failed",
+                            "recoverable": True,
+                            "recovery_attempts": 1,
+                            "max_recovery_attempts": 1,
+                            "last_recovery_runner_id": "worker",
+                            "recovery_runner_ids_attempted": ["worker"],
+                            "first_seen_at": "2026-06-10T00:00:00Z",
+                        }
+                    ]
+                },
+            )
+
+            action = select_next_action(load_scheduler_snapshot(project))
+
+            self.assertEqual(action["action"], "run_worker")
+            self.assertEqual(action["selected"]["task_id"], "P0.T001")
 
     def test_worker_selection_uses_first_executable_task(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -3473,6 +3538,39 @@ class FailureRegistryRecoveryTest(unittest.TestCase):
             self.assertEqual(action["action"], "run_expansion_planner")
             self.assertEqual(action["selected"]["candidate"]["trigger"], "recovery_exhausted")
             self.assertEqual(action["selected"]["candidate"]["target_task_ids"], ["P0.T001"])
+
+    def test_exhausted_failure_does_not_expand_before_its_dependencies(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "Complete prerequisites before expanding a dependent failure.")
+            write_active_plan(project, {"P0.T001": " ", "P1.T001": " "})
+            workflow_id = json.loads(
+                (project / ".loopplane" / "config" / "workflow.json").read_text(encoding="utf-8")
+            )["workflow_id"]
+            write_json(
+                project / ".loopplane" / "runtime" / "failure_registry.json",
+                {
+                    "schema_version": "1.5",
+                    "workflow_id": workflow_id,
+                    "failures": [
+                        {
+                            "failure_id": "fail_dependent_exhausted",
+                            "task_id": "P1.T001",
+                            "status": "exhausted",
+                            "failure_class": "validation_failed",
+                            "failure_signature": "validation:missing-required-evidence",
+                            "recovery_attempts": 1,
+                            "max_recovery_attempts": 1,
+                            "budget_remaining": False,
+                        }
+                    ],
+                },
+            )
+
+            action = select_next_action(load_scheduler_snapshot(project))
+
+            self.assertEqual(action["action"], "run_worker")
+            self.assertEqual(action["selected"]["task_id"], "P0.T001")
 
 
 class SchedulerMainLoopTest(unittest.TestCase):

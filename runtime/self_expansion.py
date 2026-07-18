@@ -1534,8 +1534,14 @@ def _loop_signature_count(registry: Mapping[str, Any], loop_signature: str) -> i
 def _first_exhausted_failure(snapshot: Mapping[str, Any]) -> dict[str, Any] | None:
     registry = snapshot.get("failure_registry")
     failures = registry.get("failures", []) if isinstance(registry, Mapping) else []
-    tasks = {str(task.get("task_id") or ""): str(task.get("status") or "") for task in snapshot.get("tasks", []) if isinstance(task, Mapping)}
-    deferred_failure_ids = _failures_waiting_on_expansion_evidence(snapshot, tasks)
+    task_records = {
+        str(task.get("task_id") or ""): task
+        for task in snapshot.get("tasks", [])
+        if isinstance(task, Mapping) and str(task.get("task_id") or "")
+    }
+    task_statuses = {task_id: str(task.get("status") or "") for task_id, task in task_records.items()}
+    completed = {task_id for task_id, status in task_statuses.items() if status in {"x", "-"}}
+    deferred_failure_ids = _failures_waiting_on_expansion_evidence(snapshot, task_statuses)
     for failure in failures:
         if not isinstance(failure, Mapping):
             continue
@@ -1544,8 +1550,13 @@ def _first_exhausted_failure(snapshot: Mapping[str, Any]) -> dict[str, Any] | No
         if str(failure.get("failure_id") or "") in deferred_failure_ids:
             continue
         task_id = str(failure.get("task_id") or "")
-        if task_id and task_id in tasks:
-            return dict(failure)
+        task = task_records.get(task_id)
+        if task is None:
+            continue
+        dependencies = [str(dep) for dep in task.get("depends_on", []) if str(dep)]
+        if any(dependency not in completed for dependency in dependencies):
+            continue
+        return dict(failure)
     return None
 
 

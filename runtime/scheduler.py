@@ -3429,6 +3429,21 @@ def _config_wait(snapshot: Mapping[str, Any]) -> dict[str, str] | None:
     return None
 
 
+def _task_dependencies_completed(snapshot: Mapping[str, Any], task_id: str) -> bool:
+    """Return whether a task exists and all of its declared prerequisites are terminal."""
+    tasks = [task for task in snapshot.get("tasks", []) if isinstance(task, Mapping)]
+    task = next((item for item in tasks if str(item.get("task_id") or "") == task_id), None)
+    if task is None:
+        return False
+    completed = {
+        str(item.get("task_id") or "")
+        for item in tasks
+        if str(item.get("status") or "") in {"x", "-"}
+    }
+    dependencies = [str(dep) for dep in task.get("depends_on", []) if str(dep)]
+    return all(dependency in completed for dependency in dependencies)
+
+
 def _oldest_recoverable_failure(snapshot: Mapping[str, Any]) -> Mapping[str, Any] | None:
     registry = snapshot.get("failure_registry")
     failures = registry.get("failures", []) if isinstance(registry, Mapping) else []
@@ -3440,6 +3455,9 @@ def _oldest_recoverable_failure(snapshot: Mapping[str, Any]) -> Mapping[str, Any
         # retried by re-selecting their own action, not by the task-keyed
         # recovery_worker path, so they must not be selected here.
         if str(failure.get("failure_class") or "") in ACTION_FAILURE_CLASSES:
+            continue
+        task_id = str(failure.get("task_id") or "")
+        if not task_id or not _task_dependencies_completed(snapshot, task_id):
             continue
         status = str(failure.get("status", "unrecovered")).lower()
         if status != "unrecovered":
@@ -3482,7 +3500,8 @@ def _oldest_exhausted_failure_for_new_recovery_runner(
             continue
         if str(failure.get("status") or "").lower() != "exhausted":
             continue
-        if not str(failure.get("task_id") or ""):
+        task_id = str(failure.get("task_id") or "")
+        if not task_id or not _task_dependencies_completed(snapshot, task_id):
             continue
         if str(failure.get("failure_id") or "") in deferred_failure_ids:
             continue
