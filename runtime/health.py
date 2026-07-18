@@ -631,7 +631,16 @@ def _check_agent_status_files(paths: WorkflowPaths) -> dict[str, Any]:
 
 
 def _check_validation_files(paths: WorkflowPaths) -> dict[str, Any]:
-    files = _recent_files(paths.results_dir, "validation.json")
+    # Only run-root validation.json files are authoritative LoopPlane
+    # validations. Workers may place domain-specific files with the same name
+    # in nested evidence directories; interpreting those against LoopPlane's
+    # schema both corrupts the health signal and pressures experiments to
+    # overwrite their own schema identity.
+    files = [
+        path
+        for path in _recent_files(paths.results_dir, "validation.json")
+        if path.parent.parent.name == "runs"
+    ]
     if not files:
         return _check("validations", PASS, "No validation.json files are present yet.", count=0)
     problems: list[str] = []

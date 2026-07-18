@@ -174,12 +174,13 @@ unknown adapters, partial mutation arguments, invalid runner JSON, and local
 overrides that try to define runner IDs absent from portable config.
 
 During skill installation, LoopPlane performs safe PATH discovery for the default
-required Codex-backed runners. When `codex` is found, the installer writes its
-absolute path to `.loopplane/config/local/agent_runners.local.json` and immediately
-doctors the required runners. When the CLI is missing or authentication fails,
-installation remains in `runner_readiness: waiting_config`; an installing agent
-should run `command -v codex` or `command -v claude`, configure the discovered
-absolute path, and rerun `doctor-agent` before continuing.
+required Codex-backed runners. When `codex` is found, the installer writes the
+stable literal command `codex` to `.loopplane/config/local/agent_runners.local.json`
+and immediately doctors the required runners. Doctor and execution resolve the
+current PATH or editor-extension binary, so extension upgrades do not stale the
+stored command. When the CLI is missing or authentication fails, installation
+remains in `runner_readiness: waiting_config`; rerun `doctor-agent` after fixing
+installation or authentication before continuing.
 
 `loopplane doctor-agent` doctors the default runner, one named runner with
 `--runner`, or every configured runner with `--all`. It returns JSON or

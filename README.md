@@ -174,10 +174,9 @@ python3 scripts/loopplane init --project "$PROJECT" --brief "$USER_REQUIREMENTS"
 Configure Codex CLI runners when Codex is available:
 
 ```bash
-CODEX_BIN="$(command -v codex)"
-python3 scripts/loopplane configure-agent --project "$PROJECT" --runner worker --role worker --adapter codex_cli --command "$CODEX_BIN"
-python3 scripts/loopplane configure-agent --project "$PROJECT" --runner planner --role planner --adapter codex_cli --command "$CODEX_BIN"
-python3 scripts/loopplane configure-agent --project "$PROJECT" --runner auditor --role auditor --adapter codex_cli --command "$CODEX_BIN"
+python3 scripts/loopplane configure-agent --project "$PROJECT" --runner worker --role worker --adapter codex_cli --command codex
+python3 scripts/loopplane configure-agent --project "$PROJECT" --runner planner --role planner --adapter codex_cli --command codex
+python3 scripts/loopplane configure-agent --project "$PROJECT" --runner auditor --role auditor --adapter codex_cli --command codex
 python3 scripts/loopplane doctor-agent --project "$PROJECT" --runner worker
 python3 scripts/loopplane doctor-agent --project "$PROJECT" --runner planner
 python3 scripts/loopplane doctor-agent --project "$PROJECT" --runner auditor

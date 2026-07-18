@@ -10,7 +10,15 @@ from runtime.adapters.base import (
     AdapterInput,
     AdapterOutput,
 )
-from runtime.adapters.shell_adapter import ShellAdapter, shell_doctor_checks
+from runtime.adapters.codex_executable_resolver import (
+    ExecutableResolution,
+    resolve_codex_executable,
+)
+from runtime.adapters.shell_adapter import (
+    ShellAdapter,
+    adapter_process_env,
+    shell_doctor_checks,
+)
 
 
 class CodexCliAdapter(ShellAdapter):
@@ -22,38 +30,62 @@ class CodexCliAdapter(ShellAdapter):
     def build_invocation(self, adapter_input: AdapterInput) -> tuple[list[str], str | None]:
         return build_codex_invocation(adapter_input)
 
+    def prepare_invocation(
+        self,
+        adapter_input: AdapterInput,
+    ) -> tuple[list[str], str | None, Mapping[str, object]]:
+        argv, stdin_text, resolution = _build_codex_invocation(adapter_input)
+        return argv, stdin_text, {"codex_executable_resolution": resolution.to_dict()}
+
     def doctor(self, adapter_input: AdapterInput) -> AdapterDoctorResult:
-        checks = shell_doctor_checks(adapter_input, invocation_builder=self.build_invocation)
+        checks = shell_doctor_checks(
+            adapter_input,
+            invocation_builder=self.build_invocation,
+            executable_resolver=resolve_codex_executable,
+        )
+        resolution = _resolve_configured_codex(adapter_input)
+        adapter_metadata = {
+            "external_execution": False,
+            "process_execution": True,
+            "supported_prompt_delivery_modes": ["file_argument", "stdin", "stdin_or_prompt_flag"],
+            "codex_executable_resolution": resolution.to_dict() if resolution is not None else None,
+        }
         if any(check.get("status") == "waiting_config" for check in checks):
             return AdapterDoctorResult.waiting_config(
                 adapter_input,
                 checks=checks,
                 message="Codex CLI adapter requires configuration before task execution.",
-                adapter_metadata={
-                    "external_execution": False,
-                    "process_execution": True,
-                    "supported_prompt_delivery_modes": ["file_argument", "stdin", "stdin_or_prompt_flag"],
-                },
+                adapter_metadata=adapter_metadata,
             )
         return AdapterDoctorResult.ok(
             adapter_input,
             checks=checks,
             message="Codex CLI adapter can execute configured CLI tasks.",
-            adapter_metadata={
-                "external_execution": False,
-                "process_execution": True,
-                "supported_prompt_delivery_modes": ["file_argument", "stdin", "stdin_or_prompt_flag"],
-            },
+            adapter_metadata=adapter_metadata,
         )
 
 
 def build_codex_invocation(adapter_input: AdapterInput) -> tuple[list[str], str | None]:
+    argv, stdin_text, _resolution = _build_codex_invocation(adapter_input)
+    return argv, stdin_text
+
+
+def _build_codex_invocation(
+    adapter_input: AdapterInput,
+) -> tuple[list[str], str | None, ExecutableResolution]:
     try:
         command_parts = shlex.split(adapter_input.command)
     except ValueError as error:
         raise AdapterContractError(f"command cannot be parsed: {error}") from error
     if not command_parts:
         raise AdapterContractError("command cannot be empty")
+
+    resolution = resolve_codex_executable(
+        command_parts[0],
+        env=adapter_process_env(adapter_input),
+        cwd=adapter_input.cwd,
+    )
+    command_parts[0] = resolution.invocation_program
 
     mode = str(adapter_input.prompt_delivery.get("mode", "stdin"))
     if mode not in {"stdin", "file_argument", "stdin_or_prompt_flag"}:
@@ -69,7 +101,21 @@ def build_codex_invocation(adapter_input: AdapterInput) -> tuple[list[str], str 
     argv = [command_parts[0], *approval_args, "exec", *configured_args]
     _append_default_exec_flags(argv, adapter_input)
     argv.append("-")
-    return argv, adapter_input.prompt_content
+    return argv, adapter_input.prompt_content, resolution
+
+
+def _resolve_configured_codex(adapter_input: AdapterInput) -> ExecutableResolution | None:
+    try:
+        command_parts = shlex.split(adapter_input.command)
+    except ValueError:
+        return None
+    if not command_parts:
+        return None
+    return resolve_codex_executable(
+        command_parts[0],
+        env=adapter_process_env(adapter_input),
+        cwd=adapter_input.cwd,
+    )
 
 
 def _append_default_exec_flags(argv: list[str], adapter_input: AdapterInput) -> None:

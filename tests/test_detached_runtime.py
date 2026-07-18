@@ -397,6 +397,49 @@ class DetachedRuntimeTest(unittest.TestCase):
         self.assertEqual(reason, "follow_up_failed")
         self.assertNotEqual(exit_code, 0)
 
+    def test_detached_supervisor_bounds_expansion_planner_failure_retries(self) -> None:
+        retry_selected = {
+            "action": "run_expansion_planner",
+            "execution_result": {
+                "ok": False,
+                "failure_registry_update": {
+                    "status": "unrecovered",
+                    "budget_remaining": True,
+                },
+            },
+        }
+
+        should_continue, reason, exit_code = _should_continue_after_tick(
+            {"ok": False, "exit_code": 12},
+            retry_selected,
+            None,
+        )
+
+        self.assertTrue(should_continue)
+        self.assertEqual(reason, "action_failure_retry_pending")
+        self.assertEqual(exit_code, 0)
+
+        exhausted_selected = {
+            "action": "run_expansion_planner",
+            "execution_result": {
+                "ok": False,
+                "failure_registry_update": {
+                    "status": "exhausted",
+                    "budget_remaining": False,
+                },
+            },
+        }
+
+        should_continue, reason, exit_code = _should_continue_after_tick(
+            {"ok": False, "exit_code": 12},
+            exhausted_selected,
+            None,
+        )
+
+        self.assertFalse(should_continue)
+        self.assertEqual(reason, "action_failure_exhausted")
+        self.assertEqual(exit_code, 12)
+
     def test_start_detach_launches_supervisor_and_advances_after_parent_exits(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             project = Path(tmp) / "project"

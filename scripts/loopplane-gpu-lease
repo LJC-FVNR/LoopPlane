@@ -1,0 +1,252 @@
+#!/usr/bin/env python3
+"""Run one command on any independently idle GPU under a shared lease.
+
+The lease coordinates LoopPlane workflows on the same host.  Foreign GPU
+processes are never signalled or evicted; they simply make a device ineligible.
+"""
+
+from __future__ import annotations
+
+import argparse
+import fcntl
+import json
+import os
+import subprocess
+import sys
+import time
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import IO, Sequence
+
+
+DEFAULT_LOCK_DIR = Path("/tmp/loopplane-gpu-pool")
+
+
+def timestamp() -> str:
+    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
+
+
+@dataclass(frozen=True)
+class Gpu:
+    index: int
+    uuid: str
+
+
+def parse_gpus(output: str) -> list[Gpu]:
+    gpus: list[Gpu] = []
+    for raw_line in output.splitlines():
+        fields = [field.strip() for field in raw_line.split(",")]
+        if len(fields) < 2 or not fields[0] or not fields[1]:
+            continue
+        gpus.append(Gpu(index=int(fields[0]), uuid=fields[1]))
+    return sorted(gpus, key=lambda gpu: gpu.index)
+
+
+def parse_compute_processes(output: str) -> dict[str, list[int]]:
+    processes: dict[str, list[int]] = {}
+    for raw_line in output.splitlines():
+        fields = [field.strip() for field in raw_line.split(",")]
+        if len(fields) < 2 or not fields[0] or not fields[1]:
+            continue
+        uuid, pid_text = fields[0], fields[1]
+        try:
+            pid = int(pid_text)
+        except ValueError:
+            continue
+        processes.setdefault(uuid, []).append(pid)
+    return processes
+
+
+def query_gpus(nvidia_smi: str) -> list[Gpu]:
+    completed = subprocess.run(
+        [nvidia_smi, "--query-gpu=index,uuid", "--format=csv,noheader,nounits"],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+        timeout=15,
+    )
+    if completed.returncode != 0:
+        raise RuntimeError(f"nvidia-smi GPU query failed: {completed.stderr.strip()}")
+    gpus = parse_gpus(completed.stdout)
+    if not gpus:
+        raise RuntimeError("nvidia-smi reported no GPUs")
+    return gpus
+
+
+def query_compute_processes(nvidia_smi: str) -> dict[str, list[int]]:
+    completed = subprocess.run(
+        [nvidia_smi, "--query-compute-apps=gpu_uuid,pid", "--format=csv,noheader,nounits"],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+        timeout=15,
+    )
+    if completed.returncode != 0:
+        raise RuntimeError(f"nvidia-smi compute-process query failed: {completed.stderr.strip()}")
+    return parse_compute_processes(completed.stdout)
+
+
+def render_command(command: Sequence[str], gpu: Gpu) -> list[str]:
+    return [part.replace("{gpu_index}", str(gpu.index)).replace("{gpu_uuid}", gpu.uuid) for part in command]
+
+
+def try_lock(lock_dir: Path, gpu: Gpu) -> tuple[IO[str], Path] | None:
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = lock_dir / f"{gpu.uuid}.lock"
+    handle = lock_path.open("a+", encoding="utf-8")
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        handle.close()
+        return None
+    return handle, lock_path
+
+
+def write_lock_metadata(handle: IO[str], payload: dict[str, object]) -> None:
+    handle.seek(0)
+    handle.truncate()
+    json.dump(payload, handle, indent=2, sort_keys=True)
+    handle.write("\n")
+    handle.flush()
+    os.fsync(handle.fileno())
+
+
+def write_record(path: Path | None, payload: dict[str, object]) -> None:
+    if path is None:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + f".tmp.{os.getpid()}")
+    temporary.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    os.replace(temporary, path)
+
+
+def wait_for_lease(
+    *,
+    nvidia_smi: str,
+    lock_dir: Path,
+    owner: str,
+    poll_seconds: float,
+    quiet_seconds: float,
+    timeout_seconds: float | None,
+) -> tuple[Gpu, IO[str], Path, dict[str, object]]:
+    started = time.monotonic()
+    attempt = 0
+    while True:
+        attempt += 1
+        gpus = query_gpus(nvidia_smi)
+        processes = query_compute_processes(nvidia_smi)
+        for gpu in gpus:
+            if processes.get(gpu.uuid):
+                continue
+            acquired = try_lock(lock_dir, gpu)
+            if acquired is None:
+                continue
+            handle, lock_path = acquired
+            keep_handle = False
+            try:
+                first = query_compute_processes(nvidia_smi)
+                if first.get(gpu.uuid):
+                    continue
+                if quiet_seconds > 0:
+                    time.sleep(quiet_seconds)
+                second = query_compute_processes(nvidia_smi)
+                if second.get(gpu.uuid):
+                    continue
+                selected_at = timestamp()
+                metadata: dict[str, object] = {
+                    "schema_version": "1.0",
+                    "owner": owner,
+                    "allocator_pid": os.getpid(),
+                    "gpu_index": gpu.index,
+                    "gpu_uuid": gpu.uuid,
+                    "selected_at": selected_at,
+                    "quiet_seconds": quiet_seconds,
+                    "selection_attempt": attempt,
+                    "lock_path": str(lock_path),
+                    "prelaunch_compute_pids": [],
+                }
+                write_lock_metadata(handle, metadata)
+                keep_handle = True
+                return gpu, handle, lock_path, metadata
+            finally:
+                # Returning keeps the descriptor and flock alive.  Every other
+                # path releases it before the next scan.
+                if handle.closed is False and keep_handle is False:
+                    handle.close()
+        waited = time.monotonic() - started
+        print(
+            f"{timestamp()} waiting_for_any_idle_gpu owner={owner} "
+            f"visible_gpus={len(gpus)} occupied_gpus={len(processes)} waited_seconds={waited:.1f}",
+            flush=True,
+        )
+        if timeout_seconds is not None and waited >= timeout_seconds:
+            raise TimeoutError(f"timed out waiting for an independently idle GPU after {waited:.1f}s")
+        time.sleep(max(0.5, poll_seconds))
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--owner", required=True)
+    parser.add_argument("--poll-seconds", type=float, default=15.0)
+    parser.add_argument("--quiet-seconds", type=float, default=10.0)
+    parser.add_argument("--timeout-seconds", type=float)
+    parser.add_argument("--lock-dir", type=Path, default=DEFAULT_LOCK_DIR)
+    parser.add_argument("--allocation-record", type=Path)
+    parser.add_argument("--nvidia-smi", default="nvidia-smi")
+    parser.add_argument("command", nargs=argparse.REMAINDER)
+    args = parser.parse_args(argv)
+    command = list(args.command)
+    if command and command[0] == "--":
+        command = command[1:]
+    if not command:
+        parser.error("a command is required after --")
+
+    gpu, handle, lock_path, record = wait_for_lease(
+        nvidia_smi=args.nvidia_smi,
+        lock_dir=args.lock_dir,
+        owner=args.owner,
+        poll_seconds=args.poll_seconds,
+        quiet_seconds=args.quiet_seconds,
+        timeout_seconds=args.timeout_seconds,
+    )
+    child_command = render_command(command, gpu)
+    environment = dict(os.environ)
+    environment.update(
+        {
+            "CUDA_VISIBLE_DEVICES": str(gpu.index),
+            "LOOPPLANE_PHYSICAL_DEVICE": str(gpu.index),
+            "LOOPPLANE_GPU_UUID": gpu.uuid,
+            "LOOPPLANE_GPU_LEASE_OWNER": args.owner,
+            "LOOPPLANE_GPU_LEASE_PATH": str(lock_path),
+        }
+    )
+    record.update({"status": "running", "command": child_command})
+    write_lock_metadata(handle, record)
+    write_record(args.allocation_record, record)
+    print(
+        f"{timestamp()} acquired_dynamic_gpu owner={args.owner} index={gpu.index} uuid={gpu.uuid}",
+        flush=True,
+    )
+    exit_code = 127
+    try:
+        completed = subprocess.run(child_command, env=environment, check=False)
+        exit_code = int(completed.returncode)
+    except OSError as error:
+        print(f"failed to launch leased command: {type(error).__name__}: {error}", file=sys.stderr, flush=True)
+    finally:
+        record.update({"status": "released", "released_at": timestamp()})
+        record["exit_code"] = exit_code
+        write_record(args.allocation_record, record)
+        handle.close()
+    print(
+        f"{timestamp()} released_dynamic_gpu owner={args.owner} index={gpu.index} uuid={gpu.uuid} exit_code={exit_code}",
+        flush=True,
+    )
+    return exit_code
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -11,6 +11,7 @@ import threading
 import time
 import uuid
 from collections.abc import Callable, Mapping, Sequence
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from pathlib import Path
@@ -894,20 +895,27 @@ def _run_watchdog_check(
         ),
     )
     try:
-        result = answer_inspection(
-            project,
-            _watchdog_question(
+        with _watchdog_heartbeat_keepalive(
+            paths,
+            workflow_id=workflow_id,
+            job_id=job_id,
+            launch=launch,
+            process=process,
+        ):
+            result = answer_inspection(
                 project,
-                paths,
-                workflow_id=workflow_id,
-                job_id=job_id,
-                launch=launch,
-                process=process,
-            ),
-            runner_id=runner_id,
-            allowed_paths=_watchdog_allowed_paths(project, paths, job_id=job_id),
-            source="background_watchdog",
-        )
+                _watchdog_question(
+                    project,
+                    paths,
+                    workflow_id=workflow_id,
+                    job_id=job_id,
+                    launch=launch,
+                    process=process,
+                ),
+                runner_id=runner_id,
+                allowed_paths=_watchdog_allowed_paths(project, paths, job_id=job_id),
+                source="background_watchdog",
+            )
     except BaseException as error:
         ended_at = utc_timestamp()
         record = {
@@ -971,6 +979,55 @@ def _run_watchdog_check(
             "status_problem": _bounded_text(verdict.get("issue_summary"), limit=300) or f"watchdog:{status}",
         }
     return {"stop_job": False, "status": "running"}
+
+
+@contextmanager
+def _watchdog_heartbeat_keepalive(
+    paths: Any,
+    *,
+    workflow_id: str,
+    job_id: str,
+    launch: Mapping[str, Any],
+    process: subprocess.Popen[bytes],
+):
+    """Refresh the job lease while a synchronous inspector is running."""
+
+    stop = threading.Event()
+    interval_seconds = max(0.5, _float_value(launch.get("heartbeat_seconds"), DEFAULT_HEARTBEAT_SECONDS))
+
+    def refresh() -> None:
+        while not stop.wait(interval_seconds):
+            if process.poll() is not None:
+                return
+            now = utc_timestamp()
+            try:
+                updated = _update_job(
+                    paths,
+                    workflow_id=workflow_id,
+                    job_id=job_id,
+                    update=lambda job: _supervisor_running_update(
+                        job,
+                        {
+                            "pid": process.pid,
+                            "child_pid": process.pid,
+                            "supervisor_pid": os.getpid(),
+                            "heartbeat_at": now,
+                            "updated_at": now,
+                        },
+                    ),
+                )
+            except (OSError, SchedulerLockError):
+                continue
+            if _job_supervisor_stop_status_from_record(updated) is not None:
+                return
+
+    thread = threading.Thread(target=refresh, name=f"background-watchdog-heartbeat-{job_id}", daemon=True)
+    thread.start()
+    try:
+        yield
+    finally:
+        stop.set()
+        thread.join(timeout=max(1.0, interval_seconds + 0.5))
 
 
 def _watchdog_question(

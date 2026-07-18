@@ -606,6 +606,48 @@ class CliAdapterFixtureIntegrationTest(unittest.TestCase):
         assert match is not None
         self.assertEqual(match["reason_class"], "rate_limited")
 
+    def test_model_capacity_wins_over_prompt_auth_words(self) -> None:
+        match = _match_builtin_classifier(
+            {
+                "stderr": (
+                    "user\n"
+                    "Final verification rejects unauthorized skipped work.\n"
+                    "ERROR: Selected model is at capacity. Please try a different model.\n"
+                ),
+                "stdout": "",
+                "final_output": "",
+            }
+        )
+
+        self.assertIsNotNone(match)
+        assert match is not None
+        self.assertEqual(match["reason_class"], "provider_overloaded")
+        self.assertEqual(match["cooldown_seconds"], 300)
+
+    def test_prompt_prose_with_unauthorized_is_not_auth_evidence(self) -> None:
+        match = _match_builtin_classifier(
+            {
+                "stderr": "Hidden bytes or unauthorized GPUs invalidate the objective.\n",
+                "stdout": "",
+                "final_output": "",
+            }
+        )
+
+        self.assertIsNone(match)
+
+    def test_standalone_unauthorized_error_remains_auth_evidence(self) -> None:
+        match = _match_builtin_classifier(
+            {
+                "stderr": "ERROR: Unauthorized\n",
+                "stdout": "",
+                "final_output": "",
+            }
+        )
+
+        self.assertIsNotNone(match)
+        assert match is not None
+        self.assertEqual(match["reason_class"], "auth_required")
+
     def test_shell_adapter_accepts_custom_runner_availability_classifier(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

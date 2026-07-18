@@ -164,10 +164,9 @@ alternative to `skill install` plus `write-brief`.
 ```bash
 loopplane skill install --target .
 loopplane write-brief --text "Add tests, fix failing behavior, run a smoke benchmark, and produce a final report." --force
-CODEX_BIN="$(command -v codex)"
-loopplane configure-agent --role worker --adapter codex_cli --command "$CODEX_BIN"
-loopplane configure-agent --role planner --adapter codex_cli --command "$CODEX_BIN"
-loopplane configure-agent --role auditor --adapter codex_cli --command "$CODEX_BIN"
+loopplane configure-agent --role worker --adapter codex_cli --command codex
+loopplane configure-agent --role planner --adapter codex_cli --command codex
+loopplane configure-agent --role auditor --adapter codex_cli --command codex
 loopplane doctor-agent --runner worker
 loopplane doctor-agent --runner planner
 loopplane doctor-agent --runner auditor
@@ -710,8 +709,8 @@ Read `references/PROTOCOL.md` first.
 
 Required install-time CLI bootstrap:
 - `loopplane skill install --target <project>` is not complete until the required external CLI runners are found, configured, and doctored.
-- Before planning, starting, or resuming a provider-backed workflow, find the local Codex CLI path with `command -v codex` when Codex runners are used, and find the Claude Code CLI path with `command -v claude` when Claude runners are used.
-- Configure discovered paths into the project environment with `loopplane configure-agent --project <project> --command <absolute-cli-path>` for the relevant runner(s), then run `loopplane doctor-agent --project <project> --runner <runner_id>` or `loopplane doctor-agent --project <project> --all`.
+- Before planning, starting, or resuming a provider-backed workflow, configure Codex runners with the stable command `codex`; LoopPlane resolves the current PATH or editor-extension binary at doctor and execution time. Find the Claude Code CLI path with `command -v claude` when Claude runners are used.
+- Configure the relevant runner(s) with `loopplane configure-agent --project <project> --command codex` for Codex or the discovered Claude command, then run `loopplane doctor-agent --project <project> --runner <runner_id>` or `loopplane doctor-agent --project <project> --all`.
 - If `skill install`, `skill update`, or `doctor-agent` reports `*_waiting_config` or `runner_readiness: waiting_config`, do not continue to `plan`, `activate-plan`, `start`, or `resume`; resolve CLI discovery, authentication, or runner configuration first.
 - Do not ask the user to manually locate Codex or Claude until you have tried safe PATH discovery and the doctor output still cannot identify a usable installed/authenticated CLI.
 
@@ -745,9 +744,9 @@ project/
 Installers must not overwrite existing project files without explicit confirmation or an approved migration plan.
 
 Installers must also verify machine-local CLI runner readiness before treating
-installation as complete. The installing agent should safely discover required
-external CLIs through PATH, configure absolute command paths through
-`loopplane configure-agent`, and require `loopplane doctor-agent` to pass for the
+installation as complete. The installing agent should configure Codex with the
+stable command `codex`, safely discover other required external CLIs through
+PATH, and require `loopplane doctor-agent` to pass for the
 planner, auditor, worker, and any selected optional runner before invoking
 planning or scheduler commands. A `*_waiting_config` install/update status
 means project files may exist, but the installed workflow is not ready for
@@ -4324,8 +4323,7 @@ runner readiness is `ok`.
 
 ```bash
 loopplane configure-agent
-CODEX_BIN="$(command -v codex)"
-loopplane configure-agent --role worker --adapter codex_cli --command "$CODEX_BIN"
+loopplane configure-agent --role worker --adapter codex_cli --command codex
 CLAUDE_BIN="$(command -v claude)"
 loopplane configure-agent --role worker --adapter claude_code_cli --command "$CLAUDE_BIN"
 loopplane doctor-agent
@@ -5326,9 +5324,10 @@ Install-time agent requirement:
 
 ```text
 An agent installing LoopPlane into a project must confirm required Codex or Claude
-Code CLI runners during installation. It should first try safe PATH discovery
-(`command -v codex`, `command -v claude`), configure discovered absolute paths
-with `loopplane configure-agent`, and run `loopplane doctor-agent` before planning.
+Code CLI runners during installation. It should configure Codex with the stable
+command `codex`, use safe PATH discovery for Claude (`command -v claude`), and run
+`loopplane doctor-agent` before planning. LoopPlane resolves the current Codex
+binary at doctor and execution time rather than persisting an extension-version path.
 If install/update returns runner_readiness waiting_config, installation is not
 complete for provider-backed use.
 ```
@@ -5388,7 +5387,7 @@ git clone <project>
 cd <project>
 loopplane skill install --target .
 loopplane doctor
-CODEX_BIN="$(command -v codex)" && loopplane configure-agent --role worker --adapter codex_cli --command "$CODEX_BIN"
+loopplane configure-agent --role worker --adapter codex_cli --command codex
 loopplane rebuild-read-models
 loopplane health
 loopplane resume
@@ -5404,7 +5403,7 @@ Use stateful migration when the workflow event history, snapshots, failure regis
 loopplane export --profile stateful --output loopplane_stateful.tar.zst
 loopplane import loopplane_stateful.tar.zst --target <project>
 loopplane doctor
-CODEX_BIN="$(command -v codex)" && loopplane configure-agent --role worker --adapter codex_cli --command "$CODEX_BIN"
+loopplane configure-agent --role worker --adapter codex_cli --command codex
 loopplane rebuild-read-models
 loopplane health
 loopplane resume

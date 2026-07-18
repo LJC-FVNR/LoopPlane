@@ -42,12 +42,17 @@ BUILTIN_PATTERNS = (
     },
     {
         "reason_class": "provider_overloaded",
-        "pattern": r"\b(?:overloaded|server overloaded|temporarily unavailable|overloaded_error|(?:http(?: status)?|status(?: code)?|error)\s*[:=#-]?\s*(?:503|529))\b",
+        "pattern": r"\b(?:overloaded|server overloaded|temporarily unavailable|overloaded_error|(?:selected\s+)?model\s+is\s+at\s+capacity|(?:http(?: status)?|status(?: code)?|error)\s*[:=#-]?\s*(?:503|529))\b",
         "cooldown_seconds": DEFAULT_COOLDOWNS["provider_overloaded"],
     },
     {
         "reason_class": "auth_required",
-        "pattern": r"\b(?:authentication required|unauthorized|invalid api key|login required|(?:http(?: status)?|status(?: code)?|error)\s*[:=#-]?\s*401)\b",
+        # Do not treat prose such as "unauthorized GPUs invalidate the run"
+        # as authentication evidence. Codex writes prompt/context material to
+        # stderr, so a bare occurrence of "unauthorized" is not an error
+        # signal. Preserve the common standalone error form and explicit auth
+        # diagnostics instead.
+        "pattern": r"(?:\b(?:authentication required|invalid api key|login required|(?:http(?: status)?|status(?: code)?|error)\s*[:=#-]?\s*401)\b|(?:^|\n)[ \t]*(?:error[ \t]*[:=#-][ \t]*)?unauthorized(?:[ \t]*(?:$|\n)|[ \t]*[:.!]))",
         "requires_attention": True,
     },
 )

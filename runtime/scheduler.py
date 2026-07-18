@@ -203,10 +203,17 @@ class AtomicOwnerLock:
             return False
         ttl_seconds = max(1, _int_value(owner.get("ttl_seconds"), default=self.ttl_seconds))
         age_seconds = max(0, int((datetime.now(UTC) - heartbeat).total_seconds()))
-        if age_seconds <= ttl_seconds:
-            return False
         pid = _lock_owner_pid(owner)
-        if pid is not None and _pid_exists(pid) is True:
+        same_host = str(owner.get("hostname") or "") == socket.gethostname()
+        pid_liveness = _pid_exists(pid) if pid is not None and same_host else None
+        # A local owner whose process is provably gone cannot still mutate the
+        # protected state. Reclaim immediately instead of forcing a replacement
+        # detached supervisor to wait the full TTL after a graceful restart.
+        if pid_liveness is False:
+            pass
+        elif age_seconds <= ttl_seconds:
+            return False
+        elif pid_liveness is True:
             return False
         try:
             self.owner_path.unlink()
@@ -3369,7 +3376,11 @@ def _runner_for_role(snapshot: Mapping[str, Any], role: str) -> RunnerConfig | N
         ]
         if healthy:
             return healthy[0]
-        return available[0] if available else None
+        # Re-running the first unhealthy candidate when every failover runner is
+        # exhausted creates a tight retry loop and unbounded failed run records.
+        # Returning no runner lets the scheduler select a durable availability or
+        # configuration wait until operator action or a later healthy observation.
+        return None
     for runner in candidates:
         if _active_hold_for_runner(snapshot, runner) is None:
             return runner
@@ -6276,6 +6287,19 @@ def _runner_health_event_scope(result: Mapping[str, Any]) -> str:
         return "runner_failure"
     if failure_scope == "policy":
         return "policy_failure"
+    # Planner/verifier executions do not populate worker failure_scope, but a
+    # non-zero adapter exit, timeout, or missing/malformed agent status is still
+    # a runner failure.  Counting it as a task failure prevents ordered failover
+    # thresholds from ever engaging and can produce an infinite retry storm.
+    if (
+        result.get("agent_status_problem")
+        or bool(result.get("adapter_timed_out"))
+        or (
+            result.get("adapter_exit_code") is not None
+            and _int_value(result.get("adapter_exit_code"), default=0) != 0
+        )
+    ):
+        return "runner_failure"
     return "task_failure"
 
 

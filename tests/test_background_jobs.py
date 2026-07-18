@@ -6,6 +6,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -17,6 +18,7 @@ from runtime.background_jobs import (
     list_background_jobs,
     start_background_job,
     _run_supervisor,
+    _run_watchdog_check,
     _start_supervisor_record_update,
     _watchdog_allowed_paths,
 )
@@ -799,6 +801,84 @@ class BackgroundJobRuntimeTest(unittest.TestCase):
             self.assertEqual(watchdog["last_recommended_status"], "running")
             self.assertTrue(watchdog["last_healthy_progress"])
             self.assertTrue(watchdog["recent_checks"])
+
+    def test_watchdog_inspector_keeps_background_job_heartbeat_fresh(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "Watchdog refreshes the background lease while inspecting.")
+            configure_watchdog_inspector(project)
+            workflow_config = load_workflow_config(project)
+            paths = WorkflowPaths.from_config(project, workflow_config)
+            workflow_id = paths.workflow_id
+            job_id = "bg_watchdog_heartbeat"
+            started_at = utc_timestamp()
+            self._write_background_registry(
+                paths,
+                workflow_id,
+                [
+                    {
+                        "job_id": job_id,
+                        "workflow_id": workflow_id,
+                        "task_id": "P0.T001",
+                        "run_id": "run_watchdog_heartbeat",
+                        "status": "running",
+                        "next_prompt_ready": False,
+                        "started_at": started_at,
+                        "heartbeat_at": started_at,
+                        "watchdog": {
+                            "enabled": True,
+                            "interval_seconds": 1,
+                            "runner_id": "inspector",
+                            "status": "pending",
+                            "check_count": 0,
+                            "recent_checks": [],
+                        },
+                    }
+                ],
+            )
+            process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(5)"])
+            result: dict[str, object] = {}
+
+            def inspect() -> None:
+                result.update(
+                    _run_watchdog_check(
+                        project,
+                        paths,
+                        workflow_id=workflow_id,
+                        job_id=job_id,
+                        launch={
+                            "heartbeat_seconds": 0.5,
+                            "watchdog_runner": "inspector",
+                            "watchdog_question": "slow needs recovery fixture",
+                        },
+                        supervisor_log=paths.runtime_dir / "background_jobs" / job_id / "supervisor.log",
+                        process=process,
+                    )
+                )
+
+            thread = threading.Thread(target=inspect)
+            thread.start()
+            try:
+                deadline = time.monotonic() + 3.0
+                before = started_at
+                while time.monotonic() < deadline:
+                    status = list_background_jobs(project, job_id=job_id, refresh=False)
+                    watchdog = status["jobs"][0].get("watchdog") or {}
+                    if watchdog.get("current_check_id"):
+                        before = str(status["jobs"][0]["heartbeat_at"])
+                        break
+                    time.sleep(0.05)
+                time.sleep(1.1)
+                during = list_background_jobs(project, job_id=job_id, refresh=False)["jobs"][0]
+                self.assertGreater(str(during["heartbeat_at"]), before)
+                self.assertTrue(thread.is_alive(), "fixture inspector should still be running during the heartbeat assertion")
+            finally:
+                thread.join(timeout=5.0)
+                process.terminate()
+                process.wait(timeout=5.0)
+
+            self.assertFalse(thread.is_alive())
+            self.assertTrue(result.get("stop_job"))
 
     def test_watchdog_can_stop_unhealthy_background_job_as_needs_recovery(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

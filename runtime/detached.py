@@ -543,11 +543,28 @@ def _should_continue_after_tick(
         "handle_control_request",
         "run_worker",
         "run_recovery",
+        "resolve_expansion_failure",
+    }:
+        return True, "continue", EXIT_SUCCESS
+    if action in {
         "run_expansion_planner",
         "run_phase_objective_verifier",
         "run_final_objective_verifier",
-        "resolve_expansion_failure",
     }:
+        execution = selected.get("execution_result")
+        if isinstance(execution, Mapping) and execution.get("ok") is False:
+            failure_update = execution.get("failure_registry_update")
+            retry_pending = (
+                isinstance(failure_update, Mapping)
+                and bool(failure_update.get("budget_remaining"))
+                and str(failure_update.get("status") or "")
+                not in {"recovered", "waived", "exhausted", "needs_human"}
+            )
+            if retry_pending:
+                return True, "action_failure_retry_pending", EXIT_SUCCESS
+            return False, "action_failure_exhausted", exit_code
+        if not result.get("ok"):
+            return False, "scheduler_failed", exit_code
         return True, "continue", EXIT_SUCCESS
     if action == "run_final_verification":
         execution = selected.get("execution_result")

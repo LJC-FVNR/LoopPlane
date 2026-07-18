@@ -404,6 +404,32 @@ class HealthProbeTest(unittest.TestCase):
             self.assertTrue(active_check["details"]["external_nonblocking"])
             self.assertEqual(check_by_name(result, "runner_liveness")["status"], "pass")
 
+    def test_nested_domain_validation_is_not_treated_as_authoritative(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "Health should distinguish domain evidence schemas.")
+            write_json(
+                project
+                / ".loopplane"
+                / "results"
+                / "T001"
+                / "runs"
+                / "run_domain"
+                / "domain_probe"
+                / "validation.json",
+                {
+                    "schema_version": "domain.validation/1.0",
+                    "status": "pass",
+                    "run_id": "run_domain",
+                },
+            )
+
+            result = run_health_probe(project)
+
+            check = check_by_name(result, "validations")
+            self.assertEqual(check["status"], "pass")
+            self.assertEqual(check["count"], 0)
+
     def test_fresh_owner_lease_covers_stale_scheduler_lock_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             project = Path(tmp) / "project"

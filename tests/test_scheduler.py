@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -249,6 +250,50 @@ def authoritative_file_hashes(project: Path) -> dict[str, str]:
 
 
 class SchedulerSelectionTest(unittest.TestCase):
+    def test_all_unhealthy_failover_runners_return_no_runner(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "Do not spin when every expansion runner is unhealthy.")
+            config_path = project / ".loopplane" / "config" / "agent_runners.json"
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+            config["runners"]["worker_fallback"]["enabled"] = True
+            config_path.write_text(json.dumps(config, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+            observed_at = timestamp()
+            health = {
+                "schema_version": "1.5",
+                "workflow_id": json.loads(
+                    (project / ".loopplane" / "config" / "workflow.json").read_text(encoding="utf-8")
+                )["workflow_id"],
+                "runners": {},
+            }
+            for runner_id in ("expansion_planner", "expansion_planner_fallback"):
+                health["runners"][runner_id] = {
+                    "runner_id": runner_id,
+                    "events": [
+                        {"observed_at": observed_at, "scope": "runner_failure"},
+                        {"observed_at": observed_at, "scope": "runner_failure"},
+                        {"observed_at": observed_at, "scope": "runner_failure"},
+                    ],
+                }
+            write_json(project / ".loopplane" / "runtime" / "runner_health.json", health)
+
+            snapshot = load_scheduler_snapshot(project)
+
+            self.assertIsNone(scheduler_module._runner_for_role(snapshot, "expansion_planner"))
+
+    def test_planner_adapter_failure_counts_as_runner_failure(self) -> None:
+        scope = scheduler_module._runner_health_event_scope(
+            {
+                "ok": False,
+                "adapter_exit_code": 127,
+                "adapter_timed_out": False,
+                "agent_status_problem": "missing",
+            }
+        )
+
+        self.assertEqual(scope, "runner_failure")
+
     def test_scheduler_text_includes_worker_evidence_paths(self) -> None:
         text = format_scheduler_text(
             {
@@ -3640,6 +3685,33 @@ class SchedulerMainLoopTest(unittest.TestCase):
                     "started_at": timestamp(timedelta(hours=-1)),
                     "heartbeat_at": timestamp(timedelta(hours=-1)),
                     "ttl_seconds": 1,
+                },
+            )
+
+            result = run_scheduler(project, max_ticks=1)
+
+            self.assertNotEqual(result["status"], "duplicate_scheduler", json.dumps(result, indent=2, sort_keys=True))
+            self.assertNotEqual(result["exit_code"], EXIT_DUPLICATE_SCHEDULER)
+            self.assertFalse(owner_path.exists())
+
+    def test_scheduler_reclaims_fresh_local_dead_owner_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "Fresh dead scheduler lock recovery smoke.")
+            context_result = load_scheduler_context(project)
+            self.assertTrue(context_result["ok"], context_result)
+            context = context_result["context"]
+            owner_path = context.paths.runtime_dir / "lock" / "scheduler_instance_lock" / "owner.json"
+            write_json(
+                owner_path,
+                {
+                    "schema_version": "1.5",
+                    "owner": f"{socket.gethostname()}:99999999:deadbeef",
+                    "hostname": socket.gethostname(),
+                    "pid": 99999999,
+                    "started_at": timestamp(),
+                    "heartbeat_at": timestamp(),
+                    "ttl_seconds": 120,
                 },
             )
 
