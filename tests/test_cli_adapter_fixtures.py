@@ -558,6 +558,17 @@ class CliAdapterFixtureIntegrationTest(unittest.TestCase):
 
         self.assertEqual(cooldown, 60)
 
+    def test_usage_limit_full_date_retry_time_uses_declared_reset_date(self) -> None:
+        now = datetime(2026, 7, 19, 0, 54, 58, tzinfo=UTC)
+
+        cooldown = _cooldown_seconds_from_retry_at(
+            "ERROR: You've hit your usage limit; try again at Jul 24th, 2026 11:25 PM.",
+            now=now,
+        )
+
+        target = datetime(2026, 7, 24, 23, 25, 0, tzinfo=UTC)
+        self.assertEqual(cooldown, int((target - now).total_seconds()) + 60)
+
     def test_bare_prompt_line_number_402_is_not_billing_evidence(self) -> None:
         match = _match_builtin_classifier(
             {

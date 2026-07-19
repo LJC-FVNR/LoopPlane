@@ -1173,7 +1173,11 @@ def _mark_accepted_validation_failures_recovered(
                 continue
             if str(failure.get("task_id") or "") not in accepted:
                 continue
-            if str(failure.get("failure_class") or "") not in {"validation_failed", "worker_failed"}:
+            if str(failure.get("failure_class") or "") not in {
+                "background_job_failed",
+                "validation_failed",
+                "worker_failed",
+            }:
                 continue
             if str(failure.get("status") or "unrecovered") in {"recovered", "waived"}:
                 continue

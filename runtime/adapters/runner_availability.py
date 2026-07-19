@@ -247,6 +247,42 @@ def _matched_line(text: str, found: re.Match[str]) -> str:
 
 
 def _cooldown_seconds_from_retry_at(message: str, *, now: datetime) -> int | None:
+    absolute = re.search(
+        r"\btry again (?:at|after)\s+"
+        r"(?P<month>jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|"
+        r"jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+"
+        r"(?P<day>\d{1,2})(?:st|nd|rd|th)?(?:,\s*|\s+)"
+        r"(?P<year>\d{4})(?:\s+at)?\s+"
+        r"(?P<hour>\d{1,2})(?::(?P<minute>\d{2}))?\s*(?P<period>[ap]\.?m\.?)\b",
+        message,
+        flags=re.IGNORECASE,
+    )
+    if absolute:
+        hour = int(absolute.group("hour"))
+        minute = int(absolute.group("minute") or "0")
+        day = int(absolute.group("day"))
+        if hour < 1 or hour > 12 or minute > 59:
+            return None
+        period = absolute.group("period").lower().replace(".", "")
+        if period == "pm" and hour != 12:
+            hour += 12
+        elif period == "am" and hour == 12:
+            hour = 0
+        try:
+            month = datetime.strptime(absolute.group("month")[:3], "%b").month
+            target = datetime(
+                int(absolute.group("year")),
+                month,
+                day,
+                hour,
+                minute,
+                tzinfo=now.tzinfo,
+            )
+        except ValueError:
+            return None
+        seconds = int((target - now).total_seconds())
+        return max(RETRY_AT_BUFFER_SECONDS, seconds + RETRY_AT_BUFFER_SECONDS)
+
     found = re.search(
         r"\btry again (?:at|after)\s+(?P<hour>\d{1,2})(?::(?P<minute>\d{2}))?\s*(?P<period>[ap]\.?m\.?)\b",
         message,

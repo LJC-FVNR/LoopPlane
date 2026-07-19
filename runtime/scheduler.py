@@ -3922,6 +3922,85 @@ def _clear_manual_runner_availability_holds(
     Automatic cooldown holds are intentionally left untouched.
     """
 
+    return _clear_runner_availability_holds(
+        paths,
+        workflow_id=workflow_id,
+        request_id=request_id,
+        control_type=control_type,
+        include_manual=True,
+        include_automatic=False,
+        clear_reason="start/resume acknowledged a resolved attention condition",
+    )
+
+
+def clear_verified_runner_availability_holds(
+    project_root: Path | str,
+    *,
+    request_id: str,
+    control_type: str = "resume",
+    clear_reason: str = "runner availability independently verified",
+) -> dict[str, Any]:
+    """Explicitly release automatic holds after an independent live probe.
+
+    Normal start/resume handling deliberately preserves automatic cooldowns.
+    This public mutation surface is for callers that have separately proved the
+    runner is available and need to invalidate stale cooldown state without
+    directly editing authoritative runtime JSON.
+    """
+
+    context_result = load_scheduler_context(project_root)
+    context = context_result.get("context")
+    if context_result.get("ok") is not True or not isinstance(context, SchedulerContext):
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "ok": False,
+            "status": "workflow_config_unavailable",
+            "message": str(context_result.get("message") or "Unable to load workflow configuration."),
+            "cleared_count": 0,
+            "cleared_holds": [],
+        }
+    if not str(request_id or "").strip():
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "ok": False,
+            "status": "invalid_request_id",
+            "message": "An originating control request ID is required for the audit trail.",
+            "cleared_count": 0,
+            "cleared_holds": [],
+        }
+    cleared_holds = _clear_runner_availability_holds(
+        context.paths,
+        workflow_id=context.workflow_id,
+        request_id=str(request_id),
+        control_type=str(control_type or "resume"),
+        include_manual=False,
+        include_automatic=True,
+        clear_reason=str(clear_reason or "runner availability independently verified"),
+    )
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "ok": True,
+        "status": "cleared" if cleared_holds else "no_active_automatic_holds",
+        "message": (
+            f"Cleared {len(cleared_holds)} verified automatic runner availability hold(s)."
+            if cleared_holds
+            else "No active automatic runner availability holds required clearing."
+        ),
+        "cleared_count": len(cleared_holds),
+        "cleared_holds": cleared_holds,
+    }
+
+
+def _clear_runner_availability_holds(
+    paths: WorkflowPaths,
+    *,
+    workflow_id: str,
+    request_id: str,
+    control_type: str,
+    include_manual: bool,
+    include_automatic: bool,
+    clear_reason: str,
+) -> list[dict[str, Any]]:
     if not workflow_id:
         return []
     cleared_at = utc_timestamp()
@@ -3937,7 +4016,8 @@ def _clear_manual_runner_availability_holds(
             hold = record.get("availability_hold")
             if not isinstance(hold, Mapping) or hold.get("status") != "active":
                 continue
-            if hold.get("requires_attention") is not True:
+            is_manual = hold.get("requires_attention") is True
+            if (is_manual and not include_manual) or (not is_manual and not include_automatic):
                 continue
             released = dict(hold)
             released.update(
@@ -3946,6 +4026,7 @@ def _clear_manual_runner_availability_holds(
                     "cleared_at": cleared_at,
                     "cleared_by_control_request_id": request_id,
                     "cleared_by_control_type": control_type,
+                    "clear_reason": clear_reason,
                 }
             )
             record["availability_hold"] = released
@@ -3965,6 +4046,7 @@ def _clear_manual_runner_availability_holds(
                 "hold": item.get("hold"),
                 "cleared_by_control_request_id": request_id,
                 "cleared_by_control_type": control_type,
+                "clear_reason": clear_reason,
             },
         )
     return cleared_holds

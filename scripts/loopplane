@@ -42,6 +42,7 @@ from runtime.planning import (
     run_planner,
 )
 from runtime.scheduler import (
+    clear_verified_runner_availability_holds,
     compact_historical_event_payloads,
     format_scheduler_summary_text,
     format_preview_text,
@@ -1877,6 +1878,7 @@ def run_control_request(args: argparse.Namespace) -> int:
         )
     except (OSError, json.JSONDecodeError, WorkflowPathError, WorkflowLifecycleError) as error:
         result = _control_command_failure(args.project, f"Unable to record control request: {error}")
+    result = _maybe_clear_verified_runner_availability_holds(args, result)
     if args.json:
         print(json.dumps(result, indent=2, sort_keys=True))
     else:
@@ -1909,11 +1911,38 @@ def run_resume(args: argparse.Namespace) -> int:
         result = resume_detached_scheduler(Path(args.project or "."))
     except (OSError, json.JSONDecodeError, WorkflowPathError) as error:
         result = _waiting_config_command_failure(args.project, f"Unable to resume detached scheduler: {error}")
+    result = _maybe_clear_verified_runner_availability_holds(args, result)
     if args.json:
         print(json.dumps(result, indent=2, sort_keys=True))
     else:
         print(format_control_request_text(result), end="")
     return control_exit_code(result)
+
+
+def _maybe_clear_verified_runner_availability_holds(
+    args: argparse.Namespace,
+    result: dict[str, Any],
+) -> dict[str, Any]:
+    if not bool(getattr(args, "clear_runner_availability_holds", False)) or result.get("ok") is not True:
+        return result
+    request = result.get("request")
+    request_id = str(request.get("request_id") or "") if isinstance(request, Mapping) else ""
+    clear_result = clear_verified_runner_availability_holds(
+        Path(args.project or "."),
+        request_id=request_id,
+        control_type=str(getattr(args, "control_type", "resume")),
+        clear_reason="CLI caller independently verified live runner availability before resume",
+    )
+    updated = dict(result)
+    updated["runner_availability_clear"] = clear_result
+    if clear_result.get("ok") is not True:
+        updated["ok"] = False
+        updated["status"] = "runner_availability_clear_failed"
+        updated["errors"] = [
+            *list(updated.get("errors") or []),
+            str(clear_result.get("message") or "Unable to clear verified runner availability holds."),
+        ]
+    return updated
 
 
 def run_status(args: argparse.Namespace) -> int:
@@ -2973,6 +3002,14 @@ def add_execution_commands(subparsers: argparse._SubParsersAction[argparse.Argum
         "--foreground-owner",
         action="store_true",
         help="Record resume without launching a detached supervisor; the caller must immediately run the supervisor.",
+    )
+    resume.add_argument(
+        "--clear-runner-availability-holds",
+        action="store_true",
+        help=(
+            "Explicitly clear automatic runner cooldown holds after independently verifying live runner "
+            "availability; the action is recorded against this resume request."
+        ),
     )
     _add_nested_workspace_options(resume)
     resume.add_argument("--json", action="store_true", help="Emit a machine-readable control request report.")
