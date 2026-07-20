@@ -1121,6 +1121,114 @@ class SchedulerSelectionTest(unittest.TestCase):
             self.assertEqual(action["action"], "wait_config")
             self.assertEqual(action["selected"]["problem"]["code"], "agent_runner_missing")
 
+    def test_repeated_unchanged_wait_tick_is_coalesced(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "Coalesce stable scheduler waits.")
+            write_active_plan(project, {"P0.T001": " ", "P1.T001": " "})
+            record_accepted_plan_hash(project)
+            state_path = project / ".loopplane" / "runtime" / "state.json"
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            state["configuration_problems"] = [
+                {"code": "agent_runner_missing", "message": "Runner config invalid."}
+            ]
+            state_path.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+            first = run_scheduler(project, max_ticks=1)
+            second = run_scheduler(project, max_ticks=1)
+
+            self.assertEqual(first["selected_action"]["action"], "wait_config")
+            self.assertTrue(first["selected_action"]["wait_event_emitted"])
+            self.assertEqual(second["selected_action"]["action"], "wait_config")
+            self.assertFalse(second["selected_action"]["wait_event_emitted"])
+            events = read_jsonl(project / ".loopplane" / "runtime" / "events" / "events_000001.jsonl")
+            event_types = [event["event_type"] for event in events]
+            self.assertEqual(event_types.count("scheduler_wait_tick"), 1)
+            self.assertEqual(event_types.count("scheduler_started"), 0)
+
+    def test_wait_coalescing_ignores_heartbeat_only_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "Coalesce heartbeat-only wait updates.")
+            paths = scheduler_module.WorkflowPaths.from_config(
+                project,
+                scheduler_module.load_workflow_config(project),
+            )
+            base_selected = {
+                "reason": "Background work is still active.",
+                "would_wait": True,
+                "blocking_conditions": ["background_job_not_ready"],
+                "selected": {
+                    "job_id": "job_1",
+                    "run_kind": "background_wait",
+                    "job": {
+                        "job_id": "job_1",
+                        "status": "running",
+                        "heartbeat_at": "2026-07-20T00:00:00Z",
+                        "heartbeat_count": 1,
+                    },
+                },
+            }
+            first = scheduler_module._append_coalesced_scheduler_wait_event(
+                paths,
+                workflow_id=paths.workflow_id,
+                owner="test-owner",
+                selected=base_selected,
+                selected_action_name="wait_background_job",
+                tick_index=1,
+                ticks=1,
+                ticks_run=1,
+            )
+            changed = json.loads(json.dumps(base_selected))
+            changed["selected"]["job"]["heartbeat_at"] = "2026-07-20T00:00:30Z"
+            changed["selected"]["job"]["heartbeat_count"] = 2
+            second = scheduler_module._append_coalesced_scheduler_wait_event(
+                paths,
+                workflow_id=paths.workflow_id,
+                owner="test-owner",
+                selected=changed,
+                selected_action_name="wait_background_job",
+                tick_index=1,
+                ticks=1,
+                ticks_run=1,
+            )
+
+            self.assertIsNotNone(first)
+            self.assertIsNone(second)
+
+    def test_missing_worker_executable_fails_before_run_preparation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "Runner executable preflight.")
+            write_active_plan(project, {"P0.T001": " ", "P1.T001": " "})
+            record_accepted_plan_hash(project)
+            config_path = project / ".loopplane" / "config" / "agent_runners.json"
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+            runner = config["runners"]["worker"]
+            runner["adapter"] = "shell"
+            runner["command"] = "/definitely/missing/loopplane-worker"
+            runner["args"] = []
+            runner["enabled"] = True
+            config_path.write_text(json.dumps(config, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            runs_dir = project / ".loopplane" / "runtime" / "runs"
+            before = sorted(path.name for path in runs_dir.iterdir()) if runs_dir.exists() else []
+
+            result = run_scheduler(project, max_ticks=1)
+
+            selected = result["selected_action"]
+            self.assertEqual(selected["action"], "run_worker")
+            execution = selected["execution_result"]
+            self.assertFalse(execution["ok"])
+            self.assertEqual(execution["status"], "waiting_config")
+            self.assertEqual(execution["classification"], "worker_runner_unavailable")
+            self.assertIn("executable not found", execution["message"])
+            after = sorted(path.name for path in runs_dir.iterdir()) if runs_dir.exists() else []
+            self.assertEqual(after, before)
+            state = json.loads(
+                (project / ".loopplane" / "runtime" / "state.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(state["status"], "waiting_config")
+
     def test_malformed_active_plan_waits_config_without_selecting_worker(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             project = Path(tmp) / "project"
@@ -2358,14 +2466,18 @@ class WorkerRunExecutionTest(unittest.TestCase):
                 execution["git_metadata"]["pre"]["metadata"]["policy_checkpoint"]["reason"],
                 "checkpoint_policy_disabled",
             )
-            self.assertEqual(execution["auto_validation_checkpoint"]["checkpoint"]["reason"], "after_validation_pass")
+            self.assertEqual(execution["auto_validation_checkpoint"]["status"], "skipped")
+            self.assertEqual(
+                execution["auto_validation_checkpoint"]["reason"],
+                "checkpoint_policy_disabled",
+            )
             git_dir = evidence_run_dir / "git"
             self.assertFalse(git_dir.exists())
             checkpoint_log = project / ".loopplane" / "runtime" / "git_checkpoints.jsonl"
             checkpoint_records = read_jsonl(checkpoint_log) if checkpoint_log.exists() else []
             reasons = [record.get("reason") for record in checkpoint_records]
             self.assertNotIn("before_worker_run", reasons)
-            self.assertIn("after_validation_pass", reasons)
+            self.assertNotIn("after_validation_pass", reasons)
 
     def test_scheduler_honors_worker_checkpoint_policy_with_status_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2377,6 +2489,7 @@ class WorkerRunExecutionTest(unittest.TestCase):
             version_config["run_metadata"]["enabled"] = True
             version_config["run_metadata"]["detail_level"] = "status"
             version_config["checkpoint_policy"]["before_worker_run"] = True
+            version_config["checkpoint_policy"]["after_validation_pass"] = True
             version_config_path.write_text(json.dumps(version_config, indent=2, sort_keys=True) + "\n", encoding="utf-8")
             init = subprocess.run(["git", "init", "-q", str(project)], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
             self.assertEqual(init.returncode, 0, init.stderr + init.stdout)

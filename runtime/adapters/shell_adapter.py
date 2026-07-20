@@ -848,6 +848,12 @@ def _write_process_result(
     adapter_metadata: Mapping[str, Any],
 ) -> AdapterOutput:
     paths = adapter_input.output_paths()
+    # Runner availability describes the external runner process, not a local
+    # post-run policy verdict.  Preserve the real process exit code before a
+    # workspace-boundary violation is translated to POLICY_BLOCKED_EXIT_CODE;
+    # otherwise an unrelated warning in a successful runner's stderr can be
+    # misclassified as a persistent runner configuration failure.
+    process_exit_code = exit_code
     produced_files = discover_adapter_produced_files(
         adapter_input,
         before=pre_run_files,
@@ -865,14 +871,14 @@ def _write_process_result(
         produced_files = _merge_produced_files(produced_files, observed_boundary_change_paths(boundary_policy))
         metadata["workspace_boundary_policy"] = boundary_policy
     if boundary_policy.get("enforced") and not boundary_policy.get("ok", True):
-        metadata["process_exit_code"] = exit_code
+        metadata["process_exit_code"] = process_exit_code
         exit_code = POLICY_BLOCKED_EXIT_CODE
         _append_boundary_violation(paths.stderr_path, boundary_policy)
         _write_boundary_final_output(paths.final_output_path, boundary_policy)
     if "runner_availability" not in metadata:
         availability = classify_runner_availability(
             adapter_input,
-            exit_code=exit_code,
+            exit_code=process_exit_code,
             timed_out=timed_out,
             stdout_path=paths.stdout_path,
             stderr_path=paths.stderr_path,

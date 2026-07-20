@@ -34,6 +34,15 @@
     "do_not_switch_user_branch": {"type": "boolean"},
     "do_not_modify_user_index": {"type": "boolean"},
     "checkpoint_policy": {"type": "object"},
+    "checkpoint_limits": {
+      "type": "object",
+      "properties": {
+        "timeout_seconds": {"type": "number", "minimum": 1},
+        "max_paths": {"type": "integer", "minimum": 1},
+        "max_bytes": {"type": "integer", "minimum": 1}
+      },
+      "additionalProperties": false
+    },
     "run_metadata": {
       "type": "object",
       "properties": {

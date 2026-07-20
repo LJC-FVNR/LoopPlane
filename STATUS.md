@@ -4,9 +4,11 @@ This page summarizes the implemented product surface for the current standalone
 runtime. `LoopPlane.md` remains the authoritative product and protocol
 specification.
 
-Current package version: `1.6.0`
+Current package version: `1.7.0`
 
-Current release tag: `v1.6.0`
+Latest published release tag: `v1.6.0`
+
+Next release tag: `v1.7.0`
 
 ## Standalone MVP Surface
 
@@ -35,6 +37,23 @@ Implemented core capabilities include:
 - migration export/import profiles for source, stateful, and archive use cases;
 - workspace and workflow history commands;
 - release gates that block unfinished required command and adapter surfaces.
+
+## v1.7 Lightweight Runtime
+
+The v1.7 runtime reduces control-plane work that previously grew with workflow
+history or generated artifact volume:
+
+- Git checkpoint creation is scoped and protected by time, path-count, and byte
+  budgets;
+- result/evidence trees are excluded from checkpoints;
+- high-frequency worker checkpoints and automatic human summaries are opt-in;
+- scheduler wait events and detached-supervisor polling are coalesced;
+- read-model, validation, planning, adapter, health, and artifact discovery use
+  bounded traversal;
+- normal health checks recent operational history while `health --strict`
+  retains the full event/checkpoint integrity audit;
+- missing runner executables fail before run directories or checkpoints are
+  created.
 
 ## v1.6 Support
 
@@ -119,4 +138,3 @@ python3 -m unittest tests.test_e2e_smoke tests.test_read_models tests.test_healt
 uv run --with jsonschema python -m unittest discover -s tests
 git diff --check
 ```
-

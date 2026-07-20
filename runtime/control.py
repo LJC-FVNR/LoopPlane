@@ -109,6 +109,7 @@ def load_control_status(project_root: Path | str) -> dict[str, Any]:
     supervisor = _load_supervisor_status(project)
     status = _completion_aware_status(runtime_status, completion_marker)
     scheduler = _completion_aware_scheduler(state.get("scheduler"), status=status)
+    scheduler = _background_registry_aware_scheduler(paths, scheduler)
     warnings = _completion_marker_warnings(completion_marker)
     next_steps = _status_next_steps(state)
     if isinstance(supervisor, Mapping):
@@ -624,6 +625,43 @@ def _completion_aware_scheduler(value: object, *, status: str) -> dict[str, Any]
         scheduler["active_node_id"] = None
         scheduler["active_task_id"] = None
     return scheduler
+
+
+def _background_registry_aware_scheduler(
+    paths: WorkflowPaths, scheduler: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Overlay a cached scheduler job status with the authoritative registry.
+
+    A paused supervisor intentionally does not mutate scheduler state, while a
+    separately supervised background command may already have completed or
+    been cancelled.  Status inspection must not continue to call that job
+    running merely because the scheduler cache has not resumed.
+    """
+
+    result = dict(scheduler)
+    active_job_id = result.get("active_background_job_id")
+    if not isinstance(active_job_id, str) or not active_job_id.strip():
+        return result
+    registry = _read_json_object(
+        paths.runtime_dir / "background_jobs.json", default={}
+    )
+    jobs = registry.get("jobs") if isinstance(registry, Mapping) else None
+    if not isinstance(jobs, Sequence) or isinstance(jobs, (str, bytes)):
+        return result
+    matching = next(
+        (
+            job
+            for job in jobs
+            if isinstance(job, Mapping) and job.get("job_id") == active_job_id
+        ),
+        None,
+    )
+    if not isinstance(matching, Mapping):
+        return result
+    current_status = matching.get("status")
+    if isinstance(current_status, str) and current_status.strip():
+        result["active_background_job_status"] = current_status.strip()
+    return result
 
 
 def _completion_marker_warnings(marker: Mapping[str, Any]) -> list[str]:

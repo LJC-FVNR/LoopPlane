@@ -72,6 +72,14 @@
       },
       "additionalProperties": false
     },
+    "human_summaries": {
+      "type": "object",
+      "properties": {
+        "auto_after_reconcile": {"type": "boolean"},
+        "generation_mode": {"type": "string", "enum": ["on_demand", "automatic"]}
+      },
+      "additionalProperties": false
+    },
     "self_expansion": {
       "type": "object",
       "properties": {

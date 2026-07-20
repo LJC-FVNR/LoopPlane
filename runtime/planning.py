@@ -28,6 +28,7 @@ from runtime.exit_codes import (
     EXIT_VERSION_CONTROL_UNAVAILABLE,
     has_text,
 )
+from runtime.file_discovery import discover_files_bounded
 from runtime.path_resolution import WorkflowPathError, WorkflowPaths, load_workflow_config, path_lines
 from runtime.plan_objectives import (
     DEFAULT_OBJECTIVE_MAX_EXPANSIONS,
@@ -3803,22 +3804,46 @@ def _render_template(template: str, variables: Mapping[str, str]) -> str:
 
 
 def _workspace_tree(project: Path, *, max_entries: int = 200) -> str:
+    discovery = discover_files_bounded(
+        (project,),
+        prune_directory_names={
+            ".git",
+            ".cache",
+            ".pytest_cache",
+            "__pycache__",
+            "cache",
+            "caches",
+            "models",
+            "node_modules",
+            "tmp",
+            "wandb",
+        },
+        max_entries=max(1_000, max_entries * 10),
+        max_matches=max_entries + 1,
+        max_depth=12,
+        exclude_path=lambda path: _ignored_tree_path(path.relative_to(project)),
+    )
     entries: list[str] = []
-    for path in sorted(project.rglob("*"), key=lambda item: item.relative_to(project).as_posix()):
+    for path in discovery.paths[:max_entries]:
         rel = path.relative_to(project)
         if _ignored_tree_path(rel):
             continue
-        suffix = "/" if path.is_dir() else ""
-        entries.append(rel.as_posix() + suffix)
-        if len(entries) >= max_entries:
-            entries.append(f"... truncated after {max_entries} entries")
-            break
+        entries.append(rel.as_posix())
+    if discovery.truncated or len(discovery.paths) > max_entries:
+        entries.append(f"... truncated after {max_entries} entries")
     return "\n".join(entries) if entries else "."
 
 
 def _ignored_tree_path(relative: Path) -> bool:
     parts = relative.parts
-    return any(parts[: len(prefix)] == prefix for prefix in IGNORED_TREE_PREFIXES)
+    if any(parts[: len(prefix)] == prefix for prefix in IGNORED_TREE_PREFIXES):
+        return True
+    if len(parts) >= 4 and parts[:2] == (".loopplane", "workflows"):
+        if parts[3] in {"results", "runtime"}:
+            return True
+        if len(parts) >= 5 and parts[3:5] == ("planning", "runs"):
+            return True
+    return False
 
 
 def _safe_read(path: Path) -> str:

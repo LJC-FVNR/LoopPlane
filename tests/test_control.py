@@ -93,6 +93,57 @@ class ControlRequestCliTest(unittest.TestCase):
             self.assertIsNone(status["scheduler"]["active_run_id"])
             self.assertIsNone(status["runtime_state"]["scheduler"]["active_task_id"])
 
+    def test_status_overlays_cached_background_state_from_registry(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "Status should resolve paused background state.")
+            state_path = project / ".loopplane" / "runtime" / "state.json"
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            state["status"] = "paused"
+            state["scheduler"].update(
+                {
+                    "paused": True,
+                    "running": False,
+                    "active_background_job_id": "bg_cancelled",
+                    "active_background_job_status": "running",
+                }
+            )
+            state_path.write_text(
+                json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+            )
+            registry_path = (
+                project / ".loopplane" / "runtime" / "background_jobs.json"
+            )
+            registry_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "1.5",
+                        "jobs": [
+                            {
+                                "job_id": "bg_cancelled",
+                                "run_id": "run_cancelled",
+                                "status": "cancelled",
+                            }
+                        ],
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            status = load_control_status(project)
+
+            self.assertEqual(status["status"], "paused")
+            self.assertEqual(
+                status["scheduler"]["active_background_job_status"], "cancelled"
+            )
+            self.assertEqual(
+                status["runtime_state"]["scheduler"]["active_background_job_status"],
+                "cancelled",
+            )
+
     def test_status_reports_stale_completion_marker_without_completed_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             project = Path(tmp) / "project"

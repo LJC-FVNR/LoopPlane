@@ -7,7 +7,9 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
+import runtime.human_summaries as human_summaries_module
 from runtime.human_summaries import ensure_human_summaries
 from runtime.init_workflow import init_project
 from runtime.path_resolution import WorkflowPaths, load_workflow_config
@@ -22,6 +24,11 @@ LoopPlane = REPO_ROOT / "scripts" / "loopplane"
 
 def configure_fake_summary_agent(project: Path) -> None:
     paths = WorkflowPaths.from_config(project, load_workflow_config(project))
+    workflow_path = paths.workflow_config_file
+    workflow = json.loads(workflow_path.read_text(encoding="utf-8"))
+    workflow.setdefault("human_summaries", {})["auto_after_reconcile"] = True
+    workflow["human_summaries"]["generation_mode"] = "automatic"
+    workflow_path.write_text(json.dumps(workflow, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     config_path = paths.config_file("agent_runners.json")
     script = config_path.parent / "fake_summary_agent.py"
     script.write_text(
@@ -153,6 +160,11 @@ print("fake summary agent wrote markdown")
 def disable_summary_agent(project: Path) -> None:
     """Force the deterministic mechanical fallback by disabling the summary runner."""
     paths = WorkflowPaths.from_config(project, load_workflow_config(project))
+    workflow_path = paths.workflow_config_file
+    workflow = json.loads(workflow_path.read_text(encoding="utf-8"))
+    workflow.setdefault("human_summaries", {})["auto_after_reconcile"] = True
+    workflow["human_summaries"]["generation_mode"] = "automatic"
+    workflow_path.write_text(json.dumps(workflow, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     config_path = paths.config_file("agent_runners.json")
     config = json.loads(config_path.read_text(encoding="utf-8"))
     config["runners"]["summary"]["enabled"] = False
@@ -161,6 +173,11 @@ def disable_summary_agent(project: Path) -> None:
 
 def configure_slow_summary_agent(project: Path) -> None:
     paths = WorkflowPaths.from_config(project, load_workflow_config(project))
+    workflow_path = paths.workflow_config_file
+    workflow = json.loads(workflow_path.read_text(encoding="utf-8"))
+    workflow.setdefault("human_summaries", {})["auto_after_reconcile"] = True
+    workflow["human_summaries"]["generation_mode"] = "automatic"
+    workflow_path.write_text(json.dumps(workflow, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     config_path = paths.config_file("agent_runners.json")
     script = config_path.parent / "slow_summary_agent.py"
     script.write_text(
@@ -204,6 +221,24 @@ time.sleep(3)
 
 
 class HumanSummaryTest(unittest.TestCase):
+    def test_artifact_fingerprint_does_not_hash_each_artifact_content(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "run"
+            artifacts_dir = run_dir / "artifacts"
+            artifacts_dir.mkdir(parents=True)
+            for index in range(300):
+                (artifacts_dir / f"tensor_{index:04d}.bin").write_bytes(b"payload")
+
+            with mock.patch.object(
+                human_summaries_module,
+                "_sha256_file",
+                side_effect=AssertionError("artifact content hashing should not run"),
+            ):
+                fingerprint = human_summaries_module._artifact_tree_hash(run_dir)
+
+            self.assertIsNotNone(fingerprint)
+            self.assertTrue(str(fingerprint).startswith("sha256:"))
+
     def test_phase_summary_loads_legacy_highlight_report_task_summary(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             project = Path(tmp) / "project"

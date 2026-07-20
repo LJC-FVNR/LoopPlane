@@ -71,7 +71,9 @@ ACTIVE_SUPERVISOR_STATUSES = frozenset(
 RECOVERABLE_WAIT_ACTIONS = frozenset(
     {"wait_paused", "wait_config", "wait_approval", "wait_runner_availability"}
 )
-RECOVERABLE_WAIT_INTERVAL_SECONDS = 1.0
+RECOVERABLE_WAIT_INTERVAL_SECONDS = _positive_float_from_env(
+    "LOOPPLANE_RECOVERABLE_WAIT_INTERVAL_SECONDS", 30.0
+)
 RUNNER_AVAILABILITY_WAIT_INTERVAL_SECONDS = _positive_float_from_env(
     "LOOPPLANE_RUNNER_AVAILABILITY_WAIT_INTERVAL_SECONDS", 30.0
 )
@@ -304,6 +306,9 @@ def run_supervisor(project_root: Path | str, *, poll_interval_seconds: float = D
             should_continue, reason, loop_exit_code = _should_continue_after_tick(result, selected, follow_up)
             action_failure_signature = _action_failure_signature(result, selected)
             action_failure_backoff_seconds: float | None = None
+            effective_action_failure_repeat_limit = action_failure_repeat_limit
+            if _deterministic_infrastructure_failure(selected):
+                effective_action_failure_repeat_limit = 1
             if action_failure_signature is None:
                 previous_action_failure_signature = None
                 consecutive_action_failures = 0
@@ -313,7 +318,7 @@ def run_supervisor(project_root: Path | str, *, poll_interval_seconds: float = D
                 else:
                     previous_action_failure_signature = action_failure_signature
                     consecutive_action_failures = 1
-                if consecutive_action_failures >= action_failure_repeat_limit:
+                if consecutive_action_failures >= effective_action_failure_repeat_limit:
                     should_continue = False
                     reason = "repeated_action_failure"
                     loop_exit_code = EXIT_GENERIC_FAILURE
@@ -334,7 +339,7 @@ def run_supervisor(project_root: Path | str, *, poll_interval_seconds: float = D
                 "last_loop_reason": reason,
                 "action_failure_signature": action_failure_signature,
                 "consecutive_action_failures": consecutive_action_failures,
-                "action_failure_repeat_limit": action_failure_repeat_limit,
+                "action_failure_repeat_limit": effective_action_failure_repeat_limit,
                 "action_failure_backoff_seconds": action_failure_backoff_seconds,
             }
             if follow_up is not None:
@@ -347,13 +352,20 @@ def run_supervisor(project_root: Path | str, *, poll_interval_seconds: float = D
                 stop_reason = reason
                 break
 
-            time.sleep(
-                _poll_interval_after_tick(
-                    action,
-                    poll_interval,
-                    failure_backoff_seconds=action_failure_backoff_seconds,
-                )
+            wait_seconds = _poll_interval_after_tick(
+                action,
+                poll_interval,
+                failure_backoff_seconds=action_failure_backoff_seconds,
             )
+            if action in RECOVERABLE_WAIT_ACTIONS or action == "wait_background_job":
+                _wait_for_supervisor_wakeup(
+                    paths,
+                    action=action,
+                    timeout_seconds=wait_seconds,
+                    stat_poll_seconds=poll_interval,
+                )
+            else:
+                time.sleep(wait_seconds)
     except BaseException as error:
         exit_code = EXIT_GENERIC_FAILURE
         exit_status = "failed"
@@ -638,6 +650,36 @@ def _action_failure_signature(result: Mapping[str, Any], selected: Mapping[str, 
     )
 
 
+def _deterministic_infrastructure_failure(selected: Mapping[str, Any]) -> bool:
+    execution = selected.get("execution_result")
+    if not isinstance(execution, Mapping) or execution.get("ok") is not False:
+        return False
+    status = str(execution.get("status") or "").strip().lower()
+    error_code = str(execution.get("error_code") or "").strip().lower()
+    classification = str(execution.get("classification") or "").strip().lower()
+    try:
+        adapter_exit_code = int(execution.get("adapter_exit_code"))
+    except (TypeError, ValueError):
+        adapter_exit_code = None
+    availability = execution.get("runner_availability")
+    availability_mapping = availability if isinstance(availability, Mapping) else {}
+    reason_class = str(availability_mapping.get("reason_class") or "").strip().lower()
+    requires_attention = availability_mapping.get("requires_attention") is True
+    return bool(
+        status == "waiting_config"
+        or "runner_unavailable" in error_code
+        or classification in {"runner_configuration_error", "command_unavailable"}
+        or adapter_exit_code == 127
+        or reason_class in {
+            "auth_required",
+            "billing_required",
+            "credits_exhausted",
+            "runner_configuration_error",
+        }
+        or requires_attention
+    )
+
+
 def _action_failure_repeat_limit(workflow: Mapping[str, Any]) -> int:
     policy = workflow.get("self_expansion")
     configured = policy.get("max_repeated_signature_count") if isinstance(policy, Mapping) else None
@@ -783,6 +825,75 @@ def _poll_interval_after_tick(
     if action in RECOVERABLE_WAIT_ACTIONS:
         return max(poll_interval, RECOVERABLE_WAIT_INTERVAL_SECONDS)
     return poll_interval
+
+
+def _wait_for_supervisor_wakeup(
+    paths: WorkflowPaths,
+    *,
+    action: str,
+    timeout_seconds: float,
+    stat_poll_seconds: float,
+) -> None:
+    """Wait cheaply until an authoritative input changes or a timer expires.
+
+    The supervisor heartbeat has its own thread, so a waiting workflow does not
+    need to rebuild a full scheduler snapshot every second.  Portable stat
+    polling keeps control requests responsive without adding an inotify-only
+    dependency or writing any wait-state files.
+    """
+
+    watched = _supervisor_wakeup_paths(paths, action=action)
+    before = _path_stat_signature(watched)
+    deadline = time.monotonic() + max(0.05, float(timeout_seconds))
+    interval = min(1.0, max(0.05, float(stat_poll_seconds)))
+    wake = threading.Event()
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return
+        wake.wait(min(interval, remaining))
+        if _path_stat_signature(watched) != before:
+            return
+
+
+def _supervisor_wakeup_paths(paths: WorkflowPaths, *, action: str) -> tuple[Path, ...]:
+    common = (
+        paths.runtime_dir / "control_requests.jsonl",
+        paths.runtime_dir / "state.json",
+    )
+    if action == "wait_approval":
+        return (*common, paths.runtime_dir / "approval_responses.jsonl", paths.runtime_dir / "human_approval_responses.jsonl")
+    if action == "wait_background_job":
+        return (*common, paths.runtime_dir / "background_jobs.json", paths.runtime_dir / "active_run_leases")
+    if action == "wait_runner_availability":
+        return (
+            *common,
+            paths.runtime_dir / "runner_health.json",
+            paths.config_file("agent_runners.json"),
+            paths.workflow_config_dir / "local",
+        )
+    if action == "wait_config":
+        return (*common, paths.workflow_config_dir, paths.plan_file)
+    return common
+
+
+def _path_stat_signature(paths: Sequence[Path]) -> tuple[tuple[str, bool, int, int], ...]:
+    signature: list[tuple[str, bool, int, int]] = []
+    for path in paths:
+        try:
+            stat_result = path.stat()
+        except OSError:
+            signature.append((path.as_posix(), False, 0, 0))
+            continue
+        signature.append(
+            (
+                path.as_posix(),
+                True,
+                int(stat_result.st_size),
+                int(stat_result.st_mtime_ns),
+            )
+        )
+    return tuple(signature)
 
 
 def _exit_status_for_reason(reason: str) -> str:
@@ -968,6 +1079,15 @@ def _detached_resume_launch_reason(paths: WorkflowPaths, supervisor: Mapping[str
         return "stopped"
     if supervisor_status == "stale":
         return "stale_supervisor"
+    # A terminal supervisor may deliberately exit after surfacing an incident.
+    # Once an operator or autonomous repair explicitly issues ``resume``, a
+    # dead requires-attention/failed/exited supervisor must be launchable so it
+    # can consume that acknowledgement and continue recovery.  Otherwise the
+    # durable resume request has no process capable of applying it.
+    if supervisor_status in {"requires_attention", "failed", "exited"}:
+        return f"{supervisor_status}_supervisor"
+    if runtime_status in {"requires_attention", "failed"}:
+        return f"{runtime_status}_runtime"
     return None
 
 

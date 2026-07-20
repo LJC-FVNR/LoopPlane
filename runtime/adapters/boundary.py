@@ -9,6 +9,7 @@ from types import MappingProxyType
 from typing import Any, Mapping, Sequence
 
 from runtime.adapters.base import AdapterInput
+from runtime.file_discovery import FileDiscoveryResult, discover_files_bounded
 from runtime.path_resolution import WorkflowPaths, load_workflow_config
 from runtime.workspace_boundary_policy import evaluate_worker_write_boundary
 from runtime.workspace_identity import resolve_identity_path, workspace_boundary_root
@@ -16,6 +17,8 @@ from runtime.workspace_identity import resolve_identity_path, workspace_boundary
 
 ADAPTER_BOUNDARY_ROLES = frozenset({"worker", "recovery", "recovery_worker"})
 SKIPPED_WATCH_DIR_NAMES = frozenset({".git"})
+BOUNDARY_SCAN_ENTRY_LIMIT = 20_000
+BOUNDARY_SCAN_MATCH_LIMIT = 20_000
 
 
 @dataclass(frozen=True)
@@ -26,6 +29,8 @@ class AdapterBoundarySnapshot:
     watch_root: Path | None = None
     boundary_root: Path | None = None
     files: Mapping[str, Mapping[str, Any]] = MappingProxyType({})
+    scanned_entries: int = 0
+    scan_truncated: bool = False
 
 
 def snapshot_adapter_workspace_boundary(adapter_input: AdapterInput) -> AdapterBoundarySnapshot:
@@ -66,13 +71,25 @@ def snapshot_adapter_workspace_boundary(adapter_input: AdapterInput) -> AdapterB
             boundary_root=boundary,
         )
 
+    files, discovery = _snapshot_out_of_boundary_files(repo_root, boundary)
+    if discovery.truncated:
+        return AdapterBoundarySnapshot(
+            enabled=False,
+            reason=f"out_of_boundary_watch_budget_exceeded:{discovery.limit_reason or 'bounded_scan'}",
+            project_root=project,
+            watch_root=repo_root,
+            boundary_root=boundary,
+            scanned_entries=discovery.scanned_entries,
+            scan_truncated=True,
+        )
     return AdapterBoundarySnapshot(
         enabled=True,
         reason="watching_repo_outside_workspace_boundary",
         project_root=project,
         watch_root=repo_root,
         boundary_root=boundary,
-        files=MappingProxyType(_snapshot_out_of_boundary_files(repo_root, boundary)),
+        files=MappingProxyType(files),
+        scanned_entries=discovery.scanned_entries,
     )
 
 
@@ -97,7 +114,16 @@ def evaluate_adapter_workspace_boundary(
             "reason": "snapshot_incomplete",
         }
 
-    after = _snapshot_out_of_boundary_files(snapshot.watch_root, snapshot.boundary_root)
+    after, discovery = _snapshot_out_of_boundary_files(snapshot.watch_root, snapshot.boundary_root)
+    if discovery.truncated:
+        return {
+            "schema_version": adapter_input.schema_version,
+            "status": "not_applicable",
+            "ok": True,
+            "enforced": False,
+            "reason": f"out_of_boundary_watch_budget_exceeded:{discovery.limit_reason or 'bounded_scan'}",
+            "scanned_entries": discovery.scanned_entries,
+        }
     changes = _diff_snapshots(
         project=snapshot.project_root,
         before=snapshot.files,
@@ -181,48 +207,38 @@ def _read_json_object(path: Path) -> Mapping[str, Any] | None:
     return data if isinstance(data, Mapping) else None
 
 
-def _snapshot_out_of_boundary_files(watch_root: Path, boundary_root: Path) -> dict[str, Mapping[str, Any]]:
+def _snapshot_out_of_boundary_files(
+    watch_root: Path,
+    boundary_root: Path,
+) -> tuple[dict[str, Mapping[str, Any]], FileDiscoveryResult]:
     files: dict[str, Mapping[str, Any]] = {}
-    for path in _iter_out_of_boundary_files(watch_root, boundary_root):
+    discovery = _discover_out_of_boundary_files(watch_root, boundary_root)
+    for path in discovery.paths:
         fingerprint = _fingerprint(path)
         if fingerprint is not None:
             files[path.as_posix()] = fingerprint
-    return files
+    return files, discovery
 
 
-def _iter_out_of_boundary_files(watch_root: Path, boundary_root: Path) -> tuple[Path, ...]:
+def _discover_out_of_boundary_files(watch_root: Path, boundary_root: Path) -> FileDiscoveryResult:
     root = watch_root.resolve()
     boundary = boundary_root.resolve()
-    files: list[Path] = []
-    for current, dirnames, filenames in os.walk(root):
-        current_path = Path(current)
-        kept_dirs: list[str] = []
-        for dirname in dirnames:
-            if dirname in SKIPPED_WATCH_DIR_NAMES:
-                continue
-            child = current_path / dirname
-            try:
-                child_resolved = child.resolve()
-            except OSError:
-                continue
-            if _is_relative_to(child_resolved, boundary):
-                continue
-            kept_dirs.append(dirname)
-        dirnames[:] = kept_dirs
 
+    def inside_boundary(path: Path) -> bool:
         try:
-            current_resolved = current_path.resolve()
+            resolved = path.resolve()
         except OSError:
-            continue
-        if _is_relative_to(current_resolved, boundary):
-            continue
+            return False
+        return _is_relative_to(resolved, boundary)
 
-        for filename in filenames:
-            if filename in SKIPPED_WATCH_DIR_NAMES:
-                continue
-            candidate = current_path / filename
-            files.append(candidate)
-    return tuple(sorted(files, key=lambda item: item.as_posix()))
+    return discover_files_bounded(
+        (root,),
+        prune_directory_names=SKIPPED_WATCH_DIR_NAMES,
+        max_entries=BOUNDARY_SCAN_ENTRY_LIMIT,
+        max_matches=BOUNDARY_SCAN_MATCH_LIMIT,
+        max_depth=20,
+        exclude_path=inside_boundary,
+    )
 
 
 def _fingerprint(path: Path) -> Mapping[str, Any] | None:

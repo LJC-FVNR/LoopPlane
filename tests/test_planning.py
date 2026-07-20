@@ -11,12 +11,31 @@ from pathlib import Path
 
 from runtime.init_workflow import init_project
 from runtime.plan_objectives import DEFAULT_OBJECTIVE_MAX_EXPANSIONS
-from runtime.planning import activate_plan, inspect_plan_draft, run_auditor, run_plan_revision_loop, run_planner
+from runtime.planning import _workspace_tree, activate_plan, inspect_plan_draft, run_auditor, run_plan_revision_loop, run_planner
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 LoopPlane = REPO_ROOT / "scripts" / "loopplane"
 CLI_ADAPTER_FIXTURE_BIN = REPO_ROOT / "tests" / "fixtures" / "cli_adapters" / "bin"
+
+
+class PlanningWorkspaceTreeTest(unittest.TestCase):
+    def test_workspace_tree_prunes_canonical_workflow_results(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            source = project / "src" / "app.py"
+            source.parent.mkdir(parents=True)
+            source.write_text("VALUE = 1\n", encoding="utf-8")
+            generated = project / ".loopplane" / "workflows" / "wf_test" / "results" / "T001"
+            generated.mkdir(parents=True)
+            for index in range(100):
+                (generated / f"artifact_{index}.bin").write_bytes(b"generated")
+
+            tree = _workspace_tree(project, max_entries=20)
+
+            self.assertIn("src/app.py", tree)
+            self.assertNotIn("artifact_", tree)
+
 
 
 def install_cli_adapter_fixture_bin(root: Path) -> Path:

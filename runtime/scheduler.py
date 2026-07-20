@@ -60,6 +60,7 @@ from runtime.exit_codes import (
     EXIT_WAITING_BACKGROUND_JOB,
     has_text,
 )
+from runtime.file_discovery import discover_files_bounded
 from runtime.path_resolution import WorkflowPathError, WorkflowPaths, load_workflow_config
 from runtime.plan_objectives import (
     DEFAULT_OBJECTIVE_MAX_EXPANSIONS,
@@ -90,6 +91,26 @@ EMIT_ADAPTER_COMPLETED_EVENTS = False
 EVENTS_SEGMENT = "events_000001.jsonl"
 EVENTS_MANIFEST_FILENAME = "manifest.json"
 EVENT_PAYLOAD_SIDECAR_DIR = "event_payloads"
+SCHEDULER_WAIT_STATE_FILENAME = "scheduler_wait_state.json"
+SCHEDULER_WAIT_EVENT_REEMIT_SECONDS = 300
+_VALIDATION_COMPAT_SCAN_KEYS: set[str] = set()
+_BACKGROUND_STATUS_COMPAT_SCAN_KEYS: set[str] = set()
+VOLATILE_WAIT_SIGNATURE_KEYS = frozenset(
+    {
+        "created_at",
+        "ended_at",
+        "expires_at",
+        "heartbeat_at",
+        "heartbeat_count",
+        "last_checked_at",
+        "last_seen_at",
+        "lease_expires_at",
+        "next_retry_at",
+        "remaining_seconds",
+        "started_at",
+        "updated_at",
+    }
+)
 EVENT_PAYLOAD_SIDECAR_THRESHOLD_BYTES = 8192
 EVENT_SNAPSHOT_INTERVAL = 100
 COLLAPSIBLE_SCHEDULER_WAIT_ACTIONS = frozenset(
@@ -566,6 +587,7 @@ def run_scheduler(
         completion_snapshot = load_scheduler_snapshot(project)
         completion_selected = select_next_action(completion_snapshot)
         if completion_selected.get("action") == "complete":
+            _clear_scheduler_wait_state(context.paths)
             selected = completion_selected
             execution_result = execute_selected_action(
                 completion_snapshot,
@@ -577,7 +599,14 @@ def run_scheduler(
                 selected["execution_result"] = execution_result
                 selected["ok"] = bool(execution_result.get("ok", selected.get("ok", True)))
             status = "ok" if selected.get("ok", True) else "failed"
-            stopped = _scheduler_stop_summary(project, selected, ticks_requested=ticks, ticks_run=ticks_run)
+            stopped = _scheduler_stop_summary(
+                project,
+                selected,
+                ticks_requested=ticks,
+                ticks_run=ticks_run,
+                plan_file=context.paths.plan_file,
+                workflow_id=context.workflow_id,
+            )
             return {
                 "schema_version": SCHEMA_VERSION,
                 "ok": status == "ok",
@@ -601,7 +630,10 @@ def run_scheduler(
         for tick_index in range(ticks):
             held_lock.heartbeat()
             validation_failures = _ingest_failed_validations(context.paths, workflow_id=context.workflow_id)
-            snapshot = load_scheduler_snapshot(project)
+            if tick_index == 0 and not validation_failures:
+                snapshot = completion_snapshot
+            else:
+                snapshot = load_scheduler_snapshot(project)
             background_failures = _ingest_failed_background_jobs(
                 context.paths,
                 workflow_id=context.workflow_id,
@@ -619,6 +651,8 @@ def run_scheduler(
                 and not background_failures
                 and _is_collapsible_scheduler_wait_action(selected)
             )
+            if not collapse_wait_tick:
+                _clear_scheduler_wait_state(context.paths)
             if not collapse_wait_tick:
                 if not emitted_scheduler_started:
                     append_event(
@@ -685,23 +719,17 @@ def run_scheduler(
             action_history.append(_scheduler_action_history_entry(selected, tick_index=tick_index + 1))
             if collapse_wait_tick:
                 collapsed_wait_tick = True
-                append_event(
+                wait_event = _append_coalesced_scheduler_wait_event(
                     context.paths,
                     workflow_id=context.workflow_id,
-                    event_type="scheduler_wait_tick",
-                    data={
-                        "owner": owner,
-                        "action": selected_action_name,
-                        "status": _scheduler_wait_status_for_action(selected_action_name),
-                        "reason": selected.get("reason"),
-                        "selected": _json_safe_object(selected.get("selected", {})),
-                        "would_wait": selected.get("would_wait"),
-                        "blocking_conditions": list(selected.get("blocking_conditions") or []),
-                        "tick_index": tick_index + 1,
-                        "ticks": ticks,
-                        "ticks_run": ticks_run,
-                    },
+                    owner=owner,
+                    selected=selected,
+                    selected_action_name=selected_action_name,
+                    tick_index=tick_index + 1,
+                    ticks=ticks,
+                    ticks_run=ticks_run,
                 )
+                selected["wait_event_emitted"] = wait_event is not None
             if not _scheduler_should_continue_after_tick(
                 selected,
                 tick_index=tick_index,
@@ -716,7 +744,14 @@ def run_scheduler(
             and selected["execution_result"].get("pass") is True
         )
         completion_selected = selected is not None and selected.get("action") == "complete"
-        stopped = _scheduler_stop_summary(project, selected, ticks_requested=ticks, ticks_run=ticks_run)
+        stopped = _scheduler_stop_summary(
+            project,
+            selected,
+            ticks_requested=ticks,
+            ticks_run=ticks_run,
+            plan_file=context.paths.plan_file,
+            workflow_id=context.workflow_id,
+        )
         if not final_verification_completed and not completion_selected and not collapsed_wait_tick:
             append_event(
                 context.paths,
@@ -851,9 +886,15 @@ def _scheduler_stop_summary(
     *,
     ticks_requested: int,
     ticks_run: int,
+    plan_file: Path | None = None,
+    workflow_id: str | None = None,
 ) -> dict[str, Any]:
     selected_action = str(selected.get("action") or "") if isinstance(selected, Mapping) else ""
-    pending_tasks = _pending_task_count_after_run(project)
+    pending_tasks = _pending_task_count_after_run(
+        project,
+        plan_file=plan_file,
+        workflow_id=workflow_id,
+    )
     stopped_reason = "selected_action_terminal"
     hint: str | None = None
     if selected is None:
@@ -873,13 +914,28 @@ def _scheduler_stop_summary(
     }
 
 
-def _pending_task_count_after_run(project: Path) -> int:
+def _pending_task_count_after_run(
+    project: Path,
+    *,
+    plan_file: Path | None = None,
+    workflow_id: str | None = None,
+) -> int:
+    if plan_file is not None and plan_file.is_file():
+        try:
+            report = inspect_active_plan(plan_file, workflow_id=workflow_id)
+            return _pending_task_count_from_records(report.get("tasks", []))
+        except Exception:
+            pass
     try:
         snapshot = load_scheduler_snapshot(project)
     except Exception:
         return 0
+    return _pending_task_count_from_records(snapshot.get("tasks", []))
+
+
+def _pending_task_count_from_records(tasks: Any) -> int:
     count = 0
-    for task in snapshot.get("tasks", []):
+    for task in tasks if isinstance(tasks, Sequence) and not isinstance(tasks, (str, bytes)) else []:
         if not isinstance(task, Mapping):
             continue
         status = str(task.get("status") or " ")
@@ -2043,6 +2099,96 @@ def _auto_validate_and_reconcile_after_worker(result: dict[str, Any]) -> dict[st
     result["next_step"] = "needs_human" if validation_status == "needs_human" else "recovery_pending"
     result["status"] = "failed_validation" if validation_status != "needs_human" else "needs_human"
     return result
+
+
+def _append_coalesced_scheduler_wait_event(
+    paths: WorkflowPaths,
+    *,
+    workflow_id: str,
+    owner: str,
+    selected: Mapping[str, Any],
+    selected_action_name: str,
+    tick_index: int,
+    ticks: int,
+    ticks_run: int,
+) -> dict[str, Any] | None:
+    state_path = paths.runtime_dir / SCHEDULER_WAIT_STATE_FILENAME
+    semantic_payload = {
+        "action": selected_action_name,
+        "status": _scheduler_wait_status_for_action(selected_action_name),
+        "reason": selected.get("reason"),
+        "selected": _json_safe_object(selected.get("selected", {})),
+        "would_wait": selected.get("would_wait"),
+        "blocking_conditions": list(selected.get("blocking_conditions") or []),
+    }
+    signature_payload = {
+        "action": semantic_payload["action"],
+        "status": semantic_payload["status"],
+        "selected": _stable_wait_signature_value(semantic_payload["selected"]),
+        "would_wait": semantic_payload["would_wait"],
+        "blocking_conditions": semantic_payload["blocking_conditions"],
+    }
+    encoded = json.dumps(signature_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    signature = "sha256:" + sha256(encoded).hexdigest()
+    previous = _read_json_object(state_path, default={})
+    now = datetime.now(UTC)
+    previous_at = _parse_iso_timestamp(previous.get("last_emitted_at")) if isinstance(previous, Mapping) else None
+    unchanged = isinstance(previous, Mapping) and previous.get("signature") == signature
+    recently_emitted = (
+        previous_at is not None
+        and (now - previous_at).total_seconds() < SCHEDULER_WAIT_EVENT_REEMIT_SECONDS
+    )
+    if unchanged and recently_emitted:
+        return None
+
+    event = append_event(
+        paths,
+        workflow_id=workflow_id,
+        event_type="scheduler_wait_tick",
+        data={
+            "owner": owner,
+            **semantic_payload,
+            "tick_index": tick_index,
+            "ticks": ticks,
+            "ticks_run": ticks_run,
+            "coalesced": True,
+        },
+    )
+    _write_json_atomic_fsynced(
+        state_path,
+        {
+            "schema_version": SCHEMA_VERSION,
+            "workflow_id": workflow_id,
+            "signature": signature,
+            "action": selected_action_name,
+            "last_emitted_at": event.get("ts") or event.get("timestamp") or utc_timestamp(),
+            "last_event_id": event.get("event_id"),
+            "reemit_after_seconds": SCHEDULER_WAIT_EVENT_REEMIT_SECONDS,
+        },
+    )
+    return event
+
+
+def _stable_wait_signature_value(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {
+            str(key): _stable_wait_signature_value(item)
+            for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
+            if str(key) not in VOLATILE_WAIT_SIGNATURE_KEYS
+        }
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return [_stable_wait_signature_value(item) for item in value]
+    return value
+
+
+def _clear_scheduler_wait_state(paths: WorkflowPaths) -> None:
+    state_path = paths.runtime_dir / SCHEDULER_WAIT_STATE_FILENAME
+    try:
+        state_path.unlink()
+    except FileNotFoundError:
+        return
+    except OSError:
+        return
 
 
 def append_event(
@@ -3955,7 +4101,35 @@ def _load_runner_and_adapter(project: Path, runner_id: str | None) -> tuple[Runn
     runner_config = load_agent_runners(project).runner(runner_id)
     if not runner_config.enabled:
         raise AgentRunnerConfigError(f"runner {runner_config.runner_id!r} is disabled")
+    command_problem = _runner_command_preflight_problem(project, runner_config)
+    if command_problem is not None:
+        raise AgentRunnerConfigError(command_problem)
     return runner_config, get_adapter(runner_config.adapter)
+
+
+def _runner_command_preflight_problem(project: Path, runner_config: RunnerConfig) -> str | None:
+    command = str(runner_config.command or "").strip()
+    if not command:
+        return f"runner {runner_config.runner_id!r} command is empty"
+    env = dict(os.environ)
+    env.update({str(key): str(value) for key, value in runner_config.env.items()})
+    if os.path.isabs(command) or os.sep in command or (os.altsep and os.altsep in command):
+        candidate = Path(command).expanduser()
+        if not candidate.is_absolute():
+            candidate = _resolve_cwd(project, runner_config.cwd) / candidate
+        try:
+            usable = candidate.is_file() and os.access(candidate, os.X_OK)
+        except OSError:
+            usable = False
+        if not usable:
+            return (
+                f"runner {runner_config.runner_id!r} executable not found or not executable: "
+                f"{candidate}"
+            )
+        return None
+    if shutil.which(command, path=env.get("PATH")) is None:
+        return f"runner {runner_config.runner_id!r} executable not found on PATH: {command}"
+    return None
 
 
 def _adapter_input_for_prepared_run(
@@ -5097,10 +5271,22 @@ def _run_adapter_with_active_run_lease(
 
     thread = threading.Thread(target=run_adapter, name=f"loopplane-adapter-{prepared.run_id}", daemon=True)
     thread.start()
-    interval = min(max(0.01, float(heartbeat_interval_seconds)), 0.5)
+    # Respect the configured heartbeat cadence.  The previous upper clamp of
+    # 0.5 seconds turned the normal 30-second setting into two atomic lease
+    # rewrites per second (43k writes during a six-hour run).
+    interval = max(0.01, float(heartbeat_interval_seconds))
+    poll_interval = min(interval, 0.25)
+    next_heartbeat = time.monotonic() + interval
+    observed_child_pid: int | None = None
     while thread.is_alive():
-        thread.join(interval)
-        _refresh_active_run_lease(prepared, status="running", owner=owner, adapter_pid=os.getpid())
+        thread.join(poll_interval)
+        child_pid = _adapter_child_pid(prepared)
+        now = time.monotonic()
+        child_changed = child_pid is not None and child_pid != observed_child_pid
+        if child_changed or now >= next_heartbeat:
+            _refresh_active_run_lease(prepared, status="running", owner=owner, adapter_pid=os.getpid())
+            observed_child_pid = child_pid or observed_child_pid
+            next_heartbeat = now + interval
     error = result.get("error")
     if error is not None:
         raise error
@@ -6672,12 +6858,42 @@ def _update_failure_registry_locked(
 
 
 def _ingest_failed_validations(paths: WorkflowPaths, *, workflow_id: str) -> list[dict[str, Any]]:
+    validation_files: set[Path] = set()
+    # Latest pointers are the authoritative and cheapest path for normal runs.
+    task_entries: list[Path] = []
     try:
-        validation_files = sorted(path for path in paths.results_dir.glob("**/validation.json") if path.is_file())
+        for index, task_entry in enumerate(paths.results_dir.iterdir()):
+            if index >= 1_000:
+                break
+            task_entries.append(task_entry)
     except OSError:
-        return []
+        pass
+    for task_entry in task_entries:
+        latest = _read_json_object(task_entry / "latest.json", default={}) if task_entry.is_dir() else {}
+        raw_path = latest.get("validation_path") if isinstance(latest, Mapping) else None
+        if not isinstance(raw_path, str) or not raw_path.strip():
+            continue
+        candidate = Path(raw_path)
+        if not candidate.is_absolute():
+            candidate = paths.project_root / candidate
+        if candidate.is_file():
+            validation_files.add(candidate)
+    # Keep a bounded compatibility scan for validations produced outside the
+    # normal reconcile path.  Artifact/cache directories are pruned and the
+    # traversal cannot grow with an unbounded result tree.
+    compatibility_scan_key = f"{paths.project_root}:{workflow_id}"
+    if compatibility_scan_key not in _VALIDATION_COMPAT_SCAN_KEYS:
+        discovery = discover_files_bounded(
+            (paths.results_dir,),
+            names={"validation.json"},
+            max_entries=50_000,
+            max_matches=10_000,
+            max_depth=8,
+        )
+        validation_files.update(discovery.paths)
+        _VALIDATION_COMPAT_SCAN_KEYS.add(compatibility_scan_key)
     candidates: list[dict[str, Any]] = []
-    for validation_path in validation_files:
+    for validation_path in sorted(validation_files, key=lambda path: path.as_posix()):
         validation = _read_json_object(validation_path, default={})
         if not isinstance(validation, Mapping):
             continue
@@ -7870,6 +8086,10 @@ def _background_jobs_from_recent_agent_statuses(
     existing_jobs: Sequence[Mapping[str, Any]],
     now: datetime,
 ) -> list[dict[str, Any]]:
+    compatibility_scan_key = f"{paths.project_root}:{paths.workflow_id or ''}"
+    if compatibility_scan_key in _BACKGROUND_STATUS_COMPAT_SCAN_KEYS:
+        return []
+    _BACKGROUND_STATUS_COMPAT_SCAN_KEYS.add(compatibility_scan_key)
     existing_run_ids = {
         str(job.get("run_id") or "")
         for job in existing_jobs
@@ -7881,14 +8101,21 @@ def _background_jobs_from_recent_agent_statuses(
         if isinstance(job, Mapping) and str(job.get("job_id") or "")
     }
     inferred: list[dict[str, Any]] = []
-    try:
-        status_files = sorted(
-            (path for path in paths.results_dir.glob("**/agent_status.json") if path.is_file()),
-            key=lambda path: path.stat().st_mtime if path.exists() else 0,
-            reverse=True,
-        )[:20]
-    except OSError:
-        return inferred
+    discovery = discover_files_bounded(
+        (paths.results_dir,),
+        names={"agent_status.json"},
+        max_entries=20_000,
+        max_matches=1_000,
+        max_depth=8,
+    )
+
+    def modified_at(path: Path) -> float:
+        try:
+            return path.stat().st_mtime
+        except OSError:
+            return 0.0
+
+    status_files = sorted(discovery.paths, key=modified_at, reverse=True)[:20]
     for status_path in status_files:
         status_record = _read_json_object(status_path, default={})
         if not isinstance(status_record, Mapping):

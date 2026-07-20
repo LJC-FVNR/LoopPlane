@@ -9,11 +9,30 @@ from pathlib import Path
 
 from runtime.init_workflow import init_project
 from runtime.path_resolution import WorkflowPaths, load_workflow_config
-from runtime.validation import run_validator
+from runtime.validation import collect_run_inputs, run_validator
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 LoopPlane = REPO_ROOT / "scripts" / "loopplane"
+
+
+class ValidationInputDiscoveryTest(unittest.TestCase):
+    def test_collect_run_inputs_prunes_artifact_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            run_dir = project / "run"
+            artifact = run_dir / "artifacts" / "result.json"
+            artifact.parent.mkdir(parents=True)
+            artifact.write_text("{}\n", encoding="utf-8")
+            cache = artifact.parent / "cache"
+            cache.mkdir()
+            for index in range(100):
+                (cache / f"shard_{index}.bin").write_bytes(b"cache")
+
+            inputs = collect_run_inputs(project, run_dir)
+
+            self.assertIn(artifact, inputs)
+            self.assertFalse(any(cache in path.parents for path in inputs))
 
 
 def set_runner_enabled(project: Path, runner_id: str, enabled: bool) -> None:

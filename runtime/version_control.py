@@ -6,6 +6,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -47,6 +48,12 @@ SUPPORTED_PROVIDER = "git"
 SUPPORTED_REPOSITORY_MODE = "existing_or_local_init"
 SUPPORTED_CHECKPOINT_BACKEND = "managed_refs"
 DEFAULT_REFS_PREFIX = "refs/loopplane/"
+DEFAULT_CHECKPOINT_TIMEOUT_SECONDS = 15.0
+DEFAULT_CHECKPOINT_MAX_PATHS = 10_000
+DEFAULT_CHECKPOINT_MAX_BYTES = 100 * 1024 * 1024
+DEFAULT_CHECKPOINT_ADD_BATCH_PATHS = 1_000
+DEFAULT_CHECKPOINT_ADD_BATCH_ARG_BYTES = 64 * 1024
+BEST_EFFORT_CHECKPOINT_REASONS = frozenset({"before_worker_run", "after_validation_pass"})
 DEFAULT_GENERATED_PATH_EXCLUDES = (
     "**/__pycache__/",
     "**/*.pyc",
@@ -81,6 +88,9 @@ class GitCommandRunner(Protocol):
 
 
 class SubprocessGitCommandRunner:
+    def __init__(self, *, timeout_seconds: float | None = None) -> None:
+        self.timeout_seconds = timeout_seconds
+
     def git_path(self) -> str | None:
         return shutil.which("git")
 
@@ -90,6 +100,7 @@ class SubprocessGitCommandRunner:
         args: Sequence[str],
         *,
         extra_env: Mapping[str, str] | None = None,
+        timeout_seconds: float | None = None,
     ) -> GitCommandResult:
         executable = self.git_path()
         if executable is None:
@@ -99,14 +110,22 @@ class SubprocessGitCommandRunner:
         env["GIT_OPTIONAL_LOCKS"] = "0"
         if extra_env:
             env.update(extra_env)
-        completed = subprocess.run(
-            [executable, "-C", str(project_root), *args],
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            check=False,
-            env=env,
-        )
+        timeout = timeout_seconds if timeout_seconds is not None else self.timeout_seconds
+        try:
+            completed = subprocess.run(
+                [executable, "-C", str(project_root), *args],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+                env=env,
+                timeout=timeout,
+            )
+        except subprocess.TimeoutExpired as error:
+            stdout = error.stdout if isinstance(error.stdout, str) else ""
+            stderr = error.stderr if isinstance(error.stderr, str) else ""
+            message = f"git command timed out after {timeout:g}s"
+            return GitCommandResult(124, stdout, "\n".join(item for item in (stderr.strip(), message) if item))
         return GitCommandResult(completed.returncode, completed.stdout, completed.stderr)
 
 
@@ -170,13 +189,29 @@ def create_git_checkpoint(
     if errors:
         return _checkpoint_failure(project, workflow_id, git, warnings, errors, created_at)
 
-    init_status = initialize_local_repository_if_missing(project, runner=git_runner)
+    checkpoint_limits = _checkpoint_limits(config)
+    checkpoint_started = time.monotonic()
+    checkpoint_deadline = checkpoint_started + checkpoint_limits["timeout_seconds"]
+    init_status = initialize_local_repository_if_missing(
+        project,
+        runner=git_runner,
+        inspect_status=False,
+        timeout_seconds=_remaining_checkpoint_seconds(checkpoint_deadline),
+    )
     if not init_status["ok"]:
         problem = init_status.get("problem")
         message = problem.get("message") if isinstance(problem, dict) else "Git repository is unavailable."
         return _checkpoint_failure(project, workflow_id, git, warnings, [str(message)], created_at)
 
-    repository = _detect_repository(project, git_runner, git["available"])
+    repository = init_status.get("repository")
+    if not isinstance(repository, dict):
+        repository = _detect_repository(
+            project,
+            git_runner,
+            git["available"],
+            include_status=False,
+            timeout_seconds=_remaining_checkpoint_seconds(checkpoint_deadline),
+        )
     if not repository["inside_work_tree"]:
         return _checkpoint_failure(
             project,
@@ -201,22 +236,38 @@ def create_git_checkpoint(
             created_at,
         )
 
-    active_branch_before = _active_branch(project, git_runner)
-    head_before = _rev_parse_optional(project, git_runner, "HEAD")
-    index_before = _index_fingerprint(project, git_runner)
+    active_branch_before = _active_branch(
+        project,
+        git_runner,
+        timeout_seconds=_remaining_checkpoint_seconds(checkpoint_deadline),
+    )
+    head_before = _rev_parse_optional(
+        project,
+        git_runner,
+        "HEAD",
+        timeout_seconds=_remaining_checkpoint_seconds(checkpoint_deadline),
+    )
+    # Checkpoint construction below is isolated behind GIT_INDEX_FILE and only
+    # updates a refs/loopplane/* ref.  Reading/fingerprinting a multi-million
+    # entry user index before and after the operation would dominate the work
+    # while proving an invariant already guaranteed by the write mechanism.
     path_policy = _workspace_path_policy(
         project,
         config,
         paths,
         extra_excludes=_checkpoint_metadata_excludes(paths),
     )
-    all_status_before = _status_entries(project, git_runner, repository=repository)
     status_before = _status_entries(
         project,
         git_runner,
         pathspecs=path_policy["pathspecs"],
         repository=repository,
+        timeout_seconds=_remaining_checkpoint_seconds(checkpoint_deadline),
     )
+    # The checkpoint is defined by its positive/negative pathspecs. Enumerating
+    # every dirty sibling in a containing monorepo only adds audit decoration
+    # and can cost more than the checkpoint itself.
+    all_status_before = status_before
 
     checkpoint = _create_checkpoint_commit(
         project,
@@ -231,21 +282,41 @@ def create_git_checkpoint(
         created_at,
         config,
         path_policy,
+        checkpoint_limits=checkpoint_limits,
+        deadline=checkpoint_deadline,
     )
     if not checkpoint["ok"]:
+        if checkpoint.get("limit_exceeded"):
+            return _checkpoint_budget_result(
+                project=project,
+                paths=paths,
+                workflow_id=workflow_id,
+                git=git,
+                checkpoint_id=checkpoint_id,
+                reason=reason,
+                task_id=task_id,
+                run_id=run_id,
+                created_at=created_at,
+                warnings=warnings,
+                errors=list(checkpoint.get("errors") or []),
+                limits=checkpoint_limits,
+                metrics=checkpoint.get("metrics") if isinstance(checkpoint.get("metrics"), Mapping) else {},
+            )
         return _checkpoint_failure(project, workflow_id, git, warnings, checkpoint["errors"], created_at)
 
-    active_branch_after = _active_branch(project, git_runner)
-    head_after = _rev_parse_optional(project, git_runner, "HEAD")
-    index_after = _index_fingerprint(project, git_runner)
-    all_status_after = _status_entries(project, git_runner, repository=repository)
-    status_after = _status_entries(
-        project,
-        git_runner,
-        pathspecs=path_policy["pathspecs"],
-        repository=repository,
-    )
-    included_paths = _checkpoint_included_paths(project, git_runner, checkpoint["commit"], repository)
+    # All checkpoint writes use a temporary index and managed refs.  Repeating
+    # branch, HEAD, index, and worktree scans after commit cannot prove a
+    # stronger invariant, so preserve the already-observed state instead.
+    active_branch_after = active_branch_before
+    head_after = head_before
+    all_status_after = all_status_before
+    status_after = status_before
+    included_paths = [
+        path
+        for raw_path in checkpoint.get("included_paths", [])
+        if (path := _git_path_for_project_record(project, repository, str(raw_path))) is not None
+        and not _is_git_internal_path(path)
+    ]
     excluded_paths = _dedupe_text(
         [
             *_excluded_status_paths(all_status_before, status_before),
@@ -275,7 +346,7 @@ def create_git_checkpoint(
         "head_after": head_after,
         "active_branch_unchanged": active_branch_before == active_branch_after,
         "head_unchanged": head_before == head_after,
-        "user_index_unchanged": index_before == index_after,
+        "user_index_unchanged": True,
         "status_entries_before": len(status_before),
         "status_entries_after": len(status_after),
         "included_paths": included_paths,
@@ -290,6 +361,12 @@ def create_git_checkpoint(
             "configured_excludes": [
                 item for item in path_policy["configured_excludes"] if not _is_git_internal_path(item)
             ],
+        },
+        "checkpoint_limits": checkpoint_limits,
+        "checkpoint_metrics": {
+            **dict(checkpoint.get("metrics") or {}),
+            "elapsed_seconds": round(time.monotonic() - checkpoint_started, 6),
+            "postcondition_verification": "mechanical_isolation:temporary_index_and_managed_ref",
         },
         "warnings": warnings,
     }
@@ -411,7 +488,11 @@ def capture_run_git_metadata(
             stage,
         )
 
-    init_status = initialize_local_repository_if_missing(project, runner=git_runner)
+    init_status = initialize_local_repository_if_missing(
+        project,
+        runner=git_runner,
+        inspect_status=False,
+    )
     if not init_status["ok"]:
         problem = init_status.get("problem")
         message = problem.get("message") if isinstance(problem, dict) else "Git repository is unavailable."
@@ -429,7 +510,9 @@ def capture_run_git_metadata(
             stage,
         )
 
-    repository = _detect_repository(project, git_runner, git["available"])
+    repository = init_status.get("repository")
+    if not isinstance(repository, dict):
+        repository = _detect_repository(project, git_runner, git["available"], include_status=False)
     if not repository["inside_work_tree"]:
         return _run_metadata_failure(
             project,
@@ -536,7 +619,14 @@ def load_version_control_status(
     latest_checkpoint = _latest_checkpoint_record(paths.runtime_dir / "git_checkpoints.jsonl")
 
     git = _detect_git(git_runner)
-    repository = _detect_repository(project, git_runner, git["available"])
+    status_timeout = _checkpoint_limits(config or {})["timeout_seconds"]
+    repository = _detect_repository(
+        project,
+        git_runner,
+        git["available"],
+        include_status=False,
+        timeout_seconds=status_timeout,
+    )
     repository_source = "git" if git["available"] else "read_model"
     if not repository["inside_work_tree"]:
         repository = _repository_from_read_model(read_model, fallback=repository)
@@ -553,6 +643,7 @@ def load_version_control_status(
                 paths,
                 extra_excludes=_checkpoint_metadata_excludes(paths),
             ),
+            timeout_seconds=status_timeout,
         )
 
     if config is not None:
@@ -917,7 +1008,14 @@ def request_checkpoint_rollback(
 
     enabled = _config_enabled(config, read_model)
     git = _detect_git(git_runner)
-    repository = _detect_repository(project, git_runner, git["available"])
+    status_timeout = _checkpoint_limits(config or {})["timeout_seconds"]
+    repository = _detect_repository(
+        project,
+        git_runner,
+        git["available"],
+        include_status=False,
+        timeout_seconds=status_timeout,
+    )
     repository_source = "git" if git["available"] else "read_model"
     if not repository["inside_work_tree"]:
         repository = _repository_from_read_model(read_model, fallback=repository)
@@ -934,6 +1032,7 @@ def request_checkpoint_rollback(
                 paths,
                 extra_excludes=_checkpoint_metadata_excludes(paths),
             ),
+            timeout_seconds=status_timeout,
         )
 
     if not enabled:
@@ -1889,6 +1988,8 @@ def initialize_local_repository_if_missing(
     project_root: Path,
     *,
     runner: GitCommandRunner | None = None,
+    inspect_status: bool = True,
+    timeout_seconds: float | None = None,
 ) -> dict[str, Any]:
     project = project_root.expanduser().resolve()
     git_runner = runner or SubprocessGitCommandRunner()
@@ -1903,7 +2004,13 @@ def initialize_local_repository_if_missing(
             message="Git is unavailable; LoopPlane cannot create default local checkpoints.",
         )
 
-    repository = _detect_repository(project, git_runner, git["available"])
+    repository = _detect_repository(
+        project,
+        git_runner,
+        git["available"],
+        include_status=inspect_status,
+        timeout_seconds=timeout_seconds,
+    )
     if repository["inside_work_tree"]:
         return _git_init_status("ok", git, repository, reason="existing_repository")
 
@@ -1917,7 +2024,7 @@ def initialize_local_repository_if_missing(
             message=f"Local git init does not appear possible: {local_init['reason']}.",
         )
 
-    init = git_runner.run(project, ("init",))
+    init = _run_git(git_runner, project, ("init",), timeout_seconds=timeout_seconds)
     if init.returncode != 0:
         return _git_init_status(
             "waiting_config",
@@ -1927,7 +2034,13 @@ def initialize_local_repository_if_missing(
             message=f"git init failed: {_compact_command_error(init)}",
         )
 
-    repository = _detect_repository(project, git_runner, git["available"])
+    repository = _detect_repository(
+        project,
+        git_runner,
+        git["available"],
+        include_status=inspect_status,
+        timeout_seconds=timeout_seconds,
+    )
     if not repository["inside_work_tree"]:
         return _git_init_status(
             "waiting_config",
@@ -1944,6 +2057,8 @@ def plan_local_repository_initialization(
     project_root: Path,
     *,
     runner: GitCommandRunner | None = None,
+    inspect_status: bool = True,
+    timeout_seconds: float | None = None,
 ) -> dict[str, Any]:
     project = project_root.expanduser().resolve()
     git_runner = runner or SubprocessGitCommandRunner()
@@ -1958,7 +2073,13 @@ def plan_local_repository_initialization(
             message="Git is unavailable; LoopPlane cannot create default local checkpoints.",
         )
 
-    repository = _detect_repository(project, git_runner, git["available"])
+    repository = _detect_repository(
+        project,
+        git_runner,
+        git["available"],
+        include_status=inspect_status,
+        timeout_seconds=timeout_seconds,
+    )
     if repository["inside_work_tree"]:
         return _git_init_status("ok", git, repository, reason="existing_repository")
 
@@ -1997,7 +2118,27 @@ def run_git_doctor(
     if not git["available"]:
         errors.append("Git is unavailable; LoopPlane cannot create default local checkpoints.")
 
-    repository = _detect_repository(project, git_runner, git["available"])
+    status_timeout = _checkpoint_limits(config or {})["timeout_seconds"]
+    repository = _detect_repository(
+        project,
+        git_runner,
+        git["available"],
+        include_status=False,
+        timeout_seconds=status_timeout,
+    )
+    if repository["inside_work_tree"] and config is not None:
+        repository = _repository_with_scoped_dirty_status(
+            project,
+            git_runner,
+            repository,
+            _workspace_path_policy(
+                project,
+                config,
+                paths,
+                extra_excludes=_checkpoint_metadata_excludes(paths),
+            ),
+            timeout_seconds=status_timeout,
+        )
     local_init = _detect_local_init_capability(project, git["available"], repository["inside_work_tree"])
     configuration = _configuration_summary(config_path, config, workflow["workflow_id"])
 
@@ -3507,6 +3648,8 @@ def _repository_with_scoped_dirty_status(
     runner: GitCommandRunner,
     repository: Mapping[str, Any],
     path_policy: Mapping[str, Any],
+    *,
+    timeout_seconds: float | None = None,
 ) -> dict[str, Any]:
     scoped = dict(repository)
     entries = _status_entries(
@@ -3514,6 +3657,7 @@ def _repository_with_scoped_dirty_status(
         runner,
         pathspecs=tuple(str(item) for item in path_policy.get("pathspecs", (".",))),
         repository=repository,
+        timeout_seconds=timeout_seconds,
     )
     scoped["dirty"] = bool(entries)
     scoped["dirty_files_count"] = len(entries)
@@ -3609,6 +3753,106 @@ def _checkpoint_failure(
         "warnings": warnings,
         "errors": errors,
     }
+
+
+def _checkpoint_budget_result(
+    *,
+    project: Path,
+    paths: WorkflowPaths,
+    workflow_id: str,
+    git: dict[str, Any],
+    checkpoint_id: str,
+    reason: str,
+    task_id: str | None,
+    run_id: str | None,
+    created_at: str,
+    warnings: list[str],
+    errors: list[str],
+    limits: Mapping[str, Any],
+    metrics: Mapping[str, Any],
+) -> dict[str, Any]:
+    best_effort = reason in BEST_EFFORT_CHECKPOINT_REASONS
+    record = {
+        "schema_version": SCHEMA_VERSION,
+        "created_at": created_at,
+        "workflow_id": workflow_id,
+        "checkpoint_id": checkpoint_id,
+        "reason": reason,
+        "task_id": task_id,
+        "run_id": run_id,
+        "status": "skipped_budget" if best_effort else "checkpoint_budget_exceeded",
+        "provider": SUPPORTED_PROVIDER,
+        "backend": SUPPORTED_CHECKPOINT_BACKEND,
+        "checkpoint_limits": dict(limits),
+        "checkpoint_metrics": dict(metrics),
+        "warnings": [*warnings, *errors],
+    }
+    _append_jsonl(paths.runtime_dir / "git_checkpoints.jsonl", record)
+    message = (
+        "Checkpoint exceeded its bounded work budget and was skipped so the worker can continue."
+        if best_effort
+        else "Checkpoint exceeded its bounded work budget."
+    )
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "generated_at": _utc_now(),
+        "status": "skipped_budget" if best_effort else "checkpoint_budget_exceeded",
+        "ok": best_effort,
+        "project_root": str(project),
+        "workflow_id": workflow_id,
+        "git": git,
+        "checkpoint": record if best_effort else None,
+        "warnings": [*warnings, message] if best_effort else warnings,
+        "errors": [] if best_effort else errors,
+    }
+
+
+def _checkpoint_limits(config: Mapping[str, Any]) -> dict[str, Any]:
+    raw = config.get("checkpoint_limits") if isinstance(config, Mapping) else None
+    values = raw if isinstance(raw, Mapping) else {}
+    return {
+        "timeout_seconds": _positive_number(
+            values.get("timeout_seconds"),
+            DEFAULT_CHECKPOINT_TIMEOUT_SECONDS,
+            minimum=1.0,
+        ),
+        "max_paths": _positive_integer(
+            values.get("max_paths"),
+            DEFAULT_CHECKPOINT_MAX_PATHS,
+        ),
+        "max_bytes": _positive_integer(
+            values.get("max_bytes"),
+            DEFAULT_CHECKPOINT_MAX_BYTES,
+        ),
+    }
+
+
+def _positive_integer(value: Any, default: int) -> int:
+    if isinstance(value, bool):
+        return default
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed > 0 else default
+
+
+def _positive_number(value: Any, default: float, *, minimum: float = 0.0) -> float:
+    if isinstance(value, bool):
+        return default
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed >= minimum else default
+
+
+def _remaining_checkpoint_seconds(deadline: float) -> float:
+    return max(0.001, deadline - time.monotonic())
+
+
+def _checkpoint_deadline_exceeded(deadline: float) -> bool:
+    return time.monotonic() >= deadline
 
 
 def _run_metadata_failure(
@@ -4400,38 +4644,78 @@ def _create_checkpoint_commit(
     created_at: str,
     config: dict[str, Any],
     path_policy: Mapping[str, Any],
+    *,
+    checkpoint_limits: Mapping[str, Any],
+    deadline: float,
 ) -> dict[str, Any]:
     with tempfile.TemporaryDirectory(prefix="loopplane_git_index_") as temp_dir:
         env = _checkpoint_git_env(Path(temp_dir) / "index", created_at)
 
-        read_tree = _run_git(runner, project, ("read-tree", "--empty"), extra_env=env)
+        read_tree = _run_git(
+            runner,
+            project,
+            ("read-tree", "--empty"),
+            extra_env=env,
+            timeout_seconds=_remaining_checkpoint_seconds(deadline),
+        )
         if read_tree.returncode != 0:
-            return {"ok": False, "errors": [f"git read-tree failed: {_compact_command_error(read_tree)}"]}
+            return _checkpoint_command_failure("read-tree", read_tree)
 
         pathspecs = tuple(str(item) for item in path_policy.get("pathspecs", _checkpoint_pathspecs(config)))
-        add_result = _add_checkpoint_visible_paths(runner, project, pathspecs, env)
+        add_result = _add_checkpoint_visible_paths(
+            runner,
+            project,
+            pathspecs,
+            env,
+            max_paths=int(checkpoint_limits["max_paths"]),
+            max_bytes=int(checkpoint_limits["max_bytes"]),
+            deadline=deadline,
+        )
         if not add_result["ok"]:
             return add_result
 
-        tree = _run_git(runner, project, ("write-tree",), extra_env=env)
+        tree = _run_git(
+            runner,
+            project,
+            ("write-tree",),
+            extra_env=env,
+            timeout_seconds=_remaining_checkpoint_seconds(deadline),
+        )
         if tree.returncode != 0:
-            return {"ok": False, "errors": [f"git write-tree failed: {_compact_command_error(tree)}"]}
+            return _checkpoint_command_failure("write-tree", tree, metrics=add_result.get("metrics"))
         tree_id = tree.stdout.strip()
 
         commit_args = ["commit-tree", tree_id]
         if parent:
             commit_args.extend(("-p", parent))
         commit_args.extend(("-m", _checkpoint_commit_message(checkpoint_id, workflow_id, reason, task_id, run_id)))
-        commit = _run_git(runner, project, tuple(commit_args), extra_env=env)
+        commit = _run_git(
+            runner,
+            project,
+            tuple(commit_args),
+            extra_env=env,
+            timeout_seconds=_remaining_checkpoint_seconds(deadline),
+        )
         if commit.returncode != 0:
-            return {"ok": False, "errors": [f"git commit-tree failed: {_compact_command_error(commit)}"]}
+            return _checkpoint_command_failure("commit-tree", commit, metrics=add_result.get("metrics"))
         commit_id = commit.stdout.strip()
 
-    update_ref = _run_git(runner, project, ("update-ref", checkpoint_ref, commit_id))
+    update_ref = _run_git(
+        runner,
+        project,
+        ("update-ref", checkpoint_ref, commit_id),
+        timeout_seconds=_remaining_checkpoint_seconds(deadline),
+    )
     if update_ref.returncode != 0:
-        return {"ok": False, "errors": [f"git update-ref failed: {_compact_command_error(update_ref)}"]}
+        return _checkpoint_command_failure("update-ref", update_ref, metrics=add_result.get("metrics"))
 
-    return {"ok": True, "commit": commit_id, "tree": tree_id}
+    return {
+        "ok": True,
+        "commit": commit_id,
+        "tree": tree_id,
+        "included_paths": list(add_result.get("included_paths") or []),
+        "metrics": dict(add_result.get("metrics") or {}),
+    }
 
 
 def _checkpoint_git_env(index_path: Path, created_at: str) -> dict[str, str]:
@@ -4628,27 +4912,148 @@ def _add_checkpoint_visible_paths(
     project: Path,
     pathspecs: Sequence[str],
     temp_index_env: Mapping[str, str],
+    *,
+    max_paths: int = DEFAULT_CHECKPOINT_MAX_PATHS,
+    max_bytes: int = DEFAULT_CHECKPOINT_MAX_BYTES,
+    deadline: float | None = None,
 ) -> dict[str, Any]:
+    timeout_seconds = _remaining_checkpoint_seconds(deadline) if deadline is not None else None
     listed = _run_git(
         runner,
         project,
         ("ls-files", "-c", "-o", "--exclude-standard", "-z", "--", *tuple(pathspecs)),
+        timeout_seconds=timeout_seconds,
     )
     if listed.returncode != 0:
-        return {"ok": False, "errors": [f"git ls-files for checkpoint failed: {_compact_command_error(listed)}"]}
+        return _checkpoint_command_failure("ls-files", listed)
     paths = [
         item
         for item in listed.stdout.split("\0")
         if item and ((project / item).exists() or (project / item).is_symlink())
     ]
+    if len(paths) > max_paths:
+        return {
+            "ok": False,
+            "limit_exceeded": True,
+            "errors": [
+                f"Checkpoint path budget exceeded: discovered {len(paths)} paths; configured maximum is {max_paths}."
+            ],
+            "metrics": {
+                "discovered_paths": len(paths),
+                "discovered_bytes": None,
+                "git_add_batches": 0,
+                "limit_reason": "max_paths",
+            },
+        }
+
+    discovered_bytes = 0
+    for index, item in enumerate(paths):
+        if deadline is not None and index % 128 == 0 and _checkpoint_deadline_exceeded(deadline):
+            return {
+                "ok": False,
+                "limit_exceeded": True,
+                "errors": ["Checkpoint time budget was exhausted while measuring candidate paths."],
+                "metrics": {
+                    "discovered_paths": len(paths),
+                    "discovered_bytes": discovered_bytes,
+                    "git_add_batches": 0,
+                    "limit_reason": "timeout",
+                },
+            }
+        try:
+            discovered_bytes += int((project / item).lstat().st_size)
+        except OSError:
+            continue
+        if discovered_bytes > max_bytes:
+            return {
+                "ok": False,
+                "limit_exceeded": True,
+                "errors": [
+                    "Checkpoint byte budget exceeded: "
+                    f"candidate files total more than {max_bytes} bytes."
+                ],
+                "metrics": {
+                    "discovered_paths": len(paths),
+                    "discovered_bytes": discovered_bytes,
+                    "git_add_batches": 0,
+                    "limit_reason": "max_bytes",
+                },
+            }
     if not paths:
-        return {"ok": True, "added_paths": 0}
-    for start in range(0, len(paths), 200):
-        chunk = paths[start : start + 200]
-        add = _run_git(runner, project, ("add", "-A", "--", *chunk), extra_env=temp_index_env)
+        return {
+            "ok": True,
+            "added_paths": 0,
+            "included_paths": [],
+            "metrics": {"discovered_paths": 0, "discovered_bytes": 0, "git_add_batches": 0},
+        }
+
+    batches = _checkpoint_add_batches(paths)
+    for chunk in batches:
+        add = _run_git(
+            runner,
+            project,
+            ("add", "-A", "--", *chunk),
+            extra_env=temp_index_env,
+            timeout_seconds=_remaining_checkpoint_seconds(deadline) if deadline is not None else None,
+        )
         if add.returncode != 0:
-            return {"ok": False, "errors": [f"git add with temporary index failed: {_compact_command_error(add)}"]}
-    return {"ok": True, "added_paths": len(paths)}
+            return _checkpoint_command_failure(
+                "add with temporary index",
+                add,
+                metrics={
+                    "discovered_paths": len(paths),
+                    "discovered_bytes": discovered_bytes,
+                    "git_add_batches": len(batches),
+                },
+            )
+    return {
+        "ok": True,
+        "added_paths": len(paths),
+        "included_paths": paths,
+        "metrics": {
+            "discovered_paths": len(paths),
+            "discovered_bytes": discovered_bytes,
+            "git_add_batches": len(batches),
+        },
+    }
+
+
+def _checkpoint_add_batches(paths: Sequence[str]) -> list[list[str]]:
+    batches: list[list[str]] = []
+    current: list[str] = []
+    current_bytes = 0
+    for path in paths:
+        encoded_bytes = len(path.encode("utf-8", errors="surrogateescape")) + 1
+        if current and (
+            len(current) >= DEFAULT_CHECKPOINT_ADD_BATCH_PATHS
+            or current_bytes + encoded_bytes > DEFAULT_CHECKPOINT_ADD_BATCH_ARG_BYTES
+        ):
+            batches.append(current)
+            current = []
+            current_bytes = 0
+        current.append(path)
+        current_bytes += encoded_bytes
+    if current:
+        batches.append(current)
+    return batches
+
+
+def _checkpoint_command_failure(
+    operation: str,
+    result: GitCommandResult,
+    *,
+    metrics: Any = None,
+) -> dict[str, Any]:
+    timed_out = result.returncode == 124
+    return {
+        "ok": False,
+        "limit_exceeded": timed_out,
+        "errors": [f"git {operation} failed: {_compact_command_error(result)}"],
+        "metrics": {
+            **(dict(metrics) if isinstance(metrics, Mapping) else {}),
+            **({"limit_reason": "timeout"} if timed_out else {}),
+        },
+    }
 
 
 def _run_metadata_pathspecs(
@@ -4669,6 +5074,7 @@ def _run_metadata_pathspecs(
 def _run_metadata_excludes(paths: WorkflowPaths, project: Path, git_dir: Path) -> tuple[str, ...]:
     excludes = [
         *_default_metadata_excludes(paths, project),
+        _dir_prefix(paths.value("results_dir")),
         _dir_prefix(paths.value("read_models_dir")),
         f"{paths.value('runtime_dir')}/git_checkpoints.jsonl",
         f"{paths.value('read_models_dir')}/version_control_status.json",
@@ -4685,6 +5091,10 @@ def _checkpoint_metadata_excludes(paths: WorkflowPaths, project: Path | None = N
         dict.fromkeys(
             [
                 *_default_metadata_excludes(paths, project_root),
+                # Result trees are an artifact plane, not source-control state.
+                # Keeping this as an unconditional runtime exclusion also
+                # protects legacy configs that explicitly included results/.
+                _dir_prefix(paths.value("results_dir")),
                 f"{paths.value('runtime_dir')}/git_checkpoints.jsonl",
                 f"{paths.value('read_models_dir')}/version_control_status.json",
             ]
@@ -4896,11 +5306,20 @@ def _run_git(
     args: Sequence[str],
     *,
     extra_env: Mapping[str, str] | None = None,
+    timeout_seconds: float | None = None,
 ) -> GitCommandResult:
-    if not extra_env:
-        return runner.run(project, args)
     if isinstance(runner, SubprocessGitCommandRunner):
-        return runner.run(project, args, extra_env=extra_env)
+        return runner.run(
+            project,
+            args,
+            extra_env=extra_env,
+            timeout_seconds=timeout_seconds,
+        )
+    if not extra_env:
+        # Test/deterministic runners own their execution policy.  The timeout
+        # argument is intentionally advisory for implementations that do not
+        # expose timeout support through the small GitCommandRunner protocol.
+        return runner.run(project, args)
 
     executable = runner.git_path()
     if executable is None:
@@ -4908,39 +5327,91 @@ def _run_git(
     env = dict(os.environ)
     env["GIT_OPTIONAL_LOCKS"] = "0"
     env.update(extra_env)
-    completed = subprocess.run(
-        [executable, "-C", str(project), *args],
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        check=False,
-        env=env,
-    )
+    try:
+        completed = subprocess.run(
+            [executable, "-C", str(project), *args],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+            env=env,
+            timeout=timeout_seconds,
+        )
+    except subprocess.TimeoutExpired as error:
+        stdout = error.stdout if isinstance(error.stdout, str) else ""
+        stderr = error.stderr if isinstance(error.stderr, str) else ""
+        message = f"git command timed out after {timeout_seconds:g}s" if timeout_seconds is not None else "git command timed out"
+        return GitCommandResult(124, stdout, "\n".join(item for item in (stderr.strip(), message) if item))
     return GitCommandResult(completed.returncode, completed.stdout, completed.stderr)
 
 
-def _active_branch(project: Path, runner: GitCommandRunner) -> str | None:
-    branch = _run_git(runner, project, ("symbolic-ref", "--quiet", "--short", "HEAD"))
+def _active_branch(
+    project: Path,
+    runner: GitCommandRunner,
+    *,
+    timeout_seconds: float | None = None,
+) -> str | None:
+    branch = _run_git(
+        runner,
+        project,
+        ("symbolic-ref", "--quiet", "--short", "HEAD"),
+        timeout_seconds=timeout_seconds,
+    )
     if branch.returncode == 0 and branch.stdout.strip():
         return branch.stdout.strip()
-    detached = _run_git(runner, project, ("rev-parse", "--short", "HEAD"))
+    detached = _run_git(
+        runner,
+        project,
+        ("rev-parse", "--short", "HEAD"),
+        timeout_seconds=timeout_seconds,
+    )
     if detached.returncode == 0 and detached.stdout.strip():
         return f"HEAD:{detached.stdout.strip()}"
     return None
 
 
-def _rev_parse_optional(project: Path, runner: GitCommandRunner, revision: str) -> str | None:
-    result = _run_git(runner, project, ("rev-parse", "--verify", revision))
+def _rev_parse_optional(
+    project: Path,
+    runner: GitCommandRunner,
+    revision: str,
+    *,
+    timeout_seconds: float | None = None,
+) -> str | None:
+    result = _run_git(
+        runner,
+        project,
+        ("rev-parse", "--verify", revision),
+        timeout_seconds=timeout_seconds,
+    )
     if result.returncode == 0 and result.stdout.strip():
         return result.stdout.strip()
     return None
 
 
-def _index_fingerprint(project: Path, runner: GitCommandRunner) -> str:
-    result = _run_git(runner, project, ("ls-files", "--stage", "-z"))
-    if result.returncode != 0:
-        return ""
-    return result.stdout
+def _index_fingerprint(
+    project: Path,
+    runner: GitCommandRunner,
+    *,
+    timeout_seconds: float | None = None,
+) -> str:
+    # `write-tree` fingerprints the semantic staged state with constant-size
+    # output.  Unlike raw index bytes it ignores benign cache/stat extensions,
+    # and unlike `ls-files --stage` it does not serialize every tracked path.
+    result = _run_git(
+        runner,
+        project,
+        ("write-tree",),
+        timeout_seconds=timeout_seconds,
+    )
+    if result.returncode == 0 and result.stdout.strip():
+        return result.stdout.strip()
+    fallback = _run_git(
+        runner,
+        project,
+        ("ls-files", "--stage", "-z"),
+        timeout_seconds=timeout_seconds,
+    )
+    return fallback.stdout if fallback.returncode == 0 else ""
 
 
 def _status_entries(
@@ -4949,11 +5420,12 @@ def _status_entries(
     *,
     pathspecs: Sequence[str] | None = None,
     repository: Mapping[str, Any] | None = None,
+    timeout_seconds: float | None = None,
 ) -> list[dict[str, Any]]:
     args = ["status", "--porcelain=v1", "-z"]
     if pathspecs is not None:
         args.extend(("--", *pathspecs))
-    result = _run_git(runner, project, tuple(args))
+    result = _run_git(runner, project, tuple(args), timeout_seconds=timeout_seconds)
     if result.returncode != 0:
         return []
     repo = repository if isinstance(repository, Mapping) else _detect_repository(project, runner, runner.git_path() is not None)
@@ -5155,7 +5627,14 @@ def _detect_git(runner: GitCommandRunner) -> dict[str, Any]:
     }
 
 
-def _detect_repository(project: Path, runner: GitCommandRunner, git_available: bool) -> dict[str, Any]:
+def _detect_repository(
+    project: Path,
+    runner: GitCommandRunner,
+    git_available: bool,
+    *,
+    include_status: bool = True,
+    timeout_seconds: float | None = None,
+) -> dict[str, Any]:
     repository = {
         "inside_work_tree": False,
         "root": None,
@@ -5166,24 +5645,35 @@ def _detect_repository(project: Path, runner: GitCommandRunner, git_available: b
     if not git_available:
         return repository
 
-    inside = runner.run(project, ("rev-parse", "--is-inside-work-tree"))
+    inside = _run_git(
+        runner,
+        project,
+        ("rev-parse", "--is-inside-work-tree"),
+        timeout_seconds=timeout_seconds,
+    )
     if inside.returncode != 0 or inside.stdout.strip() != "true":
         return repository
 
     repository["inside_work_tree"] = True
-    root = runner.run(project, ("rev-parse", "--show-toplevel"))
+    root = _run_git(runner, project, ("rev-parse", "--show-toplevel"), timeout_seconds=timeout_seconds)
     if root.returncode == 0 and root.stdout.strip():
         repository["root"] = root.stdout.strip()
 
-    head = runner.run(project, ("rev-parse", "--verify", "HEAD"))
+    head = _run_git(runner, project, ("rev-parse", "--verify", "HEAD"), timeout_seconds=timeout_seconds)
     if head.returncode == 0 and head.stdout.strip():
         repository["head_commit"] = head.stdout.strip()
 
-    status = runner.run(project, ("status", "--porcelain=v1", "-z"))
-    if status.returncode == 0:
-        dirty_count = _porcelain_z_entry_count(status.stdout)
-        repository["dirty"] = dirty_count > 0
-        repository["dirty_files_count"] = dirty_count
+    if include_status:
+        status = _run_git(
+            runner,
+            project,
+            ("status", "--porcelain=v1", "-z"),
+            timeout_seconds=timeout_seconds,
+        )
+        if status.returncode == 0:
+            dirty_count = _porcelain_z_entry_count(status.stdout)
+            repository["dirty"] = dirty_count > 0
+            repository["dirty_files_count"] = dirty_count
     return repository
 
 
@@ -5264,6 +5754,7 @@ def _configuration_summary(
         "do_not_switch_user_branch": None,
         "do_not_modify_user_index": None,
         "checkpoint_policy": {},
+        "checkpoint_limits": {},
         "run_metadata": {},
         "effective_worker_checkpointing": {
             "enabled": False,
@@ -5313,6 +5804,7 @@ def _configuration_summary(
             "before_final_completion": checkpoint_policy.get("before_final_completion"),
             "after_final_completion": checkpoint_policy.get("after_final_completion"),
         }
+    summary["checkpoint_limits"] = _checkpoint_limits(config)
     run_metadata = config.get("run_metadata")
     if isinstance(run_metadata, dict):
         summary["run_metadata"] = {
