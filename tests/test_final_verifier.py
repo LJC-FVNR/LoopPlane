@@ -5,6 +5,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from pathlib import Path
 
@@ -245,9 +246,11 @@ print("fake final reviewer wrote final_reviewer_report.json")
 
 def configure_usage_limited_final_reviewer(project: Path) -> None:
     script = project / ".loopplane" / "config" / "usage_limited_final_reviewer.py"
+    retry_at = datetime.now(UTC) + timedelta(days=6)
+    retry_text = retry_at.strftime("%b %d, %Y %I:%M %p")
     script.write_text(
         "import sys\n"
-        "print(\"ERROR: You've hit your usage limit. Try again at Jul 25th, 2026 3:25 AM.\", file=sys.stderr)\n"
+        f"print(\"ERROR: You've hit your usage limit. Try again at {retry_text}.\", file=sys.stderr)\n"
         "raise SystemExit(1)\n",
         encoding="utf-8",
     )

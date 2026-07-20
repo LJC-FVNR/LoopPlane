@@ -627,7 +627,7 @@ class LoopPlaneInitIntegrationTest(unittest.TestCase):
             self.assertEqual(workflow["planning"]["task_granularity"], "coarse_by_default")
             self.assertEqual(workflow["planning"]["max_initial_tasks"], 8)
             self.assertTrue(workflow["planning"]["batch_low_risk_tasks"])
-            self.assertEqual(workflow["validation"]["validator_agent_mode"], "on_deterministic_failure")
+            self.assertEqual(workflow["validation"]["validator_agent_mode"], "high_risk_pass_only")
             self.assertFalse(workflow["validation"]["validator_agent_for_high_risk"])
             self.assertTrue(workflow["execution"]["continue_on_fail"])
             self.assertTrue(workflow["execution"]["recovery_before_new_work"])
@@ -645,7 +645,12 @@ class LoopPlaneInitIntegrationTest(unittest.TestCase):
             self.assertEqual(dashboard["port_range"], [3766, 4766])
             self.assertEqual(dashboard["server_state_file"], f"{root_value}/runtime/dashboard_server.json")
             self.assertFalse(version_control["checkpoint_policy"]["before_worker_run"])
-            self.assertTrue(version_control["checkpoint_policy"]["after_validation_pass"])
+            self.assertFalse(version_control["checkpoint_policy"]["after_validation_pass"])
+            self.assertEqual(version_control["checkpoint_limits"]["timeout_seconds"], 15)
+            self.assertEqual(version_control["checkpoint_limits"]["max_paths"], 10000)
+            self.assertNotIn(f"{root_value}/results/", version_control["path_policy"]["include"])
+            self.assertIn(f"{root_value}/results/", version_control["path_policy"]["exclude"])
+            self.assertFalse(workflow["human_summaries"]["auto_after_reconcile"])
 
             runners = agent_runners["runners"]
             worker_failover = agent_runners["runner_failover"]["worker"]
@@ -653,6 +658,11 @@ class LoopPlaneInitIntegrationTest(unittest.TestCase):
             self.assertEqual(worker_failover["runners"], ["worker", "worker_fallback"])
             self.assertEqual(worker_failover["mark_unhealthy_after"], 4)
             self.assertEqual(worker_failover["failure_window_seconds"], 900)
+            validator_failover = agent_runners["runner_failover"]["validator"]
+            self.assertEqual(validator_failover["strategy"], "ordered")
+            self.assertEqual(validator_failover["runners"], ["validator", "validator_fallback"])
+            self.assertEqual(validator_failover["mark_unhealthy_after"], 1)
+            self.assertEqual(validator_failover["failure_window_seconds"], 900)
             self.assertEqual(runners["worker"]["prompt_delivery"]["mode"], "file_argument")
             self.assertEqual(runners["planner"]["inherits"], "worker")
             self.assertEqual(runners["auditor"]["timeout_seconds"], 21600)
@@ -662,7 +672,7 @@ class LoopPlaneInitIntegrationTest(unittest.TestCase):
             self.assertEqual(runners["change_request_planner"]["role"], "change_request_planner")
             self.assertEqual(runners["summary"]["role"], "summary")
             self.assertEqual(runners["summary"]["inherits"], "worker")
-            self.assertTrue(runners["summary"]["enabled"])
+            self.assertFalse(runners["summary"]["enabled"])
             self.assertEqual(runners["summary"]["timeout_seconds"], 900)
             self.assertEqual(runners["final_reviewer"]["role"], "final_reviewer")
             self.assertEqual(runners["final_reviewer"]["timeout_seconds"], 900)

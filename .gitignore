@@ -12,6 +12,11 @@ tmp/
 test-results/
 playwright-report/
 
+# Local execution-backend commands and scheduler output.
+sbatch_log/
+slurm_cmds/
+slurm_logs/
+
 # Test and coverage output.
 .coverage
 coverage/

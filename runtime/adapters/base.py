@@ -10,6 +10,7 @@ from types import MappingProxyType
 from typing import Any, Mapping, Sequence
 
 from runtime.agent_runners import SCHEMA_VERSION, RunnerConfig
+from runtime.file_discovery import discover_files_bounded
 
 
 ADAPTER_INPUT_FILENAME = "adapter_input.json"
@@ -19,6 +20,24 @@ DEFAULT_STDERR_FILENAME = "stderr.log"
 DEFAULT_FINAL_OUTPUT_FILENAME = "final.md"
 DOCTOR_STATUS_OK = "ok"
 DOCTOR_STATUS_WAITING_CONFIG = "waiting_config"
+ADAPTER_FILE_SCAN_ENTRY_LIMIT = 20_000
+ADAPTER_FILE_SCAN_MATCH_LIMIT = 10_000
+ADAPTER_FILE_PRUNED_DIRECTORIES = frozenset(
+    {
+        ".cache",
+        ".git",
+        ".pytest_cache",
+        "__pycache__",
+        "cache",
+        "caches",
+        "checkpoints",
+        "models",
+        "node_modules",
+        "qualification_caches",
+        "tmp",
+        "wandb",
+    }
+)
 
 
 class AdapterContractError(ValueError):
@@ -650,20 +669,14 @@ def _iter_adapter_files(adapter_input: AdapterInput) -> tuple[Path, ...]:
     roots: list[Path] = [adapter_input.scheduler_run_dir, adapter_input.role_output_dir]
     if adapter_input.task_evidence_run_dir is not None:
         roots.append(adapter_input.task_evidence_run_dir)
-    files: dict[str, Path] = {}
-    for root in roots:
-        if not root.exists():
-            continue
-        try:
-            candidates = root.rglob("*")
-        except OSError:
-            continue
-        for candidate in candidates:
-            try:
-                if candidate.is_file():
-                    files.setdefault(_path_key(candidate), candidate)
-            except OSError:
-                continue
+    discovery = discover_files_bounded(
+        roots,
+        prune_directory_names=ADAPTER_FILE_PRUNED_DIRECTORIES,
+        max_entries=ADAPTER_FILE_SCAN_ENTRY_LIMIT,
+        max_matches=ADAPTER_FILE_SCAN_MATCH_LIMIT,
+        max_depth=12,
+    )
+    files = {_path_key(path): path for path in discovery.paths}
     return tuple(files[key] for key in sorted(files))
 
 

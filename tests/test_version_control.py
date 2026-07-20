@@ -9,14 +9,25 @@ import tempfile
 import unittest
 from pathlib import Path
 from typing import Sequence
+from unittest import mock
 
 from runtime.init_workflow import init_project
 from runtime.path_resolution import WorkflowPaths, load_workflow_config
-from runtime.version_control import GitCommandResult, capture_run_git_metadata, run_git_doctor
+from runtime.version_control import (
+    GitCommandResult,
+    SubprocessGitCommandRunner,
+    capture_run_git_metadata,
+    create_git_checkpoint,
+    run_git_doctor,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 LoopPlane = REPO_ROOT / "scripts" / "loopplane"
+
+
+def read_jsonl(path: Path) -> list[dict[str, object]]:
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
 class FakeGitRunner:
@@ -38,6 +49,10 @@ class FakeGitRunner:
         self.calls.append((project_root, command))
         if command == ("--version",):
             return GitCommandResult(0, "git version fake\n", "")
+        if command[:3] == ("status", "--porcelain=v1", "-z"):
+            fallback = self.responses.get(("status", "--porcelain=v1", "-z"))
+            if fallback is not None:
+                return fallback
         return self.responses.get(command, GitCommandResult(128, "", "not a git repository"))
 
 
@@ -87,8 +102,8 @@ class VersionControlDoctorUnitTest(unittest.TestCase):
             self.assertEqual(result["configuration"]["provider"], "git")
             self.assertEqual(result["configuration"]["checkpoint_backend"], "managed_refs")
             self.assertTrue(result["configuration"]["resolved_refs_namespace"].startswith("refs/loopplane/wf_"))
-            self.assertTrue(result["configuration"]["effective_worker_checkpointing"]["enabled"])
-            self.assertEqual(result["configuration"]["effective_worker_checkpointing"]["reason"], "checkpoint_policy_enabled")
+            self.assertFalse(result["configuration"]["effective_worker_checkpointing"]["enabled"])
+            self.assertEqual(result["configuration"]["effective_worker_checkpointing"]["reason"], "checkpoint_policy_disabled")
 
     def test_doctor_reports_local_init_possible_for_non_repo_project(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -226,7 +241,7 @@ class VersionControlDoctorCliIntegrationTest(unittest.TestCase):
             self.assertTrue(data["configuration"]["no_remote_push"])
             self.assertTrue(data["configuration"]["do_not_modify_user_index"])
             self.assertEqual(data["configuration"]["run_metadata"]["enabled"], False)
-            self.assertEqual(data["configuration"]["effective_worker_checkpointing"]["reason"], "checkpoint_policy_enabled")
+            self.assertEqual(data["configuration"]["effective_worker_checkpointing"]["reason"], "checkpoint_policy_disabled")
 
     def test_checkpoint_excludes_project_local_loopplane_home_and_python_generated_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -273,6 +288,121 @@ class VersionControlDoctorCliIntegrationTest(unittest.TestCase):
             self.assertFalse(any(path.endswith(".pyc") for path in tree_files))
             self.assertNotIn(".loopplane/config/local/agent_runners.local.json", tree_files)
             self.assertNotIn("LOOPPLANE_DASHBOARD.url", tree_files)
+
+    def test_checkpoint_excludes_large_results_tree_from_candidate_scan(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "Checkpoint ignores generated result history.")
+            paths = self.workflow_paths(project)
+            (project / "src").mkdir()
+            (project / "src" / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
+            cache_dir = paths.results_dir / "P0.T001" / "runs" / "run_bulk" / "artifacts" / "cache"
+            cache_dir.mkdir(parents=True)
+            for index in range(2_000):
+                (cache_dir / f"shard_{index:05d}.bin").write_bytes(b"generated-cache")
+
+            checkpoint = self.run_loopplane(
+                "vc",
+                "checkpoint",
+                "--project",
+                str(project),
+                "--reason",
+                "manual_checkpoint",
+                "--json",
+            )
+
+            self.assertEqual(checkpoint.returncode, 0, checkpoint.stderr + checkpoint.stdout)
+            payload = json.loads(checkpoint.stdout)
+            record = payload["checkpoint"]
+            self.assertLess(record["checkpoint_metrics"]["discovered_paths"], 100)
+            results_prefix = paths.results_dir.relative_to(project).as_posix() + "/"
+            tree_files = self.run_git(
+                project,
+                "ls-tree",
+                "-r",
+                "--name-only",
+                record["commit"],
+            ).stdout.splitlines()
+            self.assertIn("src/app.py", tree_files)
+            self.assertFalse(any(path.startswith(results_prefix) for path in tree_files))
+
+    def test_checkpoint_repository_probe_does_not_run_unscoped_status(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "Checkpoint repository probe fast path.")
+            (project / "src").mkdir()
+            (project / "src" / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
+            runner = SubprocessGitCommandRunner()
+
+            with mock.patch.object(runner, "run", wraps=runner.run) as run_mock:
+                result = create_git_checkpoint(project, reason="manual_checkpoint", runner=runner)
+
+            self.assertTrue(result["ok"], json.dumps(result, indent=2, sort_keys=True))
+            commands = [tuple(call.args[1]) for call in run_mock.call_args_list]
+            self.assertNotIn(("status", "--porcelain=v1", "-z"), commands)
+            scoped_statuses = [
+                command
+                for command in commands
+                if command[:3] == ("status", "--porcelain=v1", "-z") and "--" in command
+            ]
+            self.assertEqual(len(scoped_statuses), 1)
+
+    def test_automatic_checkpoint_budget_exhaustion_is_non_blocking(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "Best-effort checkpoint budget.")
+            paths = self.workflow_paths(project)
+            config_path = paths.version_control_config_file
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+            config["checkpoint_limits"]["max_paths"] = 1
+            config_path.write_text(json.dumps(config, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            (project / "worker_change.txt").write_text("worker input\n", encoding="utf-8")
+
+            checkpoint = self.run_loopplane(
+                "vc",
+                "checkpoint",
+                "--project",
+                str(project),
+                "--reason",
+                "before_worker_run",
+                "--json",
+            )
+
+            self.assertEqual(checkpoint.returncode, 0, checkpoint.stderr + checkpoint.stdout)
+            payload = json.loads(checkpoint.stdout)
+            self.assertTrue(payload["ok"])
+            self.assertEqual(payload["status"], "skipped_budget")
+            self.assertEqual(payload["checkpoint"]["status"], "skipped_budget")
+            self.assertEqual(payload["checkpoint"]["checkpoint_metrics"]["limit_reason"], "max_paths")
+            self.assertNotIn("commit", payload["checkpoint"])
+            records = read_jsonl(paths.runtime_dir / "git_checkpoints.jsonl")
+            self.assertEqual(records[-1]["status"], "skipped_budget")
+
+    def test_manual_checkpoint_budget_exhaustion_remains_explicit_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "Manual checkpoint budget failure.")
+            paths = self.workflow_paths(project)
+            config_path = paths.version_control_config_file
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+            config["checkpoint_limits"]["max_paths"] = 1
+            config_path.write_text(json.dumps(config, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+            checkpoint = self.run_loopplane(
+                "vc",
+                "checkpoint",
+                "--project",
+                str(project),
+                "--reason",
+                "manual_checkpoint",
+                "--json",
+            )
+
+            self.assertNotEqual(checkpoint.returncode, 0)
+            payload = json.loads(checkpoint.stdout)
+            self.assertFalse(payload["ok"])
+            self.assertEqual(payload["status"], "checkpoint_budget_exceeded")
+            self.assertIsNone(payload["checkpoint"])
 
     def test_cli_doctor_reports_existing_git_repo(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -926,8 +1056,7 @@ class VersionControlDoctorCliIntegrationTest(unittest.TestCase):
             self.assertEqual(self.run_git(repo, "show", f"{commit}:service-a/src/app.py").stdout, "VALUE = 2\n")
             self.assertNotEqual(self.run_git(repo, "show", f"{commit}:service-b/notes.txt").returncode, 0)
             self.assertFalse(any("service-b" in path for path in record["included_paths"]))
-            self.assertIn("../service-b/notes.txt", record["excluded_paths"])
-            self.assertIn("../service-b/scratch.txt", record["excluded_paths"])
+            self.assertFalse(any("service-b" in path for path in record["excluded_paths"]))
             self.assertGreater(record["status_entries_before"], 0)
             self.assertEqual(record["status_entries_before"], record["status_entries_after"])
             self.assertEqual(record["path_policy"]["workspace_boundary"], "project_root")

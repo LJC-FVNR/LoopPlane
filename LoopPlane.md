@@ -1,15 +1,44 @@
 # LoopPlane Specification
 
-> Version: v1.6 English Implementation Spec
+> Version: v1.7 English Implementation Spec
 > Status: suitable as a development specification for the full LoopPlane protocol, portable skill package, project-local durable runtime, same-workspace workflow history management, default Git checkpoint protocol, CLI agent runner adapters, dashboard, inspector/change-request workflows, background jobs, preview/health operations, migration/install profiles, multi-project workspace discovery, and validation/evidence protocol
 > Recommended product name: **LoopPlane**
 > Core principle: **Brief seeds intent. Planner crystallizes intent. Plan owns intent. Workspace owns local workflow history. Scheduler owns control. Worker owns execution. Evidence owns truth. Validator owns completion. Git owns human-readable checkpoints. Dashboard owns current-workspace visibility. Skill package owns portability. Preview exposes scheduler intent. Health probes runtime truth. LOOPPLANE_HOME owns discovery only.**
 
 ---
 
-## 0. v1.6 Revision Notes
+## 0. v1.7 Revision Notes
 
-This v1.6 English specification is the authoritative English-language version of the LoopPlane design. It keeps the full v1.5 product surface intact and adds formal workspace-history, multi-project discovery, and migration/install protocols.
+Version 1.7 retains the v1.6 workspace, workflow-history, migration, and
+compatibility model while making routine execution lightweight and bounded.
+The release changes control-plane implementation policy rather than persisted
+workflow schema identity, so existing v1.5/v1.6 workflow data remains valid.
+
+Key v1.7 additions and changes:
+
+1. **Bounded Git checkpoints**: checkpoint creation uses scoped repository
+   probes, temporary-index isolation, and configurable time/path/byte budgets.
+2. **Low-frequency defaults**: per-worker checkpoints, post-validation
+   checkpoints, run Git metadata, and automatic human summaries are opt-in.
+3. **Generated-result isolation**: workflow result/evidence trees are excluded
+   from checkpoint construction and control-plane traversal by default.
+4. **Efficient supervision**: scheduler heartbeat cadence is honored, stable
+   wait events are coalesced, and detached waits use lightweight file-change
+   observation between scheduler ticks.
+5. **Bounded discovery**: read models, planning context, validation, adapters,
+   health, summaries, inspectors, and boundary observation use lazy traversal
+   with explicit limits and pruning.
+6. **Operational versus historical health**: normal health is a bounded current
+   state probe; `health --strict` performs the complete historical integrity
+   audit.
+7. **Agent-first failure behavior**: missing runners fail before run setup, and
+   best-effort automatic checkpoints cannot consume unbounded agent time.
+
+### 0.1 Retained v1.6 Revision Notes
+
+The v1.6 revision established the workspace-history, multi-project discovery,
+and migration/install protocol baseline retained by this specification. It
+keeps the full v1.5 product surface intact.
 
 LoopPlane remains a full product specification, not only a minimal core runtime. The following modules remain first-class parts of the specification because they are important for the intended product shape:
 
@@ -1286,6 +1315,10 @@ needs_revision
     "max_concurrent_workers": 1,
     "continue_on_fail": true,
     "recovery_before_new_work": true
+  },
+  "human_summaries": {
+    "auto_after_reconcile": false,
+    "generation_mode": "on_demand"
   }
 }
 ```
@@ -1460,12 +1493,17 @@ Git version control is enabled by default. This file describes the default local
   "checkpoint_policy": {
     "before_plan_activation": true,
     "after_plan_activation": true,
-    "before_worker_run": true,
-    "after_validation_pass": true,
+    "before_worker_run": false,
+    "after_validation_pass": false,
     "before_change_request_apply": true,
     "after_change_request_apply": true,
     "before_final_completion": true,
     "after_final_completion": true
+  },
+  "checkpoint_limits": {
+    "timeout_seconds": 15,
+    "max_paths": 10000,
+    "max_bytes": 104857600
   },
   "run_metadata": {
     "enabled": false,
@@ -1486,12 +1524,12 @@ Git version control is enabled by default. This file describes the default local
       ".loopplane/config/",
       ".loopplane/planning/",
       ".loopplane/requests/",
-      ".loopplane/results/",
       "src/",
       "tests/",
       "docs/"
     ],
     "exclude": [
+      ".loopplane/results/",
       ".loopplane/runtime/lock/",
       ".loopplane/runtime/active_run_leases/",
       ".loopplane/runtime/dashboard_token",
@@ -1521,7 +1559,16 @@ Default checkpointing must not switch the current branch.
 Default checkpointing must not rewrite user history.
 Default checkpointing must not modify the user's Git index.
 A safe implementation should use a temporary index and LoopPlane-managed refs under refs/loopplane/<workflow_id>/.
+Repository discovery for checkpoint creation must not run an unscoped worktree status scan.
+Checkpoint work must obey the configured time, path-count, and byte budgets.
+An automatic worker-boundary checkpoint that exceeds its budget is recorded as skipped and must not block the worker.
+An explicit/manual checkpoint that exceeds its budget must fail visibly.
+Result/evidence trees are artifact storage and are excluded from default checkpoints, including for legacy configs that previously included them.
 ```
+
+Human-facing task and phase summaries are generated on demand by default. A
+workflow may explicitly enable `human_summaries.auto_after_reconcile` and the
+summary runner when the extra model call and artifact traversal are desired.
 
 ### 9.13 `git_checkpoints.jsonl`
 
@@ -3199,9 +3246,9 @@ def scheduler_main():
         if failure:
             run = prepare_run(task_id=failure.task_id, role="recovery_worker")
             prompt = build_recovery_prompt(failure, run)
-            create_git_checkpoint(reason="before_recovery_run", run=run)
+            create_git_checkpoint_if_policy_matches(reason="before_recovery_run", run=run)
             worker_result = run_agent_with_active_run_lease(run, prompt)
-            capture_post_run_git_diff(run)
+            capture_post_run_git_diff_if_enabled(run)
             validation_result = validate_run(run, worker_result)
             reconcile_after_run(run, validation_result)
             create_git_checkpoint_if_policy_matches(reason="after_validation_or_reconcile", run=run, validation=validation_result)
@@ -3211,9 +3258,9 @@ def scheduler_main():
         if task:
             run = prepare_run(task_id=task.task_id, role="worker")
             prompt = build_worker_prompt(task, run)
-            create_git_checkpoint(reason="before_worker_run", run=run)
+            create_git_checkpoint_if_policy_matches(reason="before_worker_run", run=run)
             worker_result = run_agent_with_active_run_lease(run, prompt)
-            capture_post_run_git_diff(run)
+            capture_post_run_git_diff_if_enabled(run)
             validation_result = validate_run(run, worker_result)
             reconcile_after_run(run, validation_result)
             create_git_checkpoint_if_policy_matches(reason="after_validation_or_reconcile", run=run, validation=validation_result)
@@ -3313,7 +3360,13 @@ validation fails repeatedly for the same reason.
 
 ### 14.8 Runtime health probe
 
-`loopplane health` is a low-level runtime probe. It is independent of dashboard read models and must inspect authoritative runtime files, leases, process liveness where possible, and malformed outputs directly.
+`loopplane health` is a low-level runtime probe. It is independent of dashboard
+read models and inspects authoritative runtime files, leases, process liveness
+where possible, and malformed outputs directly. The normal probe is a bounded
+operational check because dashboards and watchdogs invoke it frequently: it
+checks recent event/checkpoint history, the latest checkpoint ref, and bounded
+result metadata. `--strict` performs the explicit full-history event-chain,
+checkpoint-ref, and JSONL integrity audit.
 
 Commands:
 
@@ -3348,6 +3401,7 @@ Example health result:
   "checked_at": "2026-06-10T12:00:00Z",
   "status": "healthy",
   "strict": false,
+  "validation_depth": "bounded_operational",
   "checks": [
     {
       "name": "scheduler_lock",
@@ -4133,18 +4187,27 @@ A robust implementation may use a temporary Git index to create checkpoint commi
 
 ### 24.3 Checkpoint boundaries
 
-LoopPlane must create local Git checkpoints at these semantic boundaries by default:
+LoopPlane creates local Git checkpoints at these low-frequency semantic boundaries by default:
 
 ```text
 before_plan_activation
 after_plan_activation
-before_worker_run
-after_validation_pass
 before_change_request_apply
 after_change_request_apply
 before_final_completion
 after_final_completion
 ```
+
+High-frequency worker checkpoints are opt-in:
+
+```text
+before_worker_run
+after_validation_pass
+```
+
+They use the same hard checkpoint budgets as manual checkpoints, but budget
+exhaustion is best-effort at these automated boundaries: LoopPlane records
+`skipped_budget` and continues agent work.
 
 Additional optional checkpoint reasons:
 
@@ -4169,10 +4232,6 @@ PLAN.md
 .loopplane/config/
 .loopplane/planning/
 .loopplane/requests/
-.loopplane/results/**/report.md
-.loopplane/results/**/validation.json
-.loopplane/results/**/node_summary.json
-.loopplane/results/**/latest.json
 task-scoped project files changed by accepted worker runs
 ```
 
@@ -4185,12 +4244,15 @@ Default exclusions include:
 .loopplane/runtime/runs/*/stdout.log
 .loopplane/runtime/runs/*/stderr.log
 .loopplane/read_models/
+.loopplane/results/
 .env
 .ssh/
 .git/
 ```
 
-Runtime logs may still be stored as artifacts, but large or sensitive logs should not be included in default Git checkpoints.
+Runtime logs and result evidence remain available as artifacts and read models,
+but they are not copied into every default Git checkpoint. Durable deliverables
+that require versioning should live in an explicit project source/data path.
 
 ### 24.5 Worker and Git boundaries
 
@@ -4217,7 +4279,7 @@ unless a future trusted adapter explicitly delegates that operation through the 
 
 ### 24.6 Run diff capture
 
-For every worker or recovery worker run, the Version Control Manager must capture:
+When `run_metadata.enabled` is explicitly enabled, the Version Control Manager captures:
 
 ```text
 pre-run HEAD;
@@ -4225,9 +4287,12 @@ pre-run status;
 post-run status;
 changed files;
 project diff patch;
-checkpoint before the run;
-checkpoint after accepted validation or reconciliation.
+policy-enabled checkpoint before the run;
+policy-enabled checkpoint after accepted validation or reconciliation.
 ```
+
+The default is `run_metadata.enabled: false`; normal validation evidence and
+agent-owned status files remain sufficient for scheduling and reconciliation.
 
 This metadata is written under:
 
@@ -4965,7 +5030,7 @@ Only one workflow should be `running` in a workspace unless an implementation ex
   "loopplane_dir": ".loopplane",
   "repo_root": ".",
   "created_at": "2026-06-10T12:00:00Z",
-  "created_by_loopplane_version": "1.6.0",
+  "created_by_loopplane_version": "1.7.0",
   "workspace_boundary": "project_root",
   "allow_out_of_boundary_writes": false,
   "single_active_running_workflow": true

@@ -22,7 +22,16 @@ from runtime.approval import (
 )
 from runtime.path_resolution import WorkflowPathError, WorkflowPaths, load_workflow_config, path_lines
 from runtime.prompt_context import file_reference, prompt_reference_index
-from runtime.reconciliation import PLAN_PATCH_OPERATION_APPEND, apply_approved_plan_patch, parse_plan_tasks
+from runtime.reconciliation import (
+    PLAN_PATCH_APPEND_BEGIN,
+    PLAN_PATCH_APPEND_END,
+    PLAN_PATCH_OPERATION_APPEND,
+    PLAN_PATCH_OPERATION_REPLACE_TASKS,
+    PLAN_PATCH_REPLACE_BEGIN,
+    PLAN_PATCH_REPLACE_END,
+    apply_approved_plan_patch,
+    parse_plan_tasks,
+)
 from runtime.scheduler import AtomicOwnerLock, SCHEMA_VERSION, append_event
 from runtime.version_control import create_git_checkpoint
 
@@ -213,16 +222,49 @@ def review_change_request(
     agent_response = _read_json_object(response_path, default={}) if response_path.exists() else {}
     if not isinstance(agent_response, Mapping):
         agent_response = {}
-    added_tasks = _patch_added_task_ids(patch_text, fallback=[added_task_id])
+    patch_task_ids = _patch_task_ids(patch_text)
+    if patch_task_ids:
+        added_tasks = [task_id for task_id in patch_task_ids if task_id not in existing_tasks]
+        modified_tasks = [task_id for task_id in patch_task_ids if task_id in existing_tasks]
+    else:
+        added_tasks = [added_task_id]
+        modified_tasks = []
+    patch_type = _plan_patch_type(
+        patch_text,
+        added_tasks=added_tasks,
+        modified_tasks=modified_tasks,
+        declared_type=str(_mapping(agent_response.get("plan_patch")).get("type") or ""),
+    )
+    plan_patch_sha256 = _sha256_file(patch_path)
 
+    auditor_required = bool(audit) if audit is not None else bool(_planning_config(paths).get("auditor_required", False))
+    audit_report: dict[str, Any] | None = None
+    if auditor_required:
+        audit_report = _write_plan_patch_audit(
+            audit_report_path,
+            project=project,
+            workflow_id=workflow_id,
+            run_id=run_id,
+            change_request_id=change_request_id,
+            patch_path=patch_path,
+            added_tasks=added_tasks,
+            modified_tasks=modified_tasks,
+            patch_type=patch_type,
+            plan_patch_sha256=plan_patch_sha256,
+        )
+    audit_errors = [str(item) for item in (audit_report.get("blocking_findings") or [])] if audit_report else []
+    if not plan_patch_sha256:
+        audit_errors.append("PLAN_PATCH.md could not be content-bound for review.")
+    audit_failed = bool(audit_errors) or (audit_report is not None and audit_report.get("passed") is not True)
     approval_request: dict[str, Any] | None = None
-    if approval_required and policy.get("enabled") is True:
+    if not audit_failed and approval_required and policy.get("enabled") is True:
         approval_request = _record_change_request_approval(
             project=project,
             paths=paths,
             workflow_id=workflow_id,
             request=request,
             patch_path=patch_path,
+            plan_patch_sha256=plan_patch_sha256,
         )
         append_event(
             paths,
@@ -233,22 +275,12 @@ def review_change_request(
                 "change_request_id": change_request_id,
                 "approval_id": approval_request.get("approval_id"),
                 "type": "change_request_plan_patch",
-                "message": "Approval requested for change request plan patch.",
+                "plan_patch_sha256": plan_patch_sha256,
+                "message": "Approval requested for audited change request plan patch.",
             },
             run_id=run_id,
         )
-
-    auditor_required = bool(audit) if audit is not None else bool(_planning_config(paths).get("auditor_required", False))
-    audit_report: dict[str, Any] | None = None
-    if auditor_required:
-        audit_report = _write_plan_patch_audit(
-            audit_report_path,
-            workflow_id=workflow_id,
-            run_id=run_id,
-            change_request_id=change_request_id,
-            patch_path=patch_path,
-            added_tasks=added_tasks,
-        )
+    change_request_status = "failed" if audit_failed else "needs_user_approval" if approval_required else "approved"
 
     response = {
         "schema_version": SCHEMA_VERSION,
@@ -261,21 +293,23 @@ def review_change_request(
         "created_at": utc_timestamp(),
         "source": source or "cli",
         "status": str(agent_response.get("status") or "proposal_created"),
-        "change_request_status": "needs_user_approval" if approval_required else "approved",
+        "change_request_status": change_request_status,
         "planner_source": planner_source,
         "agent_run": agent_run,
         "impact": {
             "scope_change": bool(_mapping(agent_response.get("impact")).get("scope_change", True)),
             "requires_approval": approval_required,
             "adds_tasks": added_tasks,
-            "modifies_tasks": _text_list(_mapping(agent_response.get("impact")).get("modifies_tasks")),
+            "modifies_tasks": modified_tasks,
             "supersedes_tasks": _text_list(_mapping(agent_response.get("impact")).get("supersedes_tasks")),
         },
         "plan_patch": {
-            "type": str(_mapping(agent_response.get("plan_patch")).get("type") or "append_tasks"),
+            "type": patch_type,
             "patch_file": _path_for_record(project, patch_path),
+            "sha256": plan_patch_sha256,
         },
         "auditor_required": auditor_required,
+        "audit_passed": False if audit_failed else audit_report.get("passed") if audit_report is not None else None,
         "audit_report": _path_for_record(project, audit_report_path) if audit_report is not None else None,
         "approval_request_id": approval_request.get("approval_id") if approval_request is not None else None,
         "approval_policy": policy,
@@ -323,12 +357,26 @@ def review_change_request(
             "approval_id": response["approval_request_id"],
             "plan_patch_file": response["plan_patch"]["patch_file"],
             "adds_tasks": added_tasks,
+            "modifies_tasks": modified_tasks,
             "planner_source": planner_source,
         },
         run_id=run_id,
     )
 
-    if approval_required:
+    if audit_failed:
+        _update_runtime_state(
+            paths,
+            workflow_id=workflow_id,
+            status="waiting_config",
+            change_request_update={
+                "last_action": "review_change_request",
+                "last_change_request_id": change_request_id,
+                "last_response_id": response["response_id"],
+                "plan_patch_audit_failed": True,
+                "plan_patch_audit_errors": audit_errors,
+            },
+        )
+    elif approval_required:
         _update_runtime_state(
             paths,
             workflow_id=workflow_id,
@@ -354,7 +402,7 @@ def review_change_request(
 
     return {
         "schema_version": SCHEMA_VERSION,
-        "ok": True,
+        "ok": not audit_failed,
         "status": response["change_request_status"],
         "project_root": project.as_posix(),
         "workflow_id": workflow_id,
@@ -376,7 +424,7 @@ def review_change_request(
         ]
         + ([_path_for_record(project, audit_report_path)] if audit_report is not None else [])
         + ([_path_for_record(project, paths.runtime_dir / APPROVAL_REQUESTS_FILENAME)] if approval_request is not None else []),
-        "errors": [],
+        "errors": audit_errors if audit_failed else [],
         "warnings": warnings,
     }
 
@@ -415,6 +463,66 @@ def apply_change_request(
             extra={"change_request_status": status_record},
         )
 
+    response_status = str(response.get("change_request_status") or "").strip()
+    if response_status not in {"approved", "needs_user_approval"}:
+        return _failure(
+            project=project,
+            workflow_id=workflow_id,
+            status="audit_failed" if response_status == "failed" else "change_request_not_approved",
+            message=(
+                "Change request PLAN_PATCH.md failed its required audit and cannot be applied."
+                if response_status == "failed"
+                else f"Change request planner response is not applicable: {response_status or 'unknown'}."
+            ),
+            extra={"response": response, "change_request_status": status_record},
+        )
+
+    patch_ref = _mapping(response.get("plan_patch")).get("patch_file")
+    patch_path = _resolve_project_path(project, patch_ref)
+    expected_plan_patch_sha256 = str(_mapping(response.get("plan_patch")).get("sha256") or "").strip()
+    if not expected_plan_patch_sha256:
+        return _failure(
+            project=project,
+            workflow_id=workflow_id,
+            status="unbound_plan_patch",
+            message="Change request PLAN_PATCH.md is not content-bound; review the change request again before applying it.",
+            extra={"response": response, "change_request_status": status_record},
+        )
+    actual_plan_patch_sha256 = _sha256_file(patch_path)
+    if actual_plan_patch_sha256 != expected_plan_patch_sha256:
+        return _failure(
+            project=project,
+            workflow_id=workflow_id,
+            status="plan_patch_content_changed",
+            message=(
+                "Change request PLAN_PATCH.md changed after review; "
+                f"expected {expected_plan_patch_sha256}, observed {actual_plan_patch_sha256 or 'unavailable'}."
+            ),
+            extra={"response": response, "change_request_status": status_record},
+        )
+
+    if response.get("auditor_required") is True:
+        audit_ref = response.get("audit_report")
+        audit_report: Mapping[str, Any] = {}
+        if isinstance(audit_ref, str) and audit_ref.strip():
+            audit_path = _resolve_project_path(project, audit_ref)
+            loaded_audit_report = _read_json_object(audit_path, default={})
+            if isinstance(loaded_audit_report, Mapping):
+                audit_report = loaded_audit_report
+        audit_patch_sha256 = str(audit_report.get("plan_patch_sha256") or "") if isinstance(audit_report, Mapping) else ""
+        if (
+            not isinstance(audit_report, Mapping)
+            or audit_report.get("passed") is not True
+            or audit_patch_sha256 != expected_plan_patch_sha256
+        ):
+            return _failure(
+                project=project,
+                workflow_id=workflow_id,
+                status="audit_failed",
+                message="Change request audit is missing, failed, or does not match the reviewed PLAN_PATCH.md content.",
+                extra={"response": response, "audit_report": audit_report, "change_request_status": status_record},
+            )
+
     approval_check = _approval_check(paths, response)
     if not approval_check["approved"]:
         return _failure(
@@ -446,9 +554,26 @@ def apply_change_request(
             extra={"before_checkpoint": before_checkpoint},
         )
 
-    patch_ref = _mapping(response.get("plan_patch")).get("patch_file")
-    patch_path = _resolve_project_path(project, patch_ref)
     patch_contract = _plan_patch_apply_contract(response)
+    detected_plan_patch_operation = _change_request_plan_patch_operation(
+        plan_text=_safe_read(paths.plan_file),
+        patch_text=_safe_read(patch_path),
+        declared_type=str(_mapping(response.get("plan_patch")).get("type") or ""),
+    )
+    if detected_plan_patch_operation is None:
+        return _failure(
+            project=project,
+            workflow_id=workflow_id,
+            status="invalid_plan_patch",
+            message="Change request PLAN_PATCH.md mixes added and modified tasks or declares an unsupported operation.",
+            extra={"change_request_status": status_record},
+        )
+    declared_plan_patch_operation = str(patch_contract["operation"] or PLAN_PATCH_OPERATION_APPEND)
+    plan_patch_operation = (
+        declared_plan_patch_operation
+        if declared_plan_patch_operation != PLAN_PATCH_OPERATION_APPEND
+        else detected_plan_patch_operation
+    )
     apply_result = apply_approved_plan_patch(
         project,
         change_request_id=change_request_id,
@@ -456,11 +581,12 @@ def apply_change_request(
         response_id=str(response.get("response_id") or ""),
         approval_request_id=str(response.get("approval_request_id") or ""),
         before_checkpoint_id=_checkpoint_id(before_checkpoint),
-        plan_patch_operation=patch_contract["operation"],
+        plan_patch_operation=plan_patch_operation,
         target_phase_id=patch_contract["target_phase_id"],
         supersede_task_ids=patch_contract["supersede_task_ids"],
         supersede_reason=f"Superseded by approved change request {change_request_id}.",
         supersede_authorization=f"change_request:{change_request_id}",
+        expected_plan_patch_sha256=expected_plan_patch_sha256,
     )
     if apply_result.get("ok") is not True:
         return {
@@ -512,6 +638,7 @@ def apply_change_request(
         "before_checkpoint_id": _checkpoint_id(before_checkpoint),
         "after_checkpoint_id": _checkpoint_id(after_checkpoint),
         "added_tasks": list(apply_result.get("added_tasks") or []),
+        "modified_tasks": list(apply_result.get("modified_tasks") or []),
         "superseded_tasks": list(apply_result.get("superseded_tasks") or []),
         "already_completed_superseded_tasks": list(apply_result.get("already_completed_superseded_tasks") or []),
         "recovered_superseded_failure_ids": list(apply_result.get("recovered_superseded_failure_ids") or []),
@@ -532,6 +659,7 @@ def apply_change_request(
             "applied_plan_update_event_id": apply_result.get("event_id"),
             "before_checkpoint_id": apply_response["before_checkpoint_id"],
             "after_checkpoint_id": apply_response["after_checkpoint_id"],
+            "modified_tasks": apply_response["modified_tasks"],
             "superseded_tasks": apply_response["superseded_tasks"],
             "recovered_superseded_failure_ids": apply_response["recovered_superseded_failure_ids"],
         },
@@ -856,13 +984,64 @@ def _run_change_request_planner_agent(
     return result
 
 
-def _patch_added_task_ids(patch_text: str, *, fallback: Sequence[str]) -> list[str]:
+def _patch_task_ids(patch_text: str) -> list[str]:
     tasks = parse_plan_tasks(patch_text)
     ids = [task_id for task_id in tasks if task_id]
     if ids:
         return ids
     regex_ids = re.findall(r"^\s*(?:[-+]\s*)?- \[[ xX]\]\s+([A-Za-z0-9_.:-]+):", patch_text, flags=re.MULTILINE)
-    return _dedupe_text(regex_ids) or [str(task_id) for task_id in fallback if str(task_id).strip()]
+    return _dedupe_text(regex_ids)
+
+
+def _plan_patch_type(
+    patch_text: str,
+    *,
+    added_tasks: Sequence[str],
+    modified_tasks: Sequence[str],
+    declared_type: str = "",
+) -> str:
+    if modified_tasks and added_tasks:
+        return "mixed_tasks"
+    if modified_tasks:
+        return "replace_tasks"
+    if added_tasks:
+        normalized = declared_type.strip().lower()
+        if normalized in {"insert_task_into_phase", "insert_phase_before_final_objectives", "append_tasks"}:
+            return normalized
+        return "append_tasks"
+    if PLAN_PATCH_REPLACE_BEGIN in patch_text or PLAN_PATCH_REPLACE_END in patch_text:
+        return "replace_tasks"
+    return declared_type.strip() or "append_tasks"
+
+
+def _change_request_plan_patch_operation(
+    *,
+    plan_text: str,
+    patch_text: str,
+    declared_type: str,
+) -> str | None:
+    has_append_markers = PLAN_PATCH_APPEND_BEGIN in patch_text or PLAN_PATCH_APPEND_END in patch_text
+    has_replace_markers = PLAN_PATCH_REPLACE_BEGIN in patch_text or PLAN_PATCH_REPLACE_END in patch_text
+    if has_append_markers and has_replace_markers:
+        return None
+    if has_replace_markers:
+        return PLAN_PATCH_OPERATION_REPLACE_TASKS
+    if has_append_markers:
+        return PLAN_PATCH_OPERATION_APPEND
+
+    patch_task_ids = set(_patch_task_ids(patch_text))
+    existing_task_ids = set(parse_plan_tasks(plan_text))
+    added = patch_task_ids.difference(existing_task_ids)
+    modified = patch_task_ids.intersection(existing_task_ids)
+    if added and modified:
+        return None
+    explicit_replace = declared_type.strip().lower() in {"modify_tasks", "replace_task", "replace_tasks"} or re.search(
+        r"(?im)^(?:\s*-\s*)?operation:\s*.*\b(?:modify|replace)\b|^##\s+(?:modify|replace)\b",
+        patch_text,
+    ) is not None
+    if modified and not added and explicit_replace:
+        return PLAN_PATCH_OPERATION_REPLACE_TASKS
+    return PLAN_PATCH_OPERATION_APPEND
 
 
 def _has_text(path: Path) -> bool:
@@ -1101,6 +1280,18 @@ def _approval_check(paths: WorkflowPaths, response: Mapping[str, Any]) -> dict[s
             "approval_id": approval_id,
             "message": f"Approval request {approval_id} was not found.",
         }
+    expected_plan_patch_sha256 = str(_mapping(response.get("plan_patch")).get("sha256") or "").strip()
+    approval_plan_patch_sha256 = str(approval_request.get("plan_patch_sha256") or "").strip()
+    if not expected_plan_patch_sha256 or approval_plan_patch_sha256 != expected_plan_patch_sha256:
+        return {
+            "required": True,
+            "approved": False,
+            "approval_id": approval_id,
+            "message": (
+                f"Approval {approval_id} is not bound to the reviewed PLAN_PATCH.md content; "
+                "review the change request again."
+            ),
+        }
     status = approval_record_status(approval_request, responses=responses, now=utc_timestamp())
     return {
         "required": True,
@@ -1118,14 +1309,27 @@ def _record_change_request_approval(
     workflow_id: str,
     request: Mapping[str, Any],
     patch_path: Path,
+    plan_patch_sha256: str | None,
 ) -> dict[str, Any]:
     change_request_id = str(request.get("change_request_id") or "")
-    existing = _existing_pending_change_request_approval(paths, change_request_id)
+    normalized_patch_sha256 = str(plan_patch_sha256 or "").strip()
+    existing = _existing_pending_change_request_approval(
+        paths,
+        change_request_id,
+        plan_patch_sha256=normalized_patch_sha256,
+    )
     if existing is not None:
         return existing
+    approval_id = new_approval_id()
+    _supersede_stale_change_request_approvals(
+        paths,
+        change_request_id=change_request_id,
+        plan_patch_sha256=normalized_patch_sha256,
+        superseded_by_approval_id=approval_id,
+    )
     approval = {
         "schema_version": SCHEMA_VERSION,
-        "approval_id": new_approval_id(),
+        "approval_id": approval_id,
         "created_at": utc_timestamp(),
         "workflow_id": workflow_id,
         "type": "change_request_plan_patch",
@@ -1137,43 +1341,117 @@ def _record_change_request_approval(
         "expires_at": default_expires_at(),
         "source": "change_request_planner",
         "source_plan_patch": _path_for_record(project, patch_path),
+        "plan_patch_sha256": normalized_patch_sha256,
         "source_change_request": _path_for_record(project, paths.requests_dir / CHANGE_REQUESTS_FILENAME),
     }
     _append_jsonl_locked(paths, paths.runtime_dir / APPROVAL_REQUESTS_FILENAME, approval)
     return approval
 
 
-def _existing_pending_change_request_approval(paths: WorkflowPaths, change_request_id: str) -> dict[str, Any] | None:
+def _existing_pending_change_request_approval(
+    paths: WorkflowPaths,
+    change_request_id: str,
+    *,
+    plan_patch_sha256: str,
+) -> dict[str, Any] | None:
     responses = _read_jsonl(paths.runtime_dir / APPROVAL_RESPONSES_FILENAME)
     for request in _read_jsonl(paths.runtime_dir / APPROVAL_REQUESTS_FILENAME):
         if str(request.get("change_request_id") or request.get("request_id") or "") != change_request_id:
             continue
         status = approval_record_status(request, responses=responses, now=utc_timestamp())
-        if status.get("status") == "pending":
+        if (
+            status.get("status") == "pending"
+            and plan_patch_sha256
+            and str(request.get("plan_patch_sha256") or "") == plan_patch_sha256
+        ):
             return dict(request)
     return None
+
+
+def _supersede_stale_change_request_approvals(
+    paths: WorkflowPaths,
+    *,
+    change_request_id: str,
+    plan_patch_sha256: str,
+    superseded_by_approval_id: str,
+) -> None:
+    responses = _read_jsonl(paths.runtime_dir / APPROVAL_RESPONSES_FILENAME)
+    for request in _read_jsonl(paths.runtime_dir / APPROVAL_REQUESTS_FILENAME):
+        if str(request.get("type") or "") != "change_request_plan_patch":
+            continue
+        if str(request.get("change_request_id") or request.get("request_id") or "") != change_request_id:
+            continue
+        status = approval_record_status(request, responses=responses, now=utc_timestamp())
+        if status.get("status") != "pending":
+            continue
+        if plan_patch_sha256 and str(request.get("plan_patch_sha256") or "") == plan_patch_sha256:
+            continue
+        response = {
+            "schema_version": SCHEMA_VERSION,
+            "approval_id": str(request.get("approval_id") or request.get("request_id") or ""),
+            "responded_at": utc_timestamp(),
+            "decision": "superseded",
+            "approved_by": "loopplane",
+            "scope": str(request.get("scope") or ""),
+            "notes": "PLAN_PATCH.md content changed; a new content-bound approval is required.",
+            "source": "change_request_content_binding",
+            "workflow_id": str(request.get("workflow_id") or ""),
+            "type": "change_request_plan_patch",
+            "superseded_by_approval_id": superseded_by_approval_id,
+        }
+        _append_jsonl_locked(paths, paths.runtime_dir / APPROVAL_RESPONSES_FILENAME, response)
+        responses.append(response)
 
 
 def _write_plan_patch_audit(
     path: Path,
     *,
+    project: Path,
     workflow_id: str,
     run_id: str,
     change_request_id: str,
     patch_path: Path,
     added_tasks: Sequence[str],
+    modified_tasks: Sequence[str],
+    patch_type: str,
+    plan_patch_sha256: str | None,
 ) -> dict[str, Any]:
+    operation = {
+        "append_tasks": PLAN_PATCH_OPERATION_APPEND,
+        "replace_tasks": PLAN_PATCH_OPERATION_REPLACE_TASKS,
+    }.get(patch_type)
+    if operation is None:
+        validation = {
+            "ok": False,
+            "status": "unsupported_patch_type",
+            "errors": [f"Unsupported or mixed change-request patch type: {patch_type}"],
+        }
+    else:
+        validation = apply_approved_plan_patch(
+            project,
+            change_request_id=change_request_id,
+            plan_patch_path=patch_path,
+            plan_patch_operation=operation,
+            expected_plan_patch_sha256=plan_patch_sha256,
+            write=False,
+        )
+    blocking_findings = list(validation.get("errors") or []) if validation.get("ok") is not True else []
+    passed = not blocking_findings
     report = {
         "schema_version": SCHEMA_VERSION,
         "workflow_id": workflow_id,
         "run_id": run_id,
         "change_request_id": change_request_id,
-        "status": "passed",
-        "passed": True,
+        "status": "passed" if passed else "failed",
+        "passed": passed,
         "audited_at": utc_timestamp(),
         "plan_patch_path": patch_path.as_posix(),
+        "plan_patch_sha256": plan_patch_sha256,
+        "patch_type": patch_type,
         "added_tasks": list(added_tasks),
-        "blocking_findings": [],
+        "modified_tasks": list(modified_tasks),
+        "blocking_findings": blocking_findings,
+        "deterministic_validation": validation,
         "auditor_boundary": "plan_patch_only",
     }
     path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")

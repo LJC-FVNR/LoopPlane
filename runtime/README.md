@@ -3,6 +3,15 @@
 This directory contains scheduler, prompt builder, validator, reconciler, final
 verifier, read-model builder, and runtime support code.
 
+## v1.7 Lightweight Runtime Status
+
+Routine control-plane operations are bounded by default. Git checkpoint work
+uses scoped probes and explicit budgets, scheduler waits avoid repeated full
+snapshot rebuilds, recursive metadata discovery prunes generated artifacts, and
+normal health probes inspect recent operational history. Expensive historical
+integrity work remains available through explicit operations such as
+`health --strict`.
+
 ## v1.6 Runtime Support Status
 
 Runtime modules support same-workspace workflow history, dashboard switching by
@@ -13,6 +22,20 @@ resource locks, monorepo and nested workspace boundary enforcement, stale-state
 excluding migration export/import profiles, Git-ref bundle export/import, and
 archived/read-only workflow mutation safeguards. Release validation exercises
 these surfaces through package-tree gates in `runtime.skill_package`.
+
+## Execution Backend Boundary
+
+LoopPlane schedules agent roles, durable state transitions, validation,
+recovery, and generic background-command supervision. It does not infer a
+workload backend from task prose, intercept launcher binaries, rewrite command
+search paths for backend telemetry, choose machine resources, or enforce
+backend-specific launch deadlines.
+
+Environment access, resource selection, launch commands, storage placement,
+and site policy belong to each project's `SHARED_CONTEXT.md`, runner local
+configuration, or optional project skills. This boundary lets the same
+LoopPlane package move among personal machines, shared compute environments,
+and hosted servers without source changes.
 
 `runtime.skill_package` implements the `loopplane skill` command group used by the
 portable package workflow. It shares package diagnostics with
@@ -89,7 +112,14 @@ policy must provide `global_concurrency_limit`, `lock_scope`, `lock_key`, and
 `queue_when_busy`. `lock_scope` currently accepts `machine` and `workspace`;
 machine-scoped locks are intended to live under
 `$LOOPPLANE_HOME/locks/runner_locks/<lock_key>.lock` without replacing the
-project-local scheduler locks.
+project-local scheduler locks. They carry a unique owner ID, host/process
+identity, active-run lease path, and a 30-second heartbeat with a 120-second
+TTL. The owner holds a lifetime POSIX advisory lock on the metadata inode, so
+heartbeat, release, and stale reclaim cannot replace or unlink a newer owner.
+Platforms or shared filesystems without advisory locking support fail closed.
+Waiters poll once per second and may reclaim a lock only when the advisory owner
+is gone and its active-run lease is terminal/expired or its host-aware heartbeat
+is stale.
 
 `runtime.scheduler.append_event` writes append-only JSONL records under the
 resolved workflow `runtime_dir` through `event_append_lock`. Runtime events
@@ -98,6 +128,10 @@ ID/hash-chain links, and a canonical `event_hash`. Event appends are flushed
 with `fsync`. Snapshot helpers write compact event projections under the
 resolved workflow snapshot directory, load the latest snapshot, and replay
 only later events so later read-model work does not need to scan the whole log.
+Stable scheduler wait states are coalesced: an unchanged wait writes at most one
+audit event per five minutes, and heartbeat-only timestamp changes do not defeat
+coalescing. Detached supervisors wait on lightweight file-stat changes between
+scheduler ticks instead of rebuilding the scheduler snapshot every second.
 
 `runtime.read_models` implements `loopplane rebuild-read-models`. It parses
 `PLAN.md`, reads latest pointers and validator-owned `validation.json` files,
@@ -107,6 +141,35 @@ rebuilds sanitized version-control status, and validates the generated model
 shapes before writing them. The builder treats read models as derived output
 and does not mutate authoritative plan, validation, runtime state, or event
 log files.
+Event graph context and run-metadata discovery are bounded. Artifact/cache
+directories are pruned from control-plane scans, and node/validation/status
+metadata is discovered once per rebuild rather than through repeated recursive
+globs. Human summaries are on-demand by default and fingerprint bounded artifact
+metadata instead of hashing every artifact payload.
+
+Git checkpoint creation uses scoped repository probes, a temporary index, and
+managed refs. Default result trees are excluded, postcondition safety is
+guaranteed by mechanical isolation rather than repeated whole-tree scans, and
+each checkpoint has time/path/byte budgets. High-frequency before-worker and
+after-validation checkpoints are disabled by default; if explicitly enabled,
+budget exhaustion is non-blocking and recorded as `skipped_budget`.
+Existing workflows do not need a migration to gain the hard limits or result
+tree exclusion: missing `checkpoint_limits` use the bounded defaults and the
+runtime exclusion also protects older configs. An older workflow that explicitly
+keeps high-frequency checkpoint flags enabled may set both flags to `false` to
+adopt the new low-frequency policy.
+
+Planner workspace context, adapter output discovery, validator input discovery,
+inspector metadata, objective artifact inventory, and nested-repository boundary
+observation all use bounded traversal. A boundary observation that cannot finish
+inside its scan budget reports `out_of_boundary_watch_budget_exceeded` instead of
+holding an agent run while walking an arbitrarily large sibling tree.
+
+Normal `health` probes are bounded operational checks because dashboards and
+watchdogs call them frequently: they inspect recent event/checkpoint history,
+the latest managed checkpoint ref, and bounded result metadata. `health --strict`
+is the explicit full-history audit that revalidates every event-chain record,
+checkpoint record/ref, and complete JSONL read model.
 
 Worker output has two different lifetimes. Durable project deliverables can live
 in task-appropriate project folders such as `data/`, `artifacts/`, reports, or
@@ -134,6 +197,9 @@ follow-up after worker runs, and keeps polling through recoverable wait states
 such as paused, waiting for config, waiting for approval, and waiting for
 background jobs. It exits on completion, explicit stop, unrecoverable
 attention, scheduler failure, or failed validation/reconciliation follow-up.
+During controller replacement it retries a pre-existing scheduler-instance lock
+for a bounded 150-second startup grace, allowing the old 120-second lease to
+expire without requiring a second manual submission.
 
 Detached supervisor metadata is stored in the configured runtime directory as
 `supervisor.json`; the default flat compatibility path is
@@ -165,10 +231,13 @@ Workers can also start long-running commands with `loopplane background start --
 <command>`. That command launches a LoopPlane supervisor, records the job in
 `background_jobs.json`, maintains heartbeat/log/exit-code state, and returns an
 `agent_status_fragment` workers can copy into `agent_status.json`. Long or
-failure-prone background jobs can opt into semantic watchdog checks with
-`--watchdog-interval-seconds`, `--watchdog-runner`, and `--watchdog-question`;
-the supervisor periodically runs the inspector, records recent check summaries,
-and can stop treating the job as healthy when the inspector recommends recovery.
+failure-prone background jobs can opt into cheap process/log probes with
+`--watchdog-interval-seconds`. Semantic inspector checks are separately throttled
+with `--watchdog-agent-interval-seconds` (7200 seconds by default),
+`--watchdog-runner`, and `--watchdog-question`; the supervisor records recent
+check summaries and can stop treating the job as healthy when the inspector
+recommends recovery. Ordinary jobs shorter than the agent interval therefore
+incur no LLM watchdog call.
 `loopplane health` treats malformed, stale, failed, timed-out, or recovery-needed
 background job records as degraded runtime state. It also inspects configured
 machine-level runner lock keys under `$LOOPPLANE_HOME/locks/runner_locks/` and

@@ -10,7 +10,14 @@ from pathlib import Path
 from typing import Any
 
 from runtime.adapters.base import utc_timestamp
-from runtime.approval import default_expires_at, load_approval_policy, new_approval_id
+from runtime.approval import (
+    approval_record_status,
+    default_expires_at,
+    load_approval_policy,
+    new_approval_id,
+    read_approval_requests,
+    read_approval_responses,
+)
 from runtime.path_resolution import WorkflowPathError, WorkflowPaths, load_workflow_config
 from runtime.plan_objectives import parse_plan_objectives
 from runtime.prompt_context import data_reference, file_reference, json_summary, prompt_reference_index
@@ -34,6 +41,9 @@ EXPANSION_SELECTION_FILENAME = "expansion_selection.json"
 EXPANSION_PLAN_PATCH_FILENAME = "PLAN_PATCH.md"
 EXPANSION_REPORT_FILENAME = "EXPANSION_REPORT.md"
 EXPANSION_CONTEXT_MANIFEST_FILENAME = "expansion_context_manifest.json"
+NON_SCIENTIFIC_EXPANSION_FAILURE_CLASSES = frozenset(
+    {"background_job_failed", "objective_verifier_failed", "expansion_planner_failed"}
+)
 SELF_EXPANSION_POLICY_CONTEXT_FILENAME = "self_expansion_policy.json"
 EXPANSION_REGISTRY_CONTEXT_FILENAME = "expansion_registry_snapshot.json"
 ALLOWED_RESOLUTION_STRATEGIES = frozenset(
@@ -279,6 +289,7 @@ def expansion_candidate(snapshot: Mapping[str, Any], *, mode: str = "default") -
                 "policy": policy,
                 "registry": _compact_registry(registry),
                 "target_task_ids": _nonterminal_task_ids(snapshot),
+                "non_scientific_failures": _exhausted_non_scientific_failures(snapshot),
             }
     return None
 
@@ -352,7 +363,7 @@ def validate_expansion_proposal(
 ) -> dict[str, Any]:
     project, paths, workflow_id, workflow_config = _load_project(project_root)
     proposal_file = _resolve_project_path(project, proposal_path)
-    proposal, read_error = _read_json_object(proposal_file)
+    proposal, read_error, proposal_sha256 = _read_json_object(proposal_file)
     if read_error is not None:
         return _validation_result(
             project=project,
@@ -362,6 +373,7 @@ def validate_expansion_proposal(
             errors=[read_error],
         )
     assert proposal is not None
+    assert proposal_sha256 is not None
     return _validate_proposal_mapping(
         project=project,
         paths=paths,
@@ -369,6 +381,7 @@ def validate_expansion_proposal(
         workflow_config=workflow_config,
         proposal=proposal,
         proposal_path=proposal_file,
+        proposal_sha256=proposal_sha256,
         write_registry=write_registry,
     )
 
@@ -429,6 +442,35 @@ def apply_expansion_proposal(
     proposal_id = str(proposal.get("proposal_id") or validation.get("proposal_id") or f"exp_{uuid.uuid4().hex[:8]}")
     approval_required = _proposal_requires_approval(proposal, validation.get("policy", {}))
     strategy = str(proposal.get("resolution_strategy") or "")
+    patch_path = Path(str(validation["plan_patch_path"])).resolve()
+    approval_binding = {
+        "proposal_sha256": str(validation.get("proposal_sha256") or ""),
+        "plan_patch_sha256": str(validation.get("plan_patch_sha256") or ""),
+    }
+    current_binding = _expansion_approval_binding(
+        proposal_path=proposal_file,
+        plan_patch_path=patch_path,
+    )
+    if (
+        not approval_binding["proposal_sha256"]
+        or current_binding["proposal_sha256"] != approval_binding["proposal_sha256"]
+        or (
+            approval_binding["plan_patch_sha256"]
+            and current_binding["plan_patch_sha256"] != approval_binding["plan_patch_sha256"]
+        )
+    ):
+        return _apply_no_mutation_result(
+            project=project,
+            paths=paths,
+            workflow_id=workflow_id,
+            proposal=proposal,
+            proposal_path=proposal_file,
+            status="proposal_content_changed",
+            message="Expansion proposal or PLAN_PATCH.md changed during validation; validate the current content again.",
+            run_id=run_id,
+            runner_id=runner_id,
+            owner=owner,
+        )
 
     if strategy == "requires_human":
         approval_policy = load_approval_policy(paths)
@@ -462,9 +504,9 @@ def apply_expansion_proposal(
         )
         return result
 
+    approval_resolution: Mapping[str, Any] | None = None
     if approval_required:
-        approval_policy = load_approval_policy(paths)
-        if approval_policy.get("enabled") is not True:
+        if not all(approval_binding.values()):
             return _apply_no_mutation_result(
                 project=project,
                 paths=paths,
@@ -472,46 +514,114 @@ def apply_expansion_proposal(
                 proposal=proposal,
                 proposal_path=proposal_file,
                 status="requires_attention",
-                message="Expansion proposal requires human approval, but approval policy is disabled.",
+                message="Expansion approval could not be bound because the proposal or PLAN_PATCH.md was unavailable.",
                 run_id=run_id,
                 runner_id=runner_id,
                 owner=owner,
             )
-        approval = _record_expansion_approval_request(
+        approval_policy = load_approval_policy(paths)
+        approval_resolution = _expansion_approval_record(
             paths,
-            workflow_id=workflow_id,
-            proposal=proposal,
-            proposal_path=proposal_file,
-            run_id=run_id,
+            proposal_id=proposal_id,
+            binding=approval_binding,
         )
-        result = _apply_no_mutation_result(
-            project=project,
-            paths=paths,
-            workflow_id=workflow_id,
-            proposal=proposal,
-            proposal_path=proposal_file,
-            status="approval_required",
-            message="Expansion proposal requires approval and did not mutate PLAN.md.",
-            run_id=run_id,
-            runner_id=runner_id,
-            owner=owner,
-            approval=approval,
-        )
-        return result
+        if approval_resolution is not None and approval_resolution.get("status") == "approved":
+            pass
+        elif approval_resolution is not None and approval_resolution.get("status") == "pending":
+            policy_enabled = approval_policy.get("enabled") is True
+            return _apply_no_mutation_result(
+                project=project,
+                paths=paths,
+                workflow_id=workflow_id,
+                proposal=proposal,
+                proposal_path=proposal_file,
+                status="approval_required" if policy_enabled else "requires_attention",
+                message=(
+                    "Expansion proposal is waiting for approval."
+                    if policy_enabled
+                    else (
+                        "Expansion proposal is waiting for an explicit approval response; interactive approval "
+                        "is disabled, so an operator must use the approval override control path."
+                    )
+                ),
+                run_id=run_id,
+                runner_id=runner_id,
+                owner=owner,
+                approval=approval_resolution,
+            )
+        elif approval_resolution is not None:
+            return _apply_no_mutation_result(
+                project=project,
+                paths=paths,
+                workflow_id=workflow_id,
+                proposal=proposal,
+                proposal_path=proposal_file,
+                status="requires_attention",
+                message=(
+                    "Expansion proposal approval is "
+                    f"{approval_resolution.get('status')}; PLAN.md was not mutated."
+                ),
+                run_id=run_id,
+                runner_id=runner_id,
+                owner=owner,
+                approval=approval_resolution,
+            )
+        else:
+            approval_resolution = _record_expansion_approval_request(
+                paths,
+                workflow_id=workflow_id,
+                proposal=proposal,
+                proposal_path=proposal_file,
+                plan_patch_path=patch_path,
+                binding=approval_binding,
+                run_id=run_id,
+            )
+            policy_enabled = approval_policy.get("enabled") is True
+            return _apply_no_mutation_result(
+                project=project,
+                paths=paths,
+                workflow_id=workflow_id,
+                proposal=proposal,
+                proposal_path=proposal_file,
+                status="approval_required" if policy_enabled else "requires_attention",
+                message=(
+                    "Expansion proposal requires approval and did not mutate PLAN.md."
+                    if policy_enabled
+                    else (
+                        "Expansion proposal requires approval and did not mutate PLAN.md; interactive approval "
+                        "is disabled, so an operator must use the approval override control path."
+                    )
+                ),
+                run_id=run_id,
+                runner_id=runner_id,
+                owner=owner,
+                approval=approval_resolution,
+            )
 
-    patch_path = Path(str(validation["plan_patch_path"])).resolve()
     plan_patch_operation = str(validation.get("plan_patch_operation") or _plan_patch_operation_for_proposal(proposal))
     target_phase_id = str(validation.get("target_phase_id") or proposal.get("target_phase_id") or proposal.get("phase_id") or "").strip() or None
     apply_result = apply_approved_plan_patch(
         project,
         change_request_id=f"self_expansion:{proposal_id}",
         plan_patch_path=patch_path,
-        response_id=str(run_id or ""),
-        approval_request_id="",
+        response_id=_expansion_approval_response_id(approval_resolution) or str(run_id or ""),
+        approval_request_id=(
+            str(approval_resolution.get("approval_id") or "") if isinstance(approval_resolution, Mapping) else ""
+        ),
         plan_patch_operation=plan_patch_operation,
         target_phase_id=target_phase_id,
+        expected_plan_patch_sha256=approval_binding.get("plan_patch_sha256") or None,
         write=True,
     )
+    if isinstance(approval_resolution, Mapping):
+        apply_result = {
+            **dict(apply_result),
+            "approval": dict(approval_resolution),
+            "warnings": [
+                *list(apply_result.get("warnings", [])),
+                "The expansion plan patch was applied under an explicit recorded approval response.",
+            ],
+        }
     objective_followup_result: Mapping[str, Any] | None = None
     if apply_result.get("ok") and str(proposal.get("expansion_type") or "") == "objective_gap":
         from runtime.objective_verification import apply_objective_expansion_followups
@@ -586,6 +696,7 @@ def apply_expansion_proposal(
         "runner_id": runner_id,
         "resolution_strategy": strategy,
         "approval_required": False,
+        "approval": dict(approval_resolution) if isinstance(approval_resolution, Mapping) else None,
         "target_objective_ids": [str(item) for item in proposal.get("target_objective_ids", []) if str(item)],
         "objective_verification_report": proposal.get("objective_verification_report"),
         "objective_followup_update": dict(objective_followup_result) if isinstance(objective_followup_result, Mapping) else None,
@@ -674,6 +785,7 @@ def reopen_expansion_failures(
 
 def build_expansion_prompt_variables(project_root: Path | str, prepared_run: Any) -> dict[str, str]:
     project, paths, workflow_id, workflow_config = _load_project(project_root)
+    proposal_schema_path = Path(__file__).resolve().parent / "schemas" / "expansion_proposal.schema.json"
     policy = load_self_expansion_policy(workflow_config)
     approval_policy = load_approval_policy(paths)
     autonomous_recovery = _autonomous_recovery_enabled(approval_policy)
@@ -692,6 +804,10 @@ def build_expansion_prompt_variables(project_root: Path | str, prepared_run: Any
         selection=selection if isinstance(selection, Mapping) else {},
         objective_report_path=objective_report_path,
     )
+    references = context_manifest.get("references") if isinstance(context_manifest, Mapping) else {}
+    brief_reference = references.get("project_brief") if isinstance(references, Mapping) else {}
+    shared_reference = references.get("shared_context") if isinstance(references, Mapping) else {}
+    schema_reference = references.get("proposal_schema") if isinstance(references, Mapping) else {}
     run_paths = {
         "workflow_id": workflow_id,
         "run_id": _string_attr(prepared_run, "run_id"),
@@ -717,6 +833,10 @@ def build_expansion_prompt_variables(project_root: Path | str, prepared_run: Any
         "brief_file": paths.value("brief_file"),
         "plan_file": paths.value("plan_file"),
         "shared_context_file": paths.value("shared_context_file"),
+        "binding_project_brief_sha256": str(brief_reference.get("sha256") or "unavailable"),
+        "binding_shared_context_sha256": str(shared_reference.get("sha256") or "unavailable"),
+        "proposal_schema_path": proposal_schema_path.as_posix(),
+        "proposal_schema_sha256": str(schema_reference.get("sha256") or "unavailable"),
         "runtime_dir": paths.value("runtime_dir"),
         "results_dir": paths.value("results_dir"),
         "context_manifest_path": _project_relative(project, role_output_dir / EXPANSION_CONTEXT_MANIFEST_FILENAME),
@@ -757,6 +877,11 @@ def _write_expansion_context_manifest(
         "project_brief": file_reference(project, paths.brief_file, label="Project brief"),
         "active_plan": file_reference(project, paths.plan_file, label="Active plan"),
         "shared_context": file_reference(project, paths.shared_context_file, label="Shared workflow context"),
+        "proposal_schema": file_reference(
+            project,
+            Path(__file__).resolve().parent / "schemas" / "expansion_proposal.schema.json",
+            label="Expansion proposal schema",
+        ),
         "final_verifier_report": file_reference(project, paths.runtime_dir / "final_verification_report.json", label="Latest final verifier report"),
         "failure_registry": file_reference(project, paths.runtime_dir / "failure_registry.json", label="Failure registry"),
         "expansion_selection": file_reference(project, role_output_dir / EXPANSION_SELECTION_FILENAME, label="Selected expansion candidate"),
@@ -772,7 +897,8 @@ def _write_expansion_context_manifest(
         "run_id": run_id,
         "source_authority": "prompt_context_manifest_not_source_of_truth",
         "instructions": [
-            "Use the referenced files as expansion context instead of relying on prompt-inlined copies.",
+            "The project brief and shared context are binding. Read them from their referenced paths and verify their hashes before proposing work.",
+            "Use the remaining referenced files as expansion context instead of relying on summaries.",
             "The selected expansion candidate identifies the target; read referenced reports before proposing work.",
         ],
         "selection_summary": {
@@ -797,6 +923,7 @@ def _validate_proposal_mapping(
     workflow_config: Mapping[str, Any],
     proposal: Mapping[str, Any],
     proposal_path: Path,
+    proposal_sha256: str,
     write_registry: bool,
 ) -> dict[str, Any]:
     errors: list[str] = []
@@ -921,6 +1048,7 @@ def _validate_proposal_mapping(
         target_failures=[failure for failure in target_failures if isinstance(failure, Mapping)],
     )
     patch_path = _proposal_plan_patch_path(project, proposal_path, proposal)
+    plan_patch_sha256 = _sha256_path(patch_path)
     declared_task_ids = [str(task.get("task_id") or "") for task in new_tasks if isinstance(task, Mapping)] if isinstance(new_tasks, Sequence) and not isinstance(new_tasks, (str, bytes)) else []
     no_mutation_human_resolution = task_count == 0 and strategy in {"requires_human", "supersede_task_with_approval"}
     plan_patch_operation = _plan_patch_operation_for_proposal(
@@ -960,13 +1088,19 @@ def _validate_proposal_mapping(
             plan_patch_path=patch_path,
             plan_patch_operation=plan_patch_operation,
             target_phase_id=structural_target_phase_id or None,
+            expected_plan_patch_sha256=plan_patch_sha256,
             write=False,
         )
         if not patch_validation.get("ok"):
             errors.extend(str(error) for error in patch_validation.get("errors", []))
         patch_tasks = [str(item) for item in patch_validation.get("added_tasks", [])]
         added_phase_ids = [str(item) for item in patch_validation.get("added_phase_ids", []) if str(item)]
-        patch_task_records = _parse_plan_patch_task_records(patch_path)
+        patch_task_records, patch_parse_error = _parse_plan_patch_task_records(
+            patch_path,
+            expected_sha256=plan_patch_sha256,
+        )
+        if patch_parse_error:
+            errors.append(patch_parse_error)
     if declared_task_ids and sorted(declared_task_ids) != sorted(str(item) for item in patch_tasks):
         errors.append("new_tasks task_id values must match PLAN_PATCH.md appended task ids.")
     if expansion_type == "objective_gap" and target_phase_ids and str(proposal.get("trigger") or "") == "phase_objective_gap":
@@ -1012,10 +1146,13 @@ def _validate_proposal_mapping(
     if risk not in ALLOWED_RISKS:
         errors.append("proposal risk must be low, medium, or high.")
     loop_signature = str(proposal.get("loop_signature") or "") or compute_loop_signature(proposal)
-    repeated = _loop_signature_count(read_expansion_registry(paths, workflow_id=workflow_id), loop_signature)
+    repeated = _applied_loop_signature_count(
+        read_expansion_registry(paths, workflow_id=workflow_id),
+        loop_signature,
+    )
     max_repeated = int(policy.get("max_repeated_signature_count") or 0)
     if max_repeated > 0 and repeated >= max_repeated:
-        errors.append(f"loop_signature repeated {repeated} time(s), exceeding policy.")
+        errors.append(f"loop_signature was already applied {repeated} time(s), reaching policy limit.")
     budget_problem = expansion_budget_problem(policy, read_expansion_registry(paths, workflow_id=workflow_id))
     if budget_problem is not None:
         errors.append(f"self-expansion budget exhausted: {budget_problem['code']}.")
@@ -1030,8 +1167,10 @@ def _validate_proposal_mapping(
         extra={
             "proposal": dict(proposal),
             "proposal_id": proposal_id,
+            "proposal_sha256": proposal_sha256,
             "policy": policy,
             "plan_patch_path": patch_path.as_posix(),
+            "plan_patch_sha256": plan_patch_sha256,
             "plan_patch_operation": plan_patch_operation,
             "target_phase_id": structural_target_phase_id or None,
             "added_task_ids": list(patch_tasks),
@@ -1051,16 +1190,31 @@ def _validate_proposal_mapping(
     return result
 
 
-def _parse_plan_patch_task_records(patch_path: Path) -> dict[str, Any]:
-    patch_text = _safe_read(patch_path)
+def _parse_plan_patch_task_records(
+    patch_path: Path,
+    *,
+    expected_sha256: str,
+) -> tuple[dict[str, Any], str | None]:
+    try:
+        patch_bytes = patch_path.read_bytes()
+        patch_text = patch_bytes.decode("utf-8")
+    except (OSError, UnicodeDecodeError) as error:
+        return {}, f"Unable to parse PLAN_PATCH.md task records: {error}"
+    actual_sha256 = "sha256:" + sha256(patch_bytes).hexdigest()
+    if not expected_sha256 or actual_sha256 != expected_sha256:
+        return (
+            {},
+            "PLAN_PATCH.md content changed during self-expansion validation; "
+            f"expected {expected_sha256 or 'unavailable'}, observed {actual_sha256}.",
+        )
     start = patch_text.find(PLAN_PATCH_APPEND_BEGIN)
     end = patch_text.find(PLAN_PATCH_APPEND_END)
     if start < 0 or end < 0 or end <= start:
-        return {}
+        return {}, None
     append_block = patch_text[start + len(PLAN_PATCH_APPEND_BEGIN) : end].strip()
     if not append_block:
-        return {}
-    return parse_plan_tasks(append_block + "\n")
+        return {}, None
+    return parse_plan_tasks(append_block + "\n"), None
 
 
 def _target_task_phase_ids(
@@ -1327,10 +1481,19 @@ def _record_expansion_approval_request(
     workflow_id: str,
     proposal: Mapping[str, Any],
     proposal_path: Path,
+    plan_patch_path: Path,
+    binding: Mapping[str, str],
     run_id: str | None,
 ) -> dict[str, Any]:
     policy = load_approval_policy(paths)
     approval_id = new_approval_id()
+    proposal_id = str(proposal.get("proposal_id") or "")
+    new_task_ids = [
+        str(task.get("task_id") or "")
+        for task in proposal.get("new_tasks", [])
+        if isinstance(task, Mapping) and str(task.get("task_id") or "")
+    ]
+    approval_scope = " ".join(["self_expansion", proposal_id, *new_task_ids]).strip()
     request = {
         "schema_version": SCHEMA_VERSION,
         "approval_id": approval_id,
@@ -1340,20 +1503,119 @@ def _record_expansion_approval_request(
         "expires_at": default_expires_at(),
         "status": "pending",
         "type": "self_expansion",
-        "scope": "self_expansion " + str(proposal.get("proposal_id") or ""),
-        "proposal_id": proposal.get("proposal_id"),
+        "scope": approval_scope,
+        "proposal_id": proposal_id,
         "run_id": run_id,
         "proposal_path": _path_for_record(paths.project_root, proposal_path),
+        "proposal_sha256": binding["proposal_sha256"],
+        "plan_patch_path": _path_for_record(paths.project_root, plan_patch_path),
+        "plan_patch_sha256": binding["plan_patch_sha256"],
         "resolution_strategy": proposal.get("resolution_strategy"),
         "target_task_ids": list(proposal.get("target_task_ids", [])),
         "target_failure_ids": list(proposal.get("target_failure_ids", [])),
         "target_objective_ids": list(proposal.get("target_objective_ids", [])),
+        "new_task_ids": new_task_ids,
         "objective_verification_report": proposal.get("objective_verification_report"),
         "message": "Self-expansion proposal requires human approval.",
         "approval_policy_enabled": policy.get("enabled") is True,
     }
+    _supersede_stale_expansion_approval_requests(
+        paths,
+        proposal_id=proposal_id,
+        binding=binding,
+        superseded_by_approval_id=approval_id,
+    )
     _append_jsonl(paths.runtime_dir / "human_approval_requests.jsonl", request)
     return request
+
+
+def _expansion_approval_record(
+    paths: WorkflowPaths,
+    *,
+    proposal_id: str,
+    binding: Mapping[str, str],
+) -> dict[str, Any] | None:
+    responses = read_approval_responses(paths)
+    records = [
+        approval_record_status(request, responses=responses, now=utc_timestamp())
+        for request in read_approval_requests(paths)
+        if str(request.get("type") or "") == "self_expansion"
+        and str(request.get("proposal_id") or "") == proposal_id
+    ]
+    if not records:
+        return None
+    latest = sorted(records, key=lambda item: str(item.get("created_at") or ""))[-1]
+    if not _expansion_approval_binding_matches(latest, binding):
+        return None
+    return latest
+
+
+def _expansion_approval_binding(*, proposal_path: Path, plan_patch_path: Path) -> dict[str, str]:
+    return {
+        "proposal_sha256": _sha256_path(proposal_path),
+        "plan_patch_sha256": _sha256_path(plan_patch_path),
+    }
+
+
+def _expansion_approval_binding_matches(
+    approval: Mapping[str, Any],
+    binding: Mapping[str, str],
+) -> bool:
+    return all(
+        str(binding.get(field) or "")
+        and str(approval.get(field) or "") == str(binding.get(field) or "")
+        for field in ("proposal_sha256", "plan_patch_sha256")
+    )
+
+
+def _supersede_stale_expansion_approval_requests(
+    paths: WorkflowPaths,
+    *,
+    proposal_id: str,
+    binding: Mapping[str, str],
+    superseded_by_approval_id: str,
+) -> None:
+    responses = read_approval_responses(paths)
+    response_path = paths.runtime_dir / "human_approval_responses.jsonl"
+    for request in read_approval_requests(paths):
+        if str(request.get("type") or "") != "self_expansion":
+            continue
+        if str(request.get("proposal_id") or "") != proposal_id:
+            continue
+        status = approval_record_status(request, responses=responses, now=utc_timestamp())
+        if status.get("status") != "pending" or _expansion_approval_binding_matches(request, binding):
+            continue
+        response = {
+            "schema_version": SCHEMA_VERSION,
+            "approval_id": str(request.get("approval_id") or request.get("request_id") or ""),
+            "responded_at": utc_timestamp(),
+            "decision": "superseded",
+            "approved_by": "loopplane",
+            "scope": str(request.get("scope") or ""),
+            "notes": "Proposal or PLAN_PATCH.md content changed; a new content-bound approval is required.",
+            "source": "self_expansion_content_binding",
+            "workflow_id": str(request.get("workflow_id") or ""),
+            "type": "self_expansion",
+            "superseded_by_approval_id": superseded_by_approval_id,
+        }
+        _append_jsonl(response_path, response)
+        responses.append(response)
+
+
+def _sha256_path(path: Path) -> str:
+    try:
+        return "sha256:" + sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return ""
+
+
+def _expansion_approval_response_id(approval: Mapping[str, Any] | None) -> str:
+    if not isinstance(approval, Mapping):
+        return ""
+    response = approval.get("response")
+    if isinstance(response, Mapping):
+        return str(response.get("response_id") or response.get("approval_id") or "")
+    return ""
 
 
 def _validation_result(
@@ -1522,7 +1784,16 @@ def _dependency_list(value: Any) -> list[str]:
     return [part.strip().strip('"').strip("'") for part in stripped.split(",") if part.strip()]
 
 
-def _loop_signature_count(registry: Mapping[str, Any], loop_signature: str) -> int:
+def _applied_loop_signature_count(registry: Mapping[str, Any], loop_signature: str) -> int:
+    """Count semantic plan transitions, not failed or approval-pending attempts.
+
+    Proposal records are also the audit trail for validation failures and
+    approval hand-offs. Counting those records against the semantic repeat
+    budget can make an otherwise valid proposal impossible to approve: merely
+    revalidating the same, unapplied proposal changes no workflow state. Only
+    an ``applied`` proposal has crossed the state-transition boundary that this
+    guard is intended to bound.
+    """
     if not loop_signature:
         return 0
     proposals = registry.get("proposals", [])
@@ -1531,26 +1802,74 @@ def _loop_signature_count(registry: Mapping[str, Any], loop_signature: str) -> i
     return sum(
         1
         for proposal in proposals
-        if isinstance(proposal, Mapping) and str(proposal.get("loop_signature") or "") == loop_signature
+        if isinstance(proposal, Mapping)
+        and str(proposal.get("status") or "") == "applied"
+        and str(proposal.get("loop_signature") or "") == loop_signature
     )
 
 
 def _first_exhausted_failure(snapshot: Mapping[str, Any]) -> dict[str, Any] | None:
     registry = snapshot.get("failure_registry")
     failures = registry.get("failures", []) if isinstance(registry, Mapping) else []
-    tasks = {str(task.get("task_id") or ""): str(task.get("status") or "") for task in snapshot.get("tasks", []) if isinstance(task, Mapping)}
-    deferred_failure_ids = _failures_waiting_on_expansion_evidence(snapshot, tasks)
+    task_records = {
+        str(task.get("task_id") or ""): task
+        for task in snapshot.get("tasks", [])
+        if isinstance(task, Mapping) and str(task.get("task_id") or "")
+    }
+    task_statuses = {
+        task_id: str(task.get("status") or "")
+        for task_id, task in task_records.items()
+    }
+    completed_task_ids = {
+        task_id for task_id, status in task_statuses.items() if status in {"x", "-"}
+    }
+    deferred_failure_ids = _failures_waiting_on_expansion_evidence(snapshot, task_statuses)
     for failure in failures:
         if not isinstance(failure, Mapping):
             continue
         if str(failure.get("status") or "") != "exhausted":
             continue
+        if str(failure.get("failure_class") or "") in NON_SCIENTIFIC_EXPANSION_FAILURE_CLASSES:
+            continue
         if str(failure.get("failure_id") or "") in deferred_failure_ids:
             continue
         task_id = str(failure.get("task_id") or "")
-        if task_id and task_id in tasks:
-            return dict(failure)
+        task = task_records.get(task_id)
+        if task is None:
+            continue
+        dependencies = [str(dependency) for dependency in task.get("depends_on", []) if str(dependency)]
+        if any(dependency not in completed_task_ids for dependency in dependencies):
+            continue
+        return dict(failure)
     return None
+
+
+def _exhausted_non_scientific_failures(snapshot: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Return operational blockers without letting them suppress unrelated expansion.
+
+    Infrastructure failures are not scientific evidence, but a stale operational
+    failure must not turn into a global no-work latch. The expansion planner gets
+    these records explicitly so it can propose operational recovery or independent
+    work without interpreting the failure as a scientific result.
+    """
+    registry = snapshot.get("failure_registry")
+    failures = registry.get("failures", []) if isinstance(registry, Mapping) else []
+    return [
+        {
+            key: failure.get(key)
+            for key in (
+                "failure_id",
+                "task_id",
+                "failure_class",
+                "failure_signature",
+                "exhausted_reason",
+            )
+        }
+        for failure in failures
+        if isinstance(failure, Mapping)
+        and str(failure.get("status") or "") == "exhausted"
+        and str(failure.get("failure_class") or "") in NON_SCIENTIFIC_EXPANSION_FAILURE_CLASSES
+    ]
 
 
 def _failures_waiting_on_expansion_evidence(snapshot: Mapping[str, Any], tasks: Mapping[str, str]) -> set[str]:
@@ -1736,16 +2055,19 @@ def _resolve_project_path(project: Path, value: Path | str) -> Path:
     return path.resolve()
 
 
-def _read_json_object(path: Path) -> tuple[dict[str, Any] | None, str | None]:
+def _read_json_object(path: Path) -> tuple[dict[str, Any] | None, str | None, str | None]:
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        content = path.read_bytes()
+        data = json.loads(content.decode("utf-8"))
     except OSError as error:
-        return None, f"{path}: {error}"
+        return None, f"{path}: {error}", None
+    except UnicodeDecodeError as error:
+        return None, f"{path}: invalid UTF-8: {error}", None
     except json.JSONDecodeError as error:
-        return None, f"{path}: invalid JSON: {error.msg}"
+        return None, f"{path}: invalid JSON: {error.msg}", None
     if not isinstance(data, Mapping):
-        return None, f"{path}: JSON value must be an object"
-    return dict(data), None
+        return None, f"{path}: JSON value must be an object", None
+    return dict(data), None, "sha256:" + sha256(content).hexdigest()
 
 
 def _read_json_object_default(path: Path, default: Any) -> Any:

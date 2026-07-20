@@ -184,6 +184,99 @@ class ReconcilerTest(unittest.TestCase):
             self.assertIn("recovered_by_validation_path", registry["failures"][0])
             self.assertIn("- [x] T001: Produce result artifact", (project / "PLAN.md").read_text(encoding="utf-8"))
 
+    def test_reconcile_pass_recovers_prior_worker_failure_for_accepted_task(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "Reconcile passing validation after a worker failure.")
+            configure_fake_summary_agent(project)
+            write_plan(project)
+            workflow_id = json.loads(
+                (project / ".loopplane" / "config" / "workflow.json").read_text(encoding="utf-8")
+            )["workflow_id"]
+            registry_path = project / ".loopplane" / "runtime" / "failure_registry.json"
+            registry_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "1.5",
+                        "workflow_id": workflow_id,
+                        "failures": [
+                            {
+                                "failure_id": "fail_worker",
+                                "task_id": "T001",
+                                "run_id": "run_worker_failed",
+                                "status": "exhausted",
+                                "failure_class": "worker_failed",
+                                "failure_signature": "worker:missing-agent-status",
+                                "recoverable": True,
+                                "budget_remaining": False,
+                            }
+                        ],
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            run_dir = write_worker_run(project, create_artifact=True)
+            run_validator(project, task_id="T001", run_dir=run_dir)
+
+            result = run_reconciler(project, task_id="T001", run_dir=run_dir)
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["recovered_failure_ids"], ["fail_worker"])
+            failure = json.loads(registry_path.read_text(encoding="utf-8"))["failures"][0]
+            self.assertEqual(failure["status"], "recovered")
+            self.assertEqual(failure["recovered_by_run_id"], run_dir.name)
+
+    def test_reconcile_pass_recovers_prior_background_failures_for_accepted_task(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "Accept a task after earlier background attempts failed.")
+            configure_fake_summary_agent(project)
+            write_plan(project)
+            workflow_id = json.loads(
+                (project / ".loopplane" / "config" / "workflow.json").read_text(encoding="utf-8")
+            )["workflow_id"]
+            registry_path = project / ".loopplane" / "runtime" / "failure_registry.json"
+            registry_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "1.5",
+                        "workflow_id": workflow_id,
+                        "failures": [
+                            {
+                                "failure_id": f"fail_background_{index}",
+                                "task_id": "T001",
+                                "run_id": f"run_background_failed_{index}",
+                                "status": "unrecovered",
+                                "failure_class": "background_job_failed",
+                                "failure_signature": f"background:attempt-{index}",
+                                "recoverable": True,
+                                "budget_remaining": True,
+                            }
+                            for index in range(3)
+                        ],
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            run_dir = write_worker_run(project, create_artifact=True)
+            run_validator(project, task_id="T001", run_dir=run_dir)
+
+            result = run_reconciler(project, task_id="T001", run_dir=run_dir)
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(
+                result["recovered_failure_ids"],
+                ["fail_background_0", "fail_background_1", "fail_background_2"],
+            )
+            failures = json.loads(registry_path.read_text(encoding="utf-8"))["failures"]
+            self.assertTrue(all(failure["status"] == "recovered" for failure in failures))
+
     def test_reconcile_human_approval_strategy_auto_authorizes_without_pending_approval(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             project = Path(tmp) / "project"

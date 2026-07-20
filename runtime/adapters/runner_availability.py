@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from runtime.adapters.base import AdapterInput
+from runtime.exit_codes import ADAPTER_COMMAND_UNAVAILABLE_EXIT_CODE
 
 
 DEFAULT_COOLDOWNS = {
@@ -87,8 +88,19 @@ def classify_runner_availability(
         "stderr": _read_text(stderr_path),
         "final_output": _read_text(final_output_path),
     }
-    custom = _match_custom_classifier(policy, sources)
-    match = custom
+    custom = None
+    if exit_code == ADAPTER_COMMAND_UNAVAILABLE_EXIT_CODE:
+        message = sources["stderr"] or sources["final_output"] or "Configured runner command is unavailable."
+        match = {
+            "reason_class": "runner_configuration_error",
+            "source": "process_launch",
+            "message": message,
+            "requires_attention": True,
+            "confidence": "high",
+        }
+    else:
+        custom = _match_custom_classifier(policy, sources)
+        match = custom
     if match is None and _builtin_classifiers_enabled(adapter_input, policy):
         match = _match_builtin_classifier(sources)
     if match is None:
@@ -247,6 +259,42 @@ def _matched_line(text: str, found: re.Match[str]) -> str:
 
 
 def _cooldown_seconds_from_retry_at(message: str, *, now: datetime) -> int | None:
+    absolute = re.search(
+        r"\btry again (?:at|after)\s+"
+        r"(?P<month>jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|"
+        r"jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+"
+        r"(?P<day>\d{1,2})(?:st|nd|rd|th)?(?:,\s*|\s+)"
+        r"(?P<year>\d{4})(?:\s+at)?\s+"
+        r"(?P<hour>\d{1,2})(?::(?P<minute>\d{2}))?\s*(?P<period>[ap]\.?m\.?)\b",
+        message,
+        flags=re.IGNORECASE,
+    )
+    if absolute:
+        hour = int(absolute.group("hour"))
+        minute = int(absolute.group("minute") or "0")
+        day = int(absolute.group("day"))
+        if hour < 1 or hour > 12 or minute > 59:
+            return None
+        period = absolute.group("period").lower().replace(".", "")
+        if period == "pm" and hour != 12:
+            hour += 12
+        elif period == "am" and hour == 12:
+            hour = 0
+        try:
+            month = datetime.strptime(absolute.group("month")[:3], "%b").month
+            target = datetime(
+                int(absolute.group("year")),
+                month,
+                day,
+                hour,
+                minute,
+                tzinfo=now.tzinfo,
+            )
+        except ValueError:
+            return None
+        seconds = int((target - now).total_seconds())
+        return max(RETRY_AT_BUFFER_SECONDS, seconds + RETRY_AT_BUFFER_SECONDS)
+
     found = re.search(
         r"\btry again (?:at|after)\s+"
         r"(?:(?P<month>jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|"

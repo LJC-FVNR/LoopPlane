@@ -66,9 +66,17 @@
       "properties": {
         "validator_agent_mode": {
           "type": "string",
-          "enum": ["disabled", "on_deterministic_failure", "always"]
+          "enum": ["disabled", "high_risk_pass_only", "on_deterministic_failure", "always"]
         },
         "validator_agent_for_high_risk": {"type": "boolean"}
+      },
+      "additionalProperties": false
+    },
+    "human_summaries": {
+      "type": "object",
+      "properties": {
+        "auto_after_reconcile": {"type": "boolean"},
+        "generation_mode": {"type": "string", "enum": ["on_demand", "automatic"]}
       },
       "additionalProperties": false
     },

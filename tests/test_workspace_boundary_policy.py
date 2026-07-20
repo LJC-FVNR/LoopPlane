@@ -346,8 +346,10 @@ class WorkerWriteBoundaryPolicyTest(unittest.TestCase):
             script.write_text(
                 textwrap.dedent(
                     """
+                    #!/usr/bin/env python3
                     import json
                     import os
+                    import sys
                     from pathlib import Path
 
                     project = Path(os.environ["LOOPPLANE_PROJECT_ROOT"])
@@ -380,16 +382,21 @@ class WorkerWriteBoundaryPolicyTest(unittest.TestCase):
                     }
                     (run_dir / "agent_status.json").write_text(json.dumps(status, indent=2, sort_keys=True) + "\\n", encoding="utf-8")
                     Path(os.environ["LOOPPLANE_FINAL_OUTPUT"]).write_text("worker claimed completion\\n", encoding="utf-8")
+                    print(
+                        'WARN codex_file_watcher: failed to unwatch path: Invalid argument (os error 22)',
+                        file=sys.stderr,
+                    )
                     """
                 ).lstrip(),
                 encoding="utf-8",
             )
+            script.chmod(script.stat().st_mode | 0o111)
             config_path = paths.config_file("agent_runners.json")
             config = json.loads(config_path.read_text(encoding="utf-8"))
             runner = config["runners"]["worker"]
-            runner["adapter"] = "shell"
-            runner["command"] = sys.executable
-            runner["args"] = [script.as_posix()]
+            runner["adapter"] = "codex_cli"
+            runner["command"] = script.as_posix()
+            runner["args"] = []
             runner["cwd"] = "{{project_root}}"
             runner["prompt_delivery"] = {"mode": "stdin"}
             runner["timeout_seconds"] = 10
@@ -405,6 +412,9 @@ class WorkerWriteBoundaryPolicyTest(unittest.TestCase):
             self.assertEqual(execution["status"], "failed_agent")
             self.assertFalse(execution["worker_write_boundary"]["ok"])
             self.assertEqual(adapter_result["exit_code"], 126)
+            self.assertEqual(adapter_result["adapter_metadata"]["process_exit_code"], 0)
+            self.assertNotIn("runner_availability", adapter_result["adapter_metadata"])
+            self.assertNotEqual(execution.get("next_step"), "runner_availability_wait")
             self.assertFalse(adapter_result["adapter_metadata"]["workspace_boundary_policy"]["ok"])
             self.assertIn(
                 "../service-b/adapter_unreported_sibling.txt",

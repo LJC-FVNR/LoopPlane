@@ -12,6 +12,7 @@ from typing import Any
 from runtime.adapters.base import ADAPTER_INPUT_FILENAME, AdapterContractError, AdapterInput, utc_timestamp
 from runtime.adapters.registry import AdapterLookupError, get_adapter
 from runtime.agent_runners import AgentRunnerConfigError, RunnerConfig, load_agent_runners
+from runtime.file_discovery import discover_files_bounded
 from runtime.path_resolution import WorkflowPathError, WorkflowPaths, load_workflow_config
 from runtime.reconciliation import parse_plan_tasks
 from runtime.scheduler import SCHEMA_VERSION, SchedulerError, append_event, load_event_log_projection, prepare_run
@@ -402,6 +403,7 @@ def _build_agent_inspector_prompt(
         "workflow_id": str(request.get("workflow_id") or ""),
         "inspection_request_id": str(request.get("request_id") or ""),
         "inspection_question": str(request.get("user_message") or ""),
+        "inspection_source": str(request.get("source") or "cli"),
         "brief_file": paths.value("brief_file"),
         "shared_context_file": paths.value("shared_context_file"),
         "plan_file": paths.value("plan_file"),
@@ -882,9 +884,14 @@ def _result_summaries(project: Path, paths: WorkflowPaths) -> list[dict[str, Any
     if not paths.results_dir.exists():
         return records
     interesting_names = {"latest.json", "validation.json", "agent_status.json", "acceptance_results.json"}
-    for path in sorted(paths.results_dir.glob("**/*.json")):
-        if path.name not in interesting_names:
-            continue
+    discovery = discover_files_bounded(
+        (paths.results_dir,),
+        names=interesting_names,
+        max_entries=20_000,
+        max_matches=2_000,
+        max_depth=10,
+    )
+    for path in discovery.paths:
         payload = _read_json_object(path, default=None)
         if not isinstance(payload, Mapping):
             continue

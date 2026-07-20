@@ -12,6 +12,7 @@ from runtime.adapters.base import utc_timestamp
 from runtime.agent_status import CANONICAL_WORKER_STATUSES, normalize_worker_status
 from runtime.agent_runners import AgentRunnerConfigError, load_agent_runners
 from runtime.exit_codes import EXIT_HEALTH_FAILURE, EXIT_SUCCESS
+from runtime.file_discovery import discover_files_bounded
 from runtime.path_resolution import WorkflowPaths
 from runtime.runner_locks import (
     RUNNER_LOCK_ACTIVE,
@@ -39,6 +40,10 @@ FAIL = "fail"
 DEFAULT_HEARTBEAT_TTL_SECONDS = 120
 BACKGROUND_JOB_TTL_SECONDS = 600
 RECENT_FILE_LIMIT = 20
+RECENT_FILE_SCAN_ENTRY_LIMIT = 20_000
+RECENT_FILE_SCAN_MATCH_LIMIT = 1_000
+FAST_EVENT_RECORD_LIMIT = 200
+FAST_CHECKPOINT_RECORD_LIMIT = 50
 ALLOWED_BACKGROUND_JOB_STATUSES = frozenset(
     {
         "pending",
@@ -58,6 +63,10 @@ INACTIVE_RUN_STATUSES = frozenset({"completed", "succeeded", "failed", "cancelle
 ACTIVE_RUN_STATUSES = frozenset({"running", "pending", "starting", "waiting"})
 WORKER_STATUSES = CANONICAL_WORKER_STATUSES
 RESOLVED_FAILURE_STATUSES = frozenset({"recovered", "waived"})
+ROLE_LOCAL_AGENT_STATUS_SCHEMAS = {
+    "validator": frozenset({"1.0", SCHEMA_VERSION}),
+    "final_reviewer": frozenset({"1.0", SCHEMA_VERSION}),
+}
 VALIDATION_STATUSES = frozenset({"pass", "pass_with_warnings", "fail", "blocked", "needs_human"})
 READ_MODEL_FILES = (
     "workflow_status.json",
@@ -68,6 +77,7 @@ READ_MODEL_FILES = (
     "metrics.json",
     "version_control_status.json",
 )
+READ_MODEL_NON_INVALIDATING_EVENT_TYPES = frozenset({"scheduler_wait_tick"})
 
 
 def run_health_probe(
@@ -120,9 +130,12 @@ def run_health_probe(
     checks.append(_check_completion_marker(paths))
     checks.append(_check_failure_registry(paths))
     checks.append(_check_expansion_registry(paths))
-    checks.append(_check_git_checkpoints(project, paths))
-    checks.append(_check_event_segments(paths))
-    checks.append(_check_read_models(paths))
+    # Normal health is an operational liveness/status probe and must stay
+    # bounded so dashboards and watchdogs do not replay all workflow history.
+    # Strict health remains the explicit full-history integrity audit.
+    checks.append(_check_git_checkpoints(project, paths, deep=strict))
+    checks.append(_check_event_segments(paths, deep=strict))
+    checks.append(_check_read_models(paths, deep=strict))
 
     status = _overall_status(checks)
     result = {
@@ -131,6 +144,7 @@ def run_health_probe(
         "checked_at": checked_at,
         "project_root": project.as_posix(),
         "strict": strict,
+        "validation_depth": "full_history" if strict else "bounded_operational",
         "status": status,
         "ok": status in {HEALTHY, HEALTHY_WITH_WARNINGS} and not (strict and status == HEALTHY_WITH_WARNINGS),
         "checks": checks,
@@ -361,6 +375,9 @@ def _check_active_run_leases(paths: WorkflowPaths, now: datetime) -> tuple[dict[
             "run_id": run_id,
             "status": status,
             "adapter_pid": lease.get("adapter_pid"),
+            "adapter_host": lease.get("adapter_host"),
+            "scheduler_host": lease.get("scheduler_host"),
+            "scheduler_owner": lease.get("scheduler_owner"),
             "fresh": is_fresh,
         }
         active.append(lease_summary)
@@ -384,10 +401,15 @@ def _check_runner_liveness(active_leases: Sequence[Mapping[str, Any]]) -> dict[s
         return _check("runner_liveness", PASS, "No active runner processes are expected.")
 
     missing_pid: list[str] = []
+    remote_pid: list[str] = []
     dead_pid: list[str] = []
     alive_pid: list[str] = []
     for lease in active_leases:
         run_id = str(lease.get("run_id") or lease.get("path") or "unknown")
+        runner_host = _lease_runner_host(lease)
+        if runner_host and not _hostnames_match(runner_host, socket.gethostname()):
+            remote_pid.append(run_id)
+            continue
         pid_value = lease.get("adapter_pid")
         if pid_value is None:
             missing_pid.append(run_id)
@@ -406,14 +428,35 @@ def _check_runner_liveness(active_leases: Sequence[Mapping[str, Any]]) -> dict[s
 
     if dead_pid:
         return _check("runner_liveness", FAIL, "Active run lease refers to a non-live runner process.", details={"dead": dead_pid})
-    if missing_pid:
+    if missing_pid or remote_pid:
         return _check(
             "runner_liveness",
             WARN,
             "Process liveness is unavailable for one or more active run leases.",
-            details={"missing_pid": missing_pid, "alive": alive_pid},
+            details={"missing_pid": missing_pid, "remote_pid": remote_pid, "alive": alive_pid},
         )
     return _check("runner_liveness", PASS, "Active runner process liveness is consistent with leases.", details={"alive": alive_pid})
+
+
+def _lease_runner_host(lease: Mapping[str, Any]) -> str | None:
+    for field in ("adapter_host", "scheduler_host"):
+        value = _non_empty_string(lease.get(field))
+        if value:
+            return value
+    owner = _non_empty_string(lease.get("scheduler_owner"))
+    if owner:
+        parts = owner.rsplit(":", 2)
+        if len(parts) == 3 and parts[0].strip():
+            return parts[0].strip()
+    return None
+
+
+def _hostnames_match(left: str, right: str) -> bool:
+    left_normalized = left.strip().lower().rstrip(".")
+    right_normalized = right.strip().lower().rstrip(".")
+    if not left_normalized or not right_normalized:
+        return False
+    return left_normalized == right_normalized or left_normalized.split(".", 1)[0] == right_normalized.split(".", 1)[0]
 
 
 def _lease_blocks_scheduler(lease: Mapping[str, Any]) -> bool:
@@ -590,7 +633,12 @@ def _check_agent_status_files(paths: WorkflowPaths) -> dict[str, Any]:
             else:
                 problems.extend(file_problems)
             continue
-        if data.get("schema_version") != SCHEMA_VERSION:
+        role = str(data.get("role") or "").strip().lower()
+        accepted_role_schemas = ROLE_LOCAL_AGENT_STATUS_SCHEMAS.get(role)
+        if data.get("schema_version") != SCHEMA_VERSION and not (
+            accepted_role_schemas
+            and data.get("schema_version") in accepted_role_schemas
+        ):
             warnings.append(
                 f"{rel}: schema_version {data.get('schema_version')!r} was accepted as compatible with {SCHEMA_VERSION!r}"
             )
@@ -611,10 +659,13 @@ def _check_agent_status_files(paths: WorkflowPaths) -> dict[str, Any]:
         run_id = _non_empty_string(data.get("run_id"))
         if not run_id:
             file_problems.append(f"{rel}: missing run_id")
-        next_prompt_ready = data.get("next_prompt_ready")
-        if worker_status == "running_background" or next_prompt_ready is False:
+        claims_active_background = _agent_status_claims_active_background(
+            data, worker_status=worker_status
+        )
+        if claims_active_background:
             if not _agent_status_wake_next_agent_when(data):
                 file_problems.append(f"{rel}: unsafe background status must include wake_next_agent_when")
+        if claims_active_background:
             reported_background_job_ids = _agent_status_background_job_ids(data)
             has_matching_background = bool(
                 (run_id and run_id in background_run_ids)
@@ -766,15 +817,28 @@ def _check_expansion_registry(paths: WorkflowPaths) -> dict[str, Any]:
     )
 
 
-def _check_git_checkpoints(project: Path, paths: WorkflowPaths) -> dict[str, Any]:
-    doctor = run_git_doctor(project)
-    if not doctor.get("ok"):
-        return _check("git_checkpoints", FAIL, "Git checkpoint manager is unavailable.", details={"errors": doctor.get("errors", []), "warnings": doctor.get("warnings", [])})
+def _check_git_checkpoints(project: Path, paths: WorkflowPaths, *, deep: bool = False) -> dict[str, Any]:
+    runner = SubprocessGitCommandRunner(timeout_seconds=5.0)
+    if deep:
+        doctor = run_git_doctor(project)
+        if not doctor.get("ok"):
+            return _check(
+                "git_checkpoints",
+                FAIL,
+                "Git checkpoint manager is unavailable.",
+                details={"errors": doctor.get("errors", []), "warnings": doctor.get("warnings", [])},
+            )
+    elif runner.git_path() is None:
+        return _check("git_checkpoints", FAIL, "Git checkpoint manager is unavailable because Git was not found.")
 
     path = paths.runtime_dir / "git_checkpoints.jsonl"
     if not path.exists():
         return _check("git_checkpoints", WARN, "Git checkpoint log is missing.", path=_relative(paths, path))
-    records, errors = _read_jsonl(path)
+    records, errors = (
+        _read_jsonl(path)
+        if deep
+        else _read_jsonl_tail(path, limit=FAST_CHECKPOINT_RECORD_LIMIT)
+    )
     if errors:
         return _check("git_checkpoints", FAIL, "Git checkpoint log contains malformed JSONL records.", details={"problems": errors})
 
@@ -782,10 +846,10 @@ def _check_git_checkpoints(project: Path, paths: WorkflowPaths) -> dict[str, Any
     if not created:
         return _check("git_checkpoints", PASS, "Git checkpoint manager is available; no checkpoint records exist yet.", count=0)
 
-    runner = SubprocessGitCommandRunner()
+    checked_records = created if deep else created[-1:]
     missing_refs: list[str] = []
     malformed: list[str] = []
-    for record in created:
+    for record in checked_records:
         checkpoint_id = _non_empty_string(record.get("checkpoint_id"))
         ref = _non_empty_string(record.get("ref"))
         commit = _non_empty_string(record.get("commit"))
@@ -799,10 +863,17 @@ def _check_git_checkpoints(project: Path, paths: WorkflowPaths) -> dict[str, Any
         return _check("git_checkpoints", FAIL, "Git checkpoint records are missing required fields.", details={"malformed": malformed})
     if missing_refs:
         return _check("git_checkpoints", FAIL, "Required Git checkpoint refs are missing.", details={"missing_refs": missing_refs})
-    return _check("git_checkpoints", PASS, f"{len(created)} Git checkpoint ref(s) are available.", count=len(created))
+    scope = "all" if deep else "latest"
+    return _check(
+        "git_checkpoints",
+        PASS,
+        f"{len(checked_records)} {scope} Git checkpoint ref(s) are available.",
+        count=len(checked_records),
+        details={"validation_depth": "full_history" if deep else "bounded_operational"},
+    )
 
 
-def _check_event_segments(paths: WorkflowPaths) -> dict[str, Any]:
+def _check_event_segments(paths: WorkflowPaths, *, deep: bool = False) -> dict[str, Any]:
     events_dir = paths.runtime_dir / "events"
     if not events_dir.exists():
         return _check("event_segments", FAIL, "Runtime events directory is missing.", path=_relative(paths, events_dir))
@@ -810,15 +881,30 @@ def _check_event_segments(paths: WorkflowPaths) -> dict[str, Any]:
     if not segments:
         return _check("event_segments", FAIL, "No runtime event segments are present.", path=_relative(paths, events_dir))
 
+    segment_records: list[tuple[Path, list[dict[str, Any]], list[str]]] = []
+    if deep:
+        for segment in segments:
+            records, segment_errors = _read_jsonl(segment)
+            segment_records.append((segment, records, segment_errors))
+    else:
+        remaining = FAST_EVENT_RECORD_LIMIT
+        reverse_records: list[tuple[Path, list[dict[str, Any]], list[str]]] = []
+        for segment in reversed(segments):
+            records, segment_errors = _read_jsonl_tail(segment, limit=remaining)
+            reverse_records.append((segment, records, segment_errors))
+            remaining = max(0, remaining - len(records))
+            if remaining <= 0:
+                break
+        segment_records = list(reversed(reverse_records))
+
     errors: list[str] = []
     last_sequence: int | None = None
     last_event_id: str | None = None
     last_event_hash: str | None = None
     records = 0
-    for segment in segments:
-        segment_records, segment_errors = _read_jsonl(segment)
+    for segment, records_for_segment, segment_errors in segment_records:
         errors.extend(segment_errors)
-        for record in segment_records:
+        for record in records_for_segment:
             sequence = _maybe_int(record.get("sequence", record.get("seq")))
             if sequence is None:
                 errors.append(f"{_relative(paths, segment)}: event record missing integer sequence")
@@ -846,10 +932,20 @@ def _check_event_segments(paths: WorkflowPaths) -> dict[str, Any]:
             records += 1
     if errors:
         return _check("event_segments", FAIL, "Runtime event segments are malformed, non-monotonic, or hash-chain invalid.", severity=UNHEALTHY, details={"problems": errors})
-    return _check("event_segments", PASS, f"{len(segments)} event segment(s) are parseable, monotonic, and hash-chain valid.", details={"segments": len(segments), "records": records})
+    scope = "all" if deep else "recent"
+    return _check(
+        "event_segments",
+        PASS,
+        f"{records} {scope} event record(s) are parseable, monotonic, and hash-chain valid.",
+        details={
+            "segments": len(segments),
+            "records_checked": records,
+            "validation_depth": "full_history" if deep else "bounded_operational",
+        },
+    )
 
 
-def _check_read_models(paths: WorkflowPaths) -> dict[str, Any]:
+def _check_read_models(paths: WorkflowPaths, *, deep: bool = False) -> dict[str, Any]:
     read_models_dir = paths.read_models_dir
     if not read_models_dir.exists():
         return _check("read_models", WARN, "Read model directory is missing but rebuildable from authoritative runtime files.", path=_relative(paths, read_models_dir))
@@ -863,7 +959,7 @@ def _check_read_models(paths: WorkflowPaths) -> dict[str, Any]:
             warnings.append(f"{rel}: missing")
             continue
         if filename.endswith(".jsonl"):
-            _records, errors = _read_jsonl(path)
+            _records, errors = _read_jsonl(path) if deep else _read_jsonl_tail(path, limit=1)
             warnings.extend(errors)
             continue
         data, error = _read_json(path)
@@ -875,7 +971,7 @@ def _check_read_models(paths: WorkflowPaths) -> dict[str, Any]:
             if generated_at is not None:
                 parsed_times.append(generated_at)
 
-    latest_event = _latest_event_timestamp(paths.runtime_dir / "events")
+    latest_event = _latest_event_timestamp(paths.runtime_dir / "events", deep=deep)
     if latest_event is not None and parsed_times and max(parsed_times) < latest_event:
         warnings.append("read models are older than the latest runtime event")
 
@@ -992,6 +1088,9 @@ def _agent_status_background_job_ids(data: Mapping[str, Any]) -> set[str]:
             records.extend(item for item in value if isinstance(item, Mapping))
     background_state = data.get("background_state")
     if isinstance(background_state, Mapping):
+        active_job = background_state.get("active_job")
+        if isinstance(active_job, Mapping):
+            records.append(active_job)
         for field in ("active_background_jobs", "background_jobs", "jobs"):
             value = background_state.get(field)
             if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
@@ -1016,9 +1115,10 @@ def _resolved_failure_agent_status_paths(paths: WorkflowPaths) -> set[str]:
             continue
         if str(failure.get("status") or "").lower() not in RESOLVED_FAILURE_STATUSES:
             continue
-        agent_status_path = failure.get("agent_status_path")
-        if isinstance(agent_status_path, str) and agent_status_path.strip():
-            paths_set.add(agent_status_path.strip())
+        for field in ("agent_status_path", "source_agent_status_path"):
+            agent_status_path = failure.get(field)
+            if isinstance(agent_status_path, str) and agent_status_path.strip():
+                paths_set.add(agent_status_path.strip())
     return paths_set
 
 
@@ -1031,23 +1131,66 @@ def _agent_status_wake_next_agent_when(data: Mapping[str, Any]) -> bool:
         nested = background.get("wake_next_agent_when")
         if isinstance(nested, str) and nested.strip():
             return True
+    background_state = data.get("background_state")
+    if isinstance(background_state, Mapping):
+        nested = background_state.get("wake_next_agent_when")
+        if isinstance(nested, str) and nested.strip():
+            return True
     jobs = data.get("background_jobs")
     if isinstance(jobs, Sequence) and not isinstance(jobs, (str, bytes)):
-        return any(
+        if any(
             isinstance(job, Mapping)
             and isinstance(job.get("wake_next_agent_when"), str)
             and bool(str(job.get("wake_next_agent_when")).strip())
             for job in jobs
-        )
+        ):
+            return True
+    background_state = data.get("background_state")
+    if isinstance(background_state, Mapping):
+        nested = background_state.get("wake_next_agent_when")
+        if isinstance(nested, str) and nested.strip():
+            return True
+        active_job = background_state.get("active_job")
+        if isinstance(active_job, Mapping):
+            nested = active_job.get("wake_next_agent_when")
+            if isinstance(nested, str) and nested.strip():
+                return True
+    wake_conditions = data.get("wake_conditions")
+    if isinstance(wake_conditions, Sequence) and not isinstance(
+        wake_conditions, (str, bytes)
+    ):
+        return any(isinstance(item, str) and item.strip() for item in wake_conditions)
+    return False
+
+
+def _agent_status_claims_active_background(data: Mapping[str, Any], *, worker_status: str | None) -> bool:
+    if worker_status == "running_background":
+        return True
+    for key in ("background", "background_state"):
+        value = data.get(key)
+        if not isinstance(value, Mapping):
+            continue
+        if value.get("active_background_job") is True or value.get("active") is True:
+            return True
     return False
 
 
 def _recent_files(root: Path, name: str) -> list[Path]:
-    try:
-        files = [path for path in root.glob(f"**/{name}") if path.is_file()]
-    except OSError:
-        return []
-    return sorted(files, key=lambda path: path.stat().st_mtime if path.exists() else 0, reverse=True)[:RECENT_FILE_LIMIT]
+    discovery = discover_files_bounded(
+        (root,),
+        names={name},
+        max_entries=RECENT_FILE_SCAN_ENTRY_LIMIT,
+        max_matches=RECENT_FILE_SCAN_MATCH_LIMIT,
+        max_depth=8,
+    )
+
+    def modified_at(path: Path) -> float:
+        try:
+            return path.stat().st_mtime
+        except OSError:
+            return 0.0
+
+    return sorted(discovery.paths, key=modified_at, reverse=True)[:RECENT_FILE_LIMIT]
 
 
 def _read_json(path: Path) -> tuple[Any, str | None]:
@@ -1091,14 +1234,67 @@ def _read_jsonl(path: Path) -> tuple[list[dict[str, Any]], list[str]]:
     return records, errors
 
 
-def _latest_event_timestamp(events_dir: Path) -> datetime | None:
+def _read_jsonl_tail(path: Path, *, limit: int) -> tuple[list[dict[str, Any]], list[str]]:
+    if limit <= 0:
+        return [], []
+    chunks: list[bytes] = []
+    newline_count = 0
+    chunk_size = 64 * 1024
+    try:
+        with path.open("rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            position = handle.tell()
+            while position > 0 and newline_count <= limit:
+                read_size = min(chunk_size, position)
+                position -= read_size
+                handle.seek(position)
+                chunk = handle.read(read_size)
+                chunks.append(chunk)
+                newline_count += chunk.count(b"\n")
+    except OSError as error:
+        return [], [f"{path}: {error}"]
+    if not chunks:
+        return [], []
+    try:
+        lines = b"".join(reversed(chunks)).decode("utf-8").splitlines()
+    except UnicodeDecodeError as error:
+        return [], [f"{path}: tail is not UTF-8: {error}"]
+    lines = lines[-limit:]
+    records: list[dict[str, Any]] = []
+    errors: list[str] = []
+    for index, line in enumerate(lines, start=1):
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError as error:
+            errors.append(f"{path}: tail line {index}: invalid JSON at column {error.colno}")
+            continue
+        if not isinstance(record, Mapping):
+            errors.append(f"{path}: tail line {index}: expected JSON object")
+            continue
+        records.append(dict(record))
+    return records, errors
+
+
+def _latest_event_timestamp(events_dir: Path, *, deep: bool = False) -> datetime | None:
     latest: datetime | None = None
-    for segment in sorted(events_dir.glob("*.jsonl")):
-        records, _errors = _read_jsonl(segment)
+    segments = sorted(path for path in events_dir.glob("*.jsonl") if path.is_file())
+    remaining = FAST_EVENT_RECORD_LIMIT
+    for segment in segments if deep else reversed(segments):
+        if deep:
+            records, _errors = _read_jsonl(segment)
+        else:
+            records, _errors = _read_jsonl_tail(segment, limit=remaining)
+            remaining = max(0, remaining - len(records))
         for record in records:
+            if record.get("event_type") in READ_MODEL_NON_INVALIDATING_EVENT_TYPES:
+                continue
             timestamp = _parse_timestamp(record.get("ts") or record.get("timestamp") or record.get("created_at"))
             if timestamp is not None and (latest is None or timestamp > latest):
                 latest = timestamp
+        if not deep and (latest is not None or remaining <= 0):
+            break
     return latest
 
 

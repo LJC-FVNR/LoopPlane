@@ -310,6 +310,8 @@ def write_stale_supervisor_metadata(
     include_pid: bool = True,
     include_command: bool = True,
     include_log_paths: bool = True,
+    status: str = "running",
+    exit_status: str | None = None,
 ) -> None:
     workflow = json.loads((project / ".loopplane" / "config" / "workflow.json").read_text(encoding="utf-8"))
     old = stale_timestamp()
@@ -317,11 +319,11 @@ def write_stale_supervisor_metadata(
         "schema_version": "1.5",
         "workflow_id": workflow["workflow_id"],
         "project_root": project.as_posix(),
-        "status": "running",
+        "status": status,
         "started_at": old,
         "updated_at": old,
         "heartbeat_at": old,
-        "exit_status": None,
+        "exit_status": exit_status,
     }
     if include_pid:
         metadata["pid"] = 999999999
@@ -481,6 +483,40 @@ class DetachedRuntimeTest(unittest.TestCase):
             status = load_supervisor_status(project)
             self.assertEqual(status["metadata"]["last_loop_reason"], "complete")
             self.assertNotEqual(status["metadata"].get("stop_reason"), "exception:SchedulerLockError")
+
+    def test_supervisor_retries_stale_scheduler_instance_lock_during_startup(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "Detached stale scheduler-instance lock retry.")
+            duplicate_tick = {
+                "ok": False,
+                "status": "duplicate_scheduler",
+                "exit_code": 11,
+                "message": "lock is already held",
+                "selected_action": None,
+            }
+            completed_tick = {
+                "ok": True,
+                "status": "ok",
+                "exit_code": 0,
+                "selected_action": {
+                    "action": "complete",
+                    "reason": "Workflow is complete.",
+                    "selected": {},
+                },
+            }
+
+            with mock.patch(
+                "runtime.detached.run_scheduler",
+                side_effect=[duplicate_tick, completed_tick],
+            ) as run_scheduler_mock, mock.patch("runtime.detached.time.sleep") as sleep_mock:
+                exit_code = run_supervisor(project)
+
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(run_scheduler_mock.call_count, 2)
+            self.assertEqual(sleep_mock.call_args_list[0].args[0], 5.0)
+            status = load_supervisor_status(project)
+            self.assertEqual(status["metadata"]["last_loop_reason"], "complete")
 
     def test_detached_supervisor_continues_after_recoverable_validation_follow_up_failure(self) -> None:
         selected = {"action": "run_worker"}
@@ -922,6 +958,42 @@ class DetachedRuntimeTest(unittest.TestCase):
             plan_text = (project / "PLAN.md").read_text(encoding="utf-8")
             self.assertIn("- [x] T001: Run first detached worker", plan_text)
             self.assertIn("- [x] T002: Run second detached worker", plan_text)
+
+    def test_detached_resume_restarts_dead_requires_attention_supervisor(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "Detached requires-attention resume smoke.")
+            write_active_plan(project)
+            worker = write_slow_worker(project, sleep_seconds=0.05)
+            configure_shell_worker(project, worker)
+            mark_detached_requested(project, status="requires_attention")
+            write_stale_supervisor_metadata(
+                project,
+                status="requires_attention",
+                exit_status="requires_attention",
+            )
+
+            before = run_json("status", "--project", str(project), "--json")
+            self.assertEqual(before["runtime_status"], "requires_attention")
+            self.assertEqual(before["supervisor"]["status"], "requires_attention")
+            self.assertEqual(before["supervisor"]["liveness"], "dead")
+
+            resume = run_json("resume", "--project", str(project), "--json")
+            self.assertEqual(resume["request"]["type"], "resume")
+            self.assertTrue(resume["detached_resume"]["attempted"])
+            self.assertEqual(resume["detached_resume"]["reason"], "requires_attention_supervisor")
+            self.assertEqual(resume["supervisor"]["liveness"], "alive")
+
+            latest = project / ".loopplane" / "results" / "T001" / "latest.json"
+            completion = project / ".loopplane" / "runtime" / "plan_loop_complete.json"
+            self.assertTrue(wait_until(lambda: latest.is_file() and completion.is_file(), timeout=20.0))
+            self.assertTrue(
+                wait_until(
+                    lambda: run_json("status", "--project", str(project), "--json")["supervisor"]["status"]
+                    == "completed",
+                    timeout=10.0,
+                )
+            )
 
     def test_detached_resume_recovers_incomplete_stale_supervisor_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

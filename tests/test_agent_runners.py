@@ -401,7 +401,7 @@ class AgentRunnerConfigTest(unittest.TestCase):
             self.assertEqual(loaded.runner("change_request_planner").role, "change_request_planner")
             self.assertEqual(loaded.runner("change_request_planner").command, "codex")
             self.assertEqual(loaded.runner("summary").role, "summary")
-            self.assertTrue(loaded.runner("summary").enabled)
+            self.assertFalse(loaded.runner("summary").enabled)
             self.assertEqual(loaded.runner("summary").command, "codex")
             self.assertTrue(loaded.runner("validator").enabled)
             self.assertTrue(loaded.runner("final_reviewer").enabled)

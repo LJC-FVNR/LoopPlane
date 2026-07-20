@@ -12,6 +12,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from runtime import runner_locks as runner_locks_module
 from runtime.adapters.base import AdapterInput, AdapterOutput
 from runtime.adapters.claude_code_cli_adapter import ClaudeCodeCliAdapter, ClaudeStreamRenderer
 from runtime.adapters.codex_cli_adapter import CodexCliAdapter
@@ -22,7 +23,12 @@ from runtime.adapters.registry import (
     get_adapter,
     register_adapter,
 )
-from runtime.adapters.shell_adapter import POLICY_BLOCKED_EXIT_CODE, ShellAdapter, build_shell_invocation
+from runtime.adapters.shell_adapter import (
+    COMMAND_UNAVAILABLE_EXIT_CODE,
+    POLICY_BLOCKED_EXIT_CODE,
+    ShellAdapter,
+    build_shell_invocation,
+)
 from runtime.agent_runners import RunnerConfig
 from runtime.init_workflow import init_project
 from runtime.path_resolution import WorkflowPaths, load_workflow_config
@@ -256,6 +262,24 @@ class ConcreteAdapterTest(unittest.TestCase):
             self.assertTrue(result.adapter_metadata["external_execution"])
             self.assertEqual(result.adapter_metadata["policy_decision"]["allowed"], True)
 
+    def test_missing_runner_command_is_classified_as_runner_availability(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = runner_config(
+                adapter="shell",
+                command=(root / "deleted-runner-command").as_posix(),
+            )
+
+            result = ShellAdapter().run(adapter_input(root, config))
+
+            self.assertEqual(result.exit_code, COMMAND_UNAVAILABLE_EXIT_CODE)
+            availability = result.adapter_metadata["runner_availability"]
+            self.assertEqual(availability["status"], "unavailable")
+            self.assertEqual(availability["reason_class"], "runner_configuration_error")
+            self.assertEqual(availability["scope"], {"type": "runner", "key": config.runner_id})
+            self.assertTrue(availability["requires_attention"])
+            self.assertEqual(availability["evidence"]["source"], "process_launch")
+
     def test_shell_adapter_streams_stdout_to_log_before_process_exit(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -422,6 +446,9 @@ class ConcreteAdapterTest(unittest.TestCase):
             self.assertEqual(observed["metadata"]["lock_key"], lock_key)
             self.assertEqual(observed["metadata"]["runner_id"], "shell_worker")
             self.assertEqual(observed["metadata"]["run_id"], "run_test")
+            self.assertTrue(observed["metadata"]["lock_id"])
+            self.assertTrue(observed["metadata"]["hostname"])
+            self.assertEqual(observed["metadata"]["lease_ttl_seconds"], 120)
             self.assertFalse(lock_path.exists())
 
     def test_shell_adapter_releases_machine_runner_lock_after_nonzero_exit(self) -> None:
@@ -523,6 +550,132 @@ class ConcreteAdapterTest(unittest.TestCase):
             observed = json.loads(observed_path.read_text(encoding="utf-8"))
             self.assertTrue(result.timed_out)
             self.assertTrue(observed["exists_during_run"], observed)
+            self.assertFalse(lock_path.exists())
+
+    def test_shell_adapter_reclaims_lock_from_released_active_run_lease(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            home = root / "home"
+            runtime_dir = root / "runtime"
+            lease_dir = runtime_dir / "active_run_leases"
+            lease_dir.mkdir(parents=True)
+            lock_key = "released_owner_runner"
+            lock_path = home / "locks" / "runner_locks" / f"{lock_key}.lock"
+            lock_path.parent.mkdir(parents=True)
+            lock_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "1.6",
+                        "lock_type": "runner_resource",
+                        "lock_scope": "machine",
+                        "lock_key": lock_key,
+                        "lock_path": lock_path.as_posix(),
+                        "global_concurrency_limit": 1,
+                        "queue_when_busy": True,
+                        "run_id": "run_released",
+                        "workflow_id": "wf_test",
+                        "runner_id": "worker",
+                        "role": "worker",
+                        "pid": 99999999,
+                        "acquired_at": "2026-01-01T00:00:00Z",
+                        "heartbeat_at": "2026-01-01T00:00:00Z",
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            (lease_dir / "run_released.json").write_text(
+                json.dumps({"status": "released", "run_id": "run_released"}) + "\n",
+                encoding="utf-8",
+            )
+            config = runner_config(
+                adapter="shell",
+                command=sys.executable,
+                args=("-c", "print('reclaimed')"),
+                env={"LOOPPLANE_RUNTIME_DIR": runtime_dir.as_posix()},
+                resource_policy={
+                    "global_concurrency_limit": 1,
+                    "lock_scope": "machine",
+                    "lock_key": lock_key,
+                    "queue_when_busy": True,
+                },
+            )
+
+            with patch.dict("os.environ", {"LOOPPLANE_HOME": home.as_posix()}):
+                result = ShellAdapter().run(adapter_input(root, config))
+
+            self.assertEqual(result.exit_code, 0)
+            self.assertEqual(result.stdout_path.read_text(encoding="utf-8"), "reclaimed\n")
+            self.assertFalse(lock_path.exists())
+
+    def test_live_runner_advisory_lock_blocks_stale_reclaim(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            home = root / "home"
+            config = runner_config(
+                adapter="shell",
+                command=sys.executable,
+                resource_policy={
+                    "global_concurrency_limit": 1,
+                    "lock_scope": "machine",
+                    "lock_key": "advisory_owner_runner",
+                    "queue_when_busy": True,
+                },
+            )
+            prepared_input = adapter_input(root, config)
+
+            with patch.dict("os.environ", {"LOOPPLANE_HOME": home.as_posix()}):
+                held = runner_locks_module.acquire_runner_resource_lock(prepared_input)
+                held.__enter__()
+                try:
+                    assert held.lock_path is not None
+                    inspection = runner_locks_module.inspect_runner_lock("advisory_owner_runner")
+                    self.assertEqual(inspection["state"], runner_locks_module.RUNNER_LOCK_ACTIVE)
+                    self.assertTrue(inspection["advisory_lock_held"])
+                    original = json.loads(held.lock_path.read_text(encoding="utf-8"))
+                    with patch.object(
+                        runner_locks_module,
+                        "_runner_lock_owner_is_stale",
+                        return_value=True,
+                    ):
+                        reclaimed = runner_locks_module._reclaim_stale_runner_lock(
+                            held.lock_path,
+                            prepared_input,
+                        )
+                    current = json.loads(held.lock_path.read_text(encoding="utf-8"))
+                    self.assertFalse(reclaimed)
+                    self.assertEqual(current["lock_id"], original["lock_id"])
+                finally:
+                    held.release()
+
+            self.assertFalse((home / "locks" / "runner_locks" / "advisory_owner_runner.lock").exists())
+
+    def test_machine_runner_lock_fail_closed_does_not_leave_empty_lock_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            home = root / "home"
+            lock_key = "unsupported_advisory_runner"
+            config = runner_config(
+                adapter="shell",
+                command=sys.executable,
+                resource_policy={
+                    "global_concurrency_limit": 1,
+                    "lock_scope": "machine",
+                    "lock_key": lock_key,
+                    "queue_when_busy": True,
+                },
+            )
+
+            with (
+                patch.dict("os.environ", {"LOOPPLANE_HOME": home.as_posix()}),
+                patch.object(runner_locks_module, "fcntl", None),
+                self.assertRaises(runner_locks_module.RunnerResourceLockError),
+            ):
+                runner_locks_module.acquire_runner_resource_lock(adapter_input(root, config)).__enter__()
+
+            lock_path = home / "locks" / "runner_locks" / f"{lock_key}.lock"
             self.assertFalse(lock_path.exists())
 
     def test_shell_adapter_workspace_scope_resource_policy_stays_out_of_loopplane_home(self) -> None:
@@ -1042,6 +1195,8 @@ class ConcreteAdapterTest(unittest.TestCase):
                         "final_path.write_text('CODEX FINAL:' + prompt, encoding='utf-8')",
                         "evidence_dir = pathlib.Path(os.environ['LOOPPLANE_TASK_EVIDENCE_RUN_DIR'])",
                         "(evidence_dir / 'fake_codex_seen.txt').write_text(prompt, encoding='utf-8')",
+                        "(evidence_dir / 'codex_home_seen.txt').write_text(os.environ['CODEX_HOME'], encoding='utf-8')",
+                        "(evidence_dir / 'codex_isolated_seen.txt').write_text(os.environ['LOOPPLANE_CODEX_STATE_ISOLATED'], encoding='utf-8')",
                         "print('CODEX STDOUT:' + os.environ['LOOPPLANE_RUN_ID'])",
                         "print('CODEX STDERR', file=sys.stderr)",
                     ]
@@ -1054,6 +1209,7 @@ class ConcreteAdapterTest(unittest.TestCase):
                 adapter="codex_cli",
                 command=fake_codex.as_posix(),
                 prompt_delivery={"mode": "file_argument"},
+                env={"LOOPPLANE_AGENT_STATE_ROOT": (root / "agent-state").as_posix()},
             )
 
             result = CodexCliAdapter().run(adapter_input(root, config, prompt_content="Run the Codex adapter.\n"))
@@ -1070,6 +1226,14 @@ class ConcreteAdapterTest(unittest.TestCase):
             self.assertEqual(
                 (root / "results" / "run_test" / "fake_codex_seen.txt").read_text(encoding="utf-8"),
                 "Run the Codex adapter.\n",
+            )
+            isolated_home = Path(
+                (root / "results" / "run_test" / "codex_home_seen.txt").read_text(encoding="utf-8")
+            )
+            self.assertTrue(isolated_home.is_relative_to(root / "agent-state"))
+            self.assertEqual(
+                (root / "results" / "run_test" / "codex_isolated_seen.txt").read_text(encoding="utf-8"),
+                "1",
             )
             assert_common_contract(self, result, root, expected_prompt_content="Run the Codex adapter.\n")
             self.assertLessEqual(

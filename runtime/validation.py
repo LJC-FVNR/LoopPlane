@@ -11,8 +11,9 @@ from typing import Any, Mapping, Sequence
 
 from runtime.adapters.base import ADAPTER_INPUT_FILENAME, AdapterContractError, AdapterInput, utc_timestamp
 from runtime.adapters.registry import AdapterLookupError, get_adapter
-from runtime.agent_runners import AgentRunnerConfigError, load_agent_runners
+from runtime.agent_runners import AgentRunnerConfigError, RunnerConfig, load_agent_runners
 from runtime.exit_codes import EXIT_INVALID_CONFIG, EXIT_NEEDS_HUMAN, EXIT_SUCCESS, EXIT_VALIDATION_FAILED, has_text
+from runtime.file_discovery import discover_files_bounded
 from runtime.path_resolution import WorkflowPathError, WorkflowPaths, load_workflow_config
 from runtime.plan_objectives import is_task_block_terminator
 from runtime.prompt_context import file_reference, prompt_reference_index
@@ -27,8 +28,10 @@ VALIDATION_MODE = "deterministic_evidence_with_optional_agent_review"
 VALIDATOR_TEMPLATE_PATH = Path(__file__).resolve().parents[1] / "templates" / "validator_prompt.template.md"
 VALIDATOR_REVIEW_FILENAME = "validator_review.json"
 VALIDATOR_CONTEXT_MANIFEST_FILENAME = "validator_context_manifest.json"
-DEFAULT_VALIDATOR_AGENT_MODE = "on_deterministic_failure"
-VALIDATOR_AGENT_MODES = frozenset({"disabled", "on_deterministic_failure", "always"})
+DEFAULT_VALIDATOR_AGENT_MODE = "high_risk_pass_only"
+VALIDATOR_AGENT_MODES = frozenset(
+    {"disabled", "high_risk_pass_only", "on_deterministic_failure", "always"}
+)
 ALLOWED_VALIDATION_STATUSES = frozenset({"pass", "pass_with_warnings", "fail", "blocked", "needs_human"})
 ALLOWED_VERDICTS = frozenset({"accepted", "accepted_with_warnings", "rejected", "needs_human"})
 PASSING_STATUSES = frozenset({"pass", "pass_with_warnings"})
@@ -253,6 +256,22 @@ def _validator_agent_policy(
         return {"mode": mode, "run": False, "required": False, "reason": "validator_agent_disabled"}
     if mode == "always":
         return {"mode": mode, "run": True, "required": True, "reason": "configured_always"}
+    if mode == "high_risk_pass_only":
+        if status not in PASSING_STATUSES:
+            return {
+                "mode": mode,
+                "run": False,
+                "required": False,
+                "reason": "deterministic_failure_routes_directly_to_recovery",
+            }
+        if high_risk_required:
+            return {"mode": mode, "run": True, "required": True, "reason": "high_risk_task"}
+        return {
+            "mode": mode,
+            "run": False,
+            "required": False,
+            "reason": "deterministic_validation_passed_low_or_medium_risk",
+        }
     if status not in PASSING_STATUSES:
         return {
             "mode": mode,
@@ -275,6 +294,8 @@ def _validator_agent_mode(workflow_config: Mapping[str, Any]) -> str:
     mode = str(raw or DEFAULT_VALIDATOR_AGENT_MODE).strip().lower().replace("-", "_")
     if mode in {"on_failure", "on_deterministic_fail", "on_deterministic_failure"}:
         return "on_deterministic_failure"
+    if mode in {"high_risk_pass", "high_risk_pass_only"}:
+        return "high_risk_pass_only"
     if mode in VALIDATOR_AGENT_MODES:
         return mode
     return DEFAULT_VALIDATOR_AGENT_MODE
@@ -298,14 +319,87 @@ def _run_validator_agent(
     if not write:
         return None
     try:
-        runner = load_agent_runners(project).runner("validator")
-        if runner.role != "validator" or not runner.enabled:
-            return None
-        adapter = get_adapter(runner.adapter)
-    except (AgentRunnerConfigError, AdapterLookupError, OSError, json.JSONDecodeError):
+        runner_config = load_agent_runners(project)
+        runners = _configured_validator_runners(runner_config)
+    except (AgentRunnerConfigError, OSError, json.JSONDecodeError):
+        return None
+    if not runners:
         return None
 
-    run_id = f"validator_{task.task_id}_{uuid.uuid4().hex[:8]}"
+    execution_id = f"validator_{task.task_id}_{uuid.uuid4().hex[:8]}"
+    runner_results: list[dict[str, Any]] = []
+    for runner_index, runner in enumerate(runners):
+        runner_token = re.sub(r"[^A-Za-z0-9_.-]+", "_", runner.runner_id)
+        run_id = f"{execution_id}_{runner_index + 1:02d}_{runner_token}"
+        runner_result = _run_validator_agent_candidate(
+            project=project,
+            paths=paths,
+            workflow_id=workflow_id,
+            task=task,
+            run_dir=run_dir,
+            deterministic_result=deterministic_result,
+            runner=runner,
+            run_id=run_id,
+        )
+        runner_results.append(runner_result)
+        if runner_result.get("ok") is True:
+            return {
+                **runner_result,
+                "validator_failover": {
+                    "strategy": "ordered",
+                    "configured_runner_ids": [candidate.runner_id for candidate in runners],
+                    "selected_runner_id": runner.runner_id,
+                    "used_fallback": runner_index > 0,
+                },
+                "runner_attempts": [_validator_runner_result_summary(item) for item in runner_results],
+            }
+
+    final_result = runner_results[-1]
+    failed_runners = ", ".join(str(item.get("runner_id") or "unknown") for item in runner_results)
+    return {
+        **final_result,
+        "validator_failover": {
+            "strategy": "ordered",
+            "configured_runner_ids": [candidate.runner_id for candidate in runners],
+            "selected_runner_id": None,
+            "used_fallback": len(runner_results) > 1,
+        },
+        "runner_attempts": [_validator_runner_result_summary(item) for item in runner_results],
+        "error": f"all configured validator runners failed: {failed_runners}",
+    }
+
+
+def _configured_validator_runners(config: Any) -> tuple[RunnerConfig, ...]:
+    rule = config.runner_failover.get("validator") if isinstance(config.runner_failover, Mapping) else None
+    ordered_ids = rule.get("runners") if isinstance(rule, Mapping) else None
+    if not isinstance(ordered_ids, Sequence) or isinstance(ordered_ids, (str, bytes)):
+        ordered_ids = ("validator",)
+    runners: list[RunnerConfig] = []
+    seen: set[str] = set()
+    for runner_id in ordered_ids:
+        if not isinstance(runner_id, str) or runner_id in seen:
+            continue
+        seen.add(runner_id)
+        try:
+            runner = config.runner(runner_id)
+        except AgentRunnerConfigError:
+            continue
+        if runner.role == "validator" and runner.enabled:
+            runners.append(runner)
+    return tuple(runners)
+
+
+def _run_validator_agent_candidate(
+    *,
+    project: Path,
+    paths: WorkflowPaths,
+    workflow_id: str,
+    task: TaskBlock,
+    run_dir: Path,
+    deterministic_result: Mapping[str, Any],
+    runner: RunnerConfig,
+    run_id: str,
+) -> dict[str, Any]:
     role_output_dir = run_dir / "validator_agent" / run_id
     role_output_dir.mkdir(parents=True, exist_ok=True)
     deterministic_path = role_output_dir / "deterministic_validation_draft.json"
@@ -337,6 +431,16 @@ def _run_validator_agent(
         "validator_review_path": _path_for_record(project, review_path),
         "deterministic_validation_path": _path_for_record(project, deterministic_path),
     }
+    try:
+        adapter = get_adapter(runner.adapter)
+    except AdapterLookupError as error:
+        return {
+            **base,
+            "status": "agent_failed",
+            "ok": False,
+            "attempts": [],
+            "error": f"{type(error).__name__}: {error}",
+        }
     try:
         adapter_input = AdapterInput.from_runner_config(
             run_id=run_id,
@@ -431,6 +535,28 @@ def _run_validator_agent(
         "adapter_result_path": _path_for_record(project, output.adapter_result_path),
         "review": _json_safe(review or {}),
         "error": None if ok else "validator agent did not produce a readable validator_review.json",
+    }
+
+
+def _validator_runner_result_summary(result: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        key: _json_safe(result.get(key))
+        for key in (
+            "runner_id",
+            "adapter",
+            "status",
+            "ok",
+            "attempts",
+            "exit_code",
+            "timed_out",
+            "role_output_dir",
+            "stdout_path",
+            "stderr_path",
+            "adapter_result_path",
+            "validator_review_path",
+            "error",
+        )
+        if result.get(key) is not None
     }
 
 
@@ -668,7 +794,13 @@ def collect_run_inputs(project: Path, run_dir: Path) -> tuple[Path, ...]:
     for child_name in ("logs", "artifacts", "raw", "git"):
         child = run_dir / child_name
         if child.is_dir():
-            candidates.extend(sorted(path for path in child.rglob("*") if path.is_file()))
+            discovery = discover_files_bounded(
+                (child,),
+                max_entries=4_096,
+                max_matches=1_024,
+                max_depth=8,
+            )
+            candidates.extend(discovery.paths)
     existing = []
     seen: set[Path] = set()
     for path in candidates:

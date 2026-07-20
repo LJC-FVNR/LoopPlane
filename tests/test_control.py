@@ -51,6 +51,65 @@ class ControlRequestCliTest(unittest.TestCase):
             self.assertNotIn("detached_resume", result)
             self.assertFalse((project / ".loopplane" / "runtime" / "supervisor.json").exists())
 
+    def test_verified_resume_explicitly_clears_automatic_runner_hold(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "Resume after an independently verified live runner probe.")
+            workflow_id = json.loads(
+                (project / ".loopplane" / "config" / "workflow.json").read_text(encoding="utf-8")
+            )["workflow_id"]
+            health_path = project / ".loopplane" / "runtime" / "runner_health.json"
+            health_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "1.5",
+                        "workflow_id": workflow_id,
+                        "runners": {
+                            "worker": {
+                                "runner_id": "worker",
+                                "events": [],
+                                "availability_hold": {
+                                    "status": "active",
+                                    "reason_class": "usage_limit_exhausted",
+                                    "recoverability": "auto_after_cooldown",
+                                    "scope": {"type": "runner", "key": "worker"},
+                                    "requires_attention": False,
+                                    "cooldown_until": "2026-07-24T23:25:00Z",
+                                },
+                            }
+                        },
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            result = run_loopplane(
+                "resume",
+                "--foreground-owner",
+                "--clear-runner-availability-holds",
+                "--project",
+                str(project),
+            )
+
+            self.assertTrue(result["ok"])
+            clear = result["runner_availability_clear"]
+            self.assertEqual(clear["status"], "cleared")
+            self.assertEqual(clear["cleared_count"], 1)
+            cleared_hold = json.loads(health_path.read_text(encoding="utf-8"))["runners"]["worker"][
+                "availability_hold"
+            ]
+            self.assertEqual(cleared_hold["status"], "cleared")
+            self.assertEqual(cleared_hold["cleared_by_control_request_id"], result["request"]["request_id"])
+            events = read_jsonl(project / ".loopplane" / "runtime" / "events" / "events_000001.jsonl")
+            clear_events = [
+                event for event in events if event.get("event_type") == "runner_availability_hold_cleared"
+            ]
+            self.assertEqual(len(clear_events), 1)
+            self.assertIn("independently verified", clear_events[0]["data"]["clear_reason"])
+
     def test_status_matches_response_for_control_request_without_id(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             project = Path(tmp) / "project"
@@ -92,6 +151,57 @@ class ControlRequestCliTest(unittest.TestCase):
             self.assertFalse(status["scheduler"]["running"])
             self.assertIsNone(status["scheduler"]["active_run_id"])
             self.assertIsNone(status["runtime_state"]["scheduler"]["active_task_id"])
+
+    def test_status_overlays_cached_background_state_from_registry(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "Status should resolve paused background state.")
+            state_path = project / ".loopplane" / "runtime" / "state.json"
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            state["status"] = "paused"
+            state["scheduler"].update(
+                {
+                    "paused": True,
+                    "running": False,
+                    "active_background_job_id": "bg_cancelled",
+                    "active_background_job_status": "running",
+                }
+            )
+            state_path.write_text(
+                json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+            )
+            registry_path = (
+                project / ".loopplane" / "runtime" / "background_jobs.json"
+            )
+            registry_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "1.5",
+                        "jobs": [
+                            {
+                                "job_id": "bg_cancelled",
+                                "run_id": "run_cancelled",
+                                "status": "cancelled",
+                            }
+                        ],
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            status = load_control_status(project)
+
+            self.assertEqual(status["status"], "paused")
+            self.assertEqual(
+                status["scheduler"]["active_background_job_status"], "cancelled"
+            )
+            self.assertEqual(
+                status["runtime_state"]["scheduler"]["active_background_job_status"],
+                "cancelled",
+            )
 
     def test_status_reports_stale_completion_marker_without_completed_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -115,6 +115,37 @@ print(answer)
 
 
 class BackgroundJobRuntimeTest(unittest.TestCase):
+    def test_starting_handoff_remains_active_during_supervisor_race(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "Accept the supervisor startup transition.")
+            workflow_config = load_workflow_config(project)
+            paths = WorkflowPaths.from_config(project, workflow_config)
+            (paths.runtime_dir / "background_jobs.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "1.5",
+                        "workflow_id": workflow_config["workflow_id"],
+                        "jobs": [
+                            {
+                                "job_id": "starting_fixture",
+                                "status": "starting",
+                                "next_prompt_ready": False,
+                                "heartbeat_at": utc_timestamp(),
+                            }
+                        ],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            result = list_background_jobs(project, job_id="starting_fixture")
+
+            self.assertEqual(result["status"], "waiting_background_job")
+            self.assertEqual(result["jobs"][0]["status"], "starting")
+            self.assertFalse(result["jobs"][0]["next_prompt_ready"])
+
     def test_loopplane_supervised_background_job_blocks_scheduler_until_safe(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             project = Path(tmp) / "project"
@@ -1114,6 +1145,7 @@ class BackgroundJobRuntimeTest(unittest.TestCase):
                 task_id="P0.T001",
                 run_id="run_background_watchdog",
                 watchdog_interval_seconds=1,
+                watchdog_agent_interval_seconds=1,
                 watchdog_question="confirm healthy fixture progress",
             )
 
@@ -1203,6 +1235,27 @@ class BackgroundJobRuntimeTest(unittest.TestCase):
             self.assertFalse(thread.is_alive())
             self.assertTrue(result.get("stop_job"))
 
+    def test_short_background_job_uses_cheap_probe_without_inspector(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "Short jobs should not spend an agent call on watchdog inspection.")
+            configure_watchdog_inspector(project)
+
+            result = start_background_job(
+                project,
+                command=[sys.executable, "-c", "import time; time.sleep(1.5)"],
+                task_id="P0.T001",
+                run_id="run_background_probe_only",
+                watchdog_interval_seconds=1,
+            )
+
+            self.assertTrue(result["ok"], json.dumps(result, indent=2, sort_keys=True))
+            status = self._wait_for_job_status(project, result["job_id"], "completed")
+            watchdog = status["jobs"][0]["watchdog"]
+            self.assertGreaterEqual(watchdog["probe_count"], 1)
+            self.assertEqual(watchdog["check_count"], 0)
+            self.assertEqual(watchdog["agent_interval_seconds"], 7200)
+
     def test_watchdog_can_stop_unhealthy_background_job_as_needs_recovery(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             project = Path(tmp) / "project"
@@ -1219,6 +1272,7 @@ class BackgroundJobRuntimeTest(unittest.TestCase):
                 task_id="P0.T001",
                 run_id="run_background_watchdog_unhealthy",
                 watchdog_interval_seconds=1,
+                watchdog_agent_interval_seconds=1,
                 watchdog_question="needs recovery fixture",
             )
 
@@ -1242,6 +1296,7 @@ class BackgroundJobRuntimeTest(unittest.TestCase):
                 task_id="P0.T001",
                 run_id="run_background_watchdog_race",
                 watchdog_interval_seconds=1,
+                watchdog_agent_interval_seconds=1,
                 watchdog_question="slow needs recovery fixture",
             )
 

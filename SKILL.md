@@ -7,7 +7,16 @@ description: Initialize and run a durable, plan-driven agent workflow inside any
 
 Use this skill when the user wants to turn a natural-language objective into a persistent, auditable, recoverable workflow.
 
-Read `references/PROTOCOL.md` first.
+LoopPlane owns agent workflow orchestration, not the project's execution
+backend. Keep machine, resource, launcher, and storage instructions in project
+shared context, runner configuration, or optional project skills. Never add
+site-specific command interception or resource policy to the generic runtime.
+
+Read `references/PROTOCOL.md` first when installing, operating, debugging, or
+changing LoopPlane itself. Generated worker, recovery, validator, inspector,
+and summary runs already receive their role contract in the prompt; they must
+not reread the full protocol unless a concrete lifecycle or authority ambiguity
+requires it.
 
 Required install-time CLI bootstrap:
 - `loopplane skill install --target <project>` is not complete until the required external CLI runners are found, configured, and doctored.

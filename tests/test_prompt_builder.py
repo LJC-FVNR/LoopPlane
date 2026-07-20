@@ -176,11 +176,12 @@ class PromptBuilderTest(unittest.TestCase):
                 failure_id="fail_fixture",
             )
 
-            old_golden = (FIXTURES / "recovery_prompt.golden.md").read_text(encoding="utf-8")
-            self.assertLess(len(built.content), len(old_golden))
+            self.assertLess(len(built.content), 7_250)
             self.assertEqual(built.prompt_path.read_text(encoding="utf-8"), built.content)
             self.assertIn("## Failure Summary", built.content)
             self.assertIn("failure_id: fail_fixture", built.content)
+            self.assertIn("A recovery is an evidence overlay", built.content)
+            self.assertIn("parse every `file_exists:`", built.content)
             self.assertNotIn("## Configured Workflow Paths", built.content)
             metadata = json.loads(built.metadata_path.read_text(encoding="utf-8"))
             self.assertEqual(metadata["selected_failure_id"], "fail_fixture")

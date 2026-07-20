@@ -848,6 +848,12 @@ def _write_process_result(
     adapter_metadata: Mapping[str, Any],
 ) -> AdapterOutput:
     paths = adapter_input.output_paths()
+    # Runner availability describes the external runner process, not a local
+    # post-run policy verdict.  Preserve the real process exit code before a
+    # workspace-boundary violation is translated to POLICY_BLOCKED_EXIT_CODE;
+    # otherwise an unrelated warning in a successful runner's stderr can be
+    # misclassified as a persistent runner configuration failure.
+    process_exit_code = exit_code
     produced_files = discover_adapter_produced_files(
         adapter_input,
         before=pre_run_files,
@@ -865,14 +871,14 @@ def _write_process_result(
         produced_files = _merge_produced_files(produced_files, observed_boundary_change_paths(boundary_policy))
         metadata["workspace_boundary_policy"] = boundary_policy
     if boundary_policy.get("enforced") and not boundary_policy.get("ok", True):
-        metadata["process_exit_code"] = exit_code
+        metadata["process_exit_code"] = process_exit_code
         exit_code = POLICY_BLOCKED_EXIT_CODE
         _append_boundary_violation(paths.stderr_path, boundary_policy)
         _write_boundary_final_output(paths.final_output_path, boundary_policy)
     if "runner_availability" not in metadata:
         availability = classify_runner_availability(
             adapter_input,
-            exit_code=exit_code,
+            exit_code=process_exit_code,
             timed_out=timed_out,
             stdout_path=paths.stdout_path,
             stderr_path=paths.stderr_path,
@@ -1107,6 +1113,7 @@ def _process_env(adapter_input: AdapterInput, paths: Any) -> dict[str, str]:
     env = dict(os.environ)
     env.update(_project_dotenv_env(adapter_input, env))
     env.update(dict(adapter_input.env))
+    _configure_isolated_codex_home(adapter_input, env)
     env.update(
         {
             "LOOPPLANE_RUN_ID": adapter_input.run_id,
@@ -1131,6 +1138,42 @@ def adapter_process_env(adapter_input: AdapterInput) -> dict[str, str]:
     """Return the exact environment used by shell-family child processes."""
 
     return _process_env(adapter_input, adapter_input.output_paths())
+
+
+def _configure_isolated_codex_home(adapter_input: AdapterInput, env: dict[str, str]) -> None:
+    isolate_value = env.get("LOOPPLANE_ISOLATE_CODEX_STATE", "1").strip().lower()
+    if (
+        adapter_input.adapter != "codex_cli"
+        or isolate_value in {"0", "false", "no", "off"}
+        or adapter_input.env.get("CODEX_HOME")
+    ):
+        return
+    state_root = env.get("LOOPPLANE_AGENT_STATE_ROOT") or env.get("TMPDIR") or "/tmp"
+    uid = os.getuid() if hasattr(os, "getuid") else 0
+    codex_home = (
+        Path(state_root)
+        / f"loopplane-agent-state-{uid}"
+        / adapter_input.workflow_id
+        / adapter_input.runner_id
+    )
+    codex_home.mkdir(parents=True, exist_ok=True, mode=0o700)
+    try:
+        codex_home.chmod(0o700)
+    except OSError:
+        pass
+
+    auth_source_value = env.get("LOOPPLANE_CODEX_AUTH_FILE")
+    inherited_codex_home = Path(os.environ.get("CODEX_HOME") or (Path.home() / ".codex"))
+    auth_source = Path(auth_source_value).expanduser() if auth_source_value else inherited_codex_home / "auth.json"
+    auth_target = codex_home / "auth.json"
+    if auth_source.is_file() and not auth_target.exists():
+        try:
+            auth_target.symlink_to(auth_source.resolve())
+        except OSError:
+            pass
+
+    env["CODEX_HOME"] = codex_home.as_posix()
+    env["LOOPPLANE_CODEX_STATE_ISOLATED"] = "1"
 
 
 

@@ -11,12 +11,31 @@ from pathlib import Path
 
 from runtime.init_workflow import init_project
 from runtime.plan_objectives import DEFAULT_OBJECTIVE_MAX_EXPANSIONS
-from runtime.planning import activate_plan, inspect_plan_draft, run_auditor, run_plan_revision_loop, run_planner
+from runtime.planning import _workspace_tree, activate_plan, inspect_plan_draft, run_auditor, run_plan_revision_loop, run_planner
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 LoopPlane = REPO_ROOT / "scripts" / "loopplane"
 CLI_ADAPTER_FIXTURE_BIN = REPO_ROOT / "tests" / "fixtures" / "cli_adapters" / "bin"
+
+
+class PlanningWorkspaceTreeTest(unittest.TestCase):
+    def test_workspace_tree_prunes_canonical_workflow_results(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            source = project / "src" / "app.py"
+            source.parent.mkdir(parents=True)
+            source.write_text("VALUE = 1\n", encoding="utf-8")
+            generated = project / ".loopplane" / "workflows" / "wf_test" / "results" / "T001"
+            generated.mkdir(parents=True)
+            for index in range(100):
+                (generated / f"artifact_{index}.bin").write_bytes(b"generated")
+
+            tree = _workspace_tree(project, max_entries=20)
+
+            self.assertIn("src/app.py", tree)
+            self.assertNotIn("artifact_", tree)
+
 
 
 def install_cli_adapter_fixture_bin(root: Path) -> Path:
@@ -1229,6 +1248,46 @@ draft.write_text(f'''# Project Plan
 
 
 class PlanReadinessInspectionTest(unittest.TestCase):
+    def test_operational_efficiency_lint_flags_broad_reads_artifacts_and_missing_reuse(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            draft = Path(tmp) / "PLAN_DRAFT.md"
+            artifacts = ", ".join(f"artifact_{index}.json" for index in range(13))
+            draft.write_text(
+                f"""# Project Plan
+
+## Metadata
+
+- workflow_id: wf_test
+- plan_version: 1
+- generated_from: PROJECT_BRIEF.md
+- active: false
+
+## Phase P0: Experiment Pilot
+
+- [ ] P0.T001: Run experiment
+  - acceptance: Reread and cite the complete historical source set, tokenize and pack the dataset, then launch the experiment.
+  - evidence: .loopplane/results/P0.T001/
+  - latest: .loopplane/results/P0.T001/latest.json
+  - depends_on: []
+  - risk: medium
+  - validation: file_exists: {artifacts}
+  - max_attempts: 3
+  - approval: not_required
+  - deliverables: Primary metrics and decision record.
+""",
+                encoding="utf-8",
+            )
+
+            report = inspect_plan_draft(draft, workflow_id="wf_test")
+
+            self.assertTrue(report["valid"], report["errors"])
+            warnings = "\n".join(report["warnings"])
+            self.assertIn("blanket rereading of complete historical sources", warnings)
+            self.assertIn("validation requires 13 files", warnings)
+            self.assertIn("data preprocessing has no durable reuse contract", warnings)
+            self.assertEqual(report["tasks"][0]["required_artifact_count"], 13)
+            self.assertTrue(report["tasks"][0]["data_build"])
+
     def test_validation_strategy_lint_reports_command_and_report_marker_risks(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             draft = Path(tmp) / "PLAN_DRAFT.md"

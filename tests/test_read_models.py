@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from hashlib import sha256
 from pathlib import Path
+from unittest import mock
 
 import runtime.read_models as read_models_module
 import runtime.scheduler as scheduler_module
@@ -181,6 +182,24 @@ class ReadModelBuilderIntegrationTest(unittest.TestCase):
             self.assertEqual(workflow_status["completion_marker"]["exists"], False)
             plan_index = json.loads((read_models_dir / "plan_index.json").read_text(encoding="utf-8"))
             self.assertEqual(plan_index["summary"]["total"], 0)
+
+    def test_rebuild_never_requests_unbounded_event_history(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "Bounded read-model event history.")
+            observed_limits: list[int | None] = []
+            original = read_models_module._read_event_records
+
+            def observed(paths: WorkflowPaths, *, limit: int | None = None) -> list[dict[str, object]]:
+                observed_limits.append(limit)
+                return original(paths, limit=limit)
+
+            with mock.patch.object(read_models_module, "_read_event_records", side_effect=observed):
+                result = rebuild_read_models(project)
+
+            self.assertTrue(result["ok"], json.dumps(result, indent=2, sort_keys=True))
+            self.assertTrue(observed_limits)
+            self.assertTrue(all(isinstance(limit, int) and limit > 0 for limit in observed_limits))
 
     def test_duplicate_pending_read_model_rebuild_requests_are_coalesced(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
