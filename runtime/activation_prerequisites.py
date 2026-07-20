@@ -352,12 +352,18 @@ def _validate_record_contract(
         _problem(errors, blocker_codes, "activation_prerequisite_not_ready", "Prerequisite is not ready_for_fresh_audit.")
 
     configuration = _mapping(record.get("current_configuration"))
-    if configuration.get("validation.validator_agent_mode") != "always":
+    validator_mode = configuration.get("validation.validator_agent_mode")
+    validator_for_high_risk = configuration.get("validation.validator_agent_for_high_risk") is True
+    validator_policy_ok = validator_mode == "always" or (
+        validator_mode == "high_risk_pass_only" and validator_for_high_risk
+    )
+    if not validator_policy_ok:
         _problem(
             errors,
             blocker_codes,
             "activation_prerequisite_validator_policy_invalid",
-            "Prerequisite must record validation.validator_agent_mode=always.",
+            "Prerequisite must record either validator_agent_mode=always or "
+            "validator_agent_mode=high_risk_pass_only with validator_agent_for_high_risk=true.",
         )
 
     runtime = _mapping(record.get("execution_runtime"))

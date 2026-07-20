@@ -361,6 +361,9 @@ def _check_active_run_leases(paths: WorkflowPaths, now: datetime) -> tuple[dict[
             "run_id": run_id,
             "status": status,
             "adapter_pid": lease.get("adapter_pid"),
+            "adapter_host": lease.get("adapter_host"),
+            "scheduler_host": lease.get("scheduler_host"),
+            "scheduler_owner": lease.get("scheduler_owner"),
             "fresh": is_fresh,
         }
         active.append(lease_summary)
@@ -384,10 +387,15 @@ def _check_runner_liveness(active_leases: Sequence[Mapping[str, Any]]) -> dict[s
         return _check("runner_liveness", PASS, "No active runner processes are expected.")
 
     missing_pid: list[str] = []
+    remote_pid: list[str] = []
     dead_pid: list[str] = []
     alive_pid: list[str] = []
     for lease in active_leases:
         run_id = str(lease.get("run_id") or lease.get("path") or "unknown")
+        runner_host = _lease_runner_host(lease)
+        if runner_host and not _hostnames_match(runner_host, socket.gethostname()):
+            remote_pid.append(run_id)
+            continue
         pid_value = lease.get("adapter_pid")
         if pid_value is None:
             missing_pid.append(run_id)
@@ -406,14 +414,35 @@ def _check_runner_liveness(active_leases: Sequence[Mapping[str, Any]]) -> dict[s
 
     if dead_pid:
         return _check("runner_liveness", FAIL, "Active run lease refers to a non-live runner process.", details={"dead": dead_pid})
-    if missing_pid:
+    if missing_pid or remote_pid:
         return _check(
             "runner_liveness",
             WARN,
             "Process liveness is unavailable for one or more active run leases.",
-            details={"missing_pid": missing_pid, "alive": alive_pid},
+            details={"missing_pid": missing_pid, "remote_pid": remote_pid, "alive": alive_pid},
         )
     return _check("runner_liveness", PASS, "Active runner process liveness is consistent with leases.", details={"alive": alive_pid})
+
+
+def _lease_runner_host(lease: Mapping[str, Any]) -> str | None:
+    for field in ("adapter_host", "scheduler_host"):
+        value = _non_empty_string(lease.get(field))
+        if value:
+            return value
+    owner = _non_empty_string(lease.get("scheduler_owner"))
+    if owner:
+        parts = owner.rsplit(":", 2)
+        if len(parts) == 3 and parts[0].strip():
+            return parts[0].strip()
+    return None
+
+
+def _hostnames_match(left: str, right: str) -> bool:
+    left_normalized = left.strip().lower().rstrip(".")
+    right_normalized = right.strip().lower().rstrip(".")
+    if not left_normalized or not right_normalized:
+        return False
+    return left_normalized == right_normalized or left_normalized.split(".", 1)[0] == right_normalized.split(".", 1)[0]
 
 
 def _lease_blocks_scheduler(lease: Mapping[str, Any]) -> bool:
@@ -611,8 +640,7 @@ def _check_agent_status_files(paths: WorkflowPaths) -> dict[str, Any]:
         run_id = _non_empty_string(data.get("run_id"))
         if not run_id:
             file_problems.append(f"{rel}: missing run_id")
-        next_prompt_ready = data.get("next_prompt_ready")
-        if worker_status == "running_background" or next_prompt_ready is False:
+        if _agent_status_claims_active_background(data, worker_status=worker_status):
             if not _agent_status_wake_next_agent_when(data):
                 file_problems.append(f"{rel}: unsafe background status must include wake_next_agent_when")
             reported_background_job_ids = _agent_status_background_job_ids(data)
@@ -1016,9 +1044,10 @@ def _resolved_failure_agent_status_paths(paths: WorkflowPaths) -> set[str]:
             continue
         if str(failure.get("status") or "").lower() not in RESOLVED_FAILURE_STATUSES:
             continue
-        agent_status_path = failure.get("agent_status_path")
-        if isinstance(agent_status_path, str) and agent_status_path.strip():
-            paths_set.add(agent_status_path.strip())
+        for field in ("agent_status_path", "source_agent_status_path"):
+            agent_status_path = failure.get(field)
+            if isinstance(agent_status_path, str) and agent_status_path.strip():
+                paths_set.add(agent_status_path.strip())
     return paths_set
 
 
@@ -1031,6 +1060,11 @@ def _agent_status_wake_next_agent_when(data: Mapping[str, Any]) -> bool:
         nested = background.get("wake_next_agent_when")
         if isinstance(nested, str) and nested.strip():
             return True
+    background_state = data.get("background_state")
+    if isinstance(background_state, Mapping):
+        nested = background_state.get("wake_next_agent_when")
+        if isinstance(nested, str) and nested.strip():
+            return True
     jobs = data.get("background_jobs")
     if isinstance(jobs, Sequence) and not isinstance(jobs, (str, bytes)):
         return any(
@@ -1039,6 +1073,18 @@ def _agent_status_wake_next_agent_when(data: Mapping[str, Any]) -> bool:
             and bool(str(job.get("wake_next_agent_when")).strip())
             for job in jobs
         )
+    return False
+
+
+def _agent_status_claims_active_background(data: Mapping[str, Any], *, worker_status: str | None) -> bool:
+    if worker_status == "running_background":
+        return True
+    for key in ("background", "background_state"):
+        value = data.get(key)
+        if not isinstance(value, Mapping):
+            continue
+        if value.get("active_background_job") is True or value.get("active") is True:
+            return True
     return False
 
 

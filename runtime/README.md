@@ -14,6 +14,20 @@ excluding migration export/import profiles, Git-ref bundle export/import, and
 archived/read-only workflow mutation safeguards. Release validation exercises
 these surfaces through package-tree gates in `runtime.skill_package`.
 
+## Execution Backend Boundary
+
+LoopPlane schedules agent roles, durable state transitions, validation,
+recovery, and generic background-command supervision. It does not infer a
+workload backend from task prose, intercept launcher binaries, rewrite command
+search paths for backend telemetry, choose machine resources, or enforce
+backend-specific launch deadlines.
+
+Environment access, resource selection, launch commands, storage placement,
+and site policy belong to each project's `SHARED_CONTEXT.md`, runner local
+configuration, or optional project skills. This boundary lets the same
+LoopPlane package move among personal machines, shared compute environments,
+and hosted servers without source changes.
+
 `runtime.skill_package` implements the `loopplane skill` command group used by the
 portable package workflow. It shares package diagnostics with
 `scripts/check_package_tree.py`, delegates project-local installation to the
@@ -89,7 +103,14 @@ policy must provide `global_concurrency_limit`, `lock_scope`, `lock_key`, and
 `queue_when_busy`. `lock_scope` currently accepts `machine` and `workspace`;
 machine-scoped locks are intended to live under
 `$LOOPPLANE_HOME/locks/runner_locks/<lock_key>.lock` without replacing the
-project-local scheduler locks.
+project-local scheduler locks. They carry a unique owner ID, host/process
+identity, active-run lease path, and a 30-second heartbeat with a 120-second
+TTL. The owner holds a lifetime POSIX advisory lock on the metadata inode, so
+heartbeat, release, and stale reclaim cannot replace or unlink a newer owner.
+Platforms or shared filesystems without advisory locking support fail closed.
+Waiters poll once per second and may reclaim a lock only when the advisory owner
+is gone and its active-run lease is terminal/expired or its host-aware heartbeat
+is stale.
 
 `runtime.scheduler.append_event` writes append-only JSONL records under the
 resolved workflow `runtime_dir` through `event_append_lock`. Runtime events
@@ -134,6 +155,9 @@ follow-up after worker runs, and keeps polling through recoverable wait states
 such as paused, waiting for config, waiting for approval, and waiting for
 background jobs. It exits on completion, explicit stop, unrecoverable
 attention, scheduler failure, or failed validation/reconciliation follow-up.
+During controller replacement it retries a pre-existing scheduler-instance lock
+for a bounded 150-second startup grace, allowing the old 120-second lease to
+expire without requiring a second manual submission.
 
 Detached supervisor metadata is stored in the configured runtime directory as
 `supervisor.json`; the default flat compatibility path is
@@ -165,10 +189,13 @@ Workers can also start long-running commands with `loopplane background start --
 <command>`. That command launches a LoopPlane supervisor, records the job in
 `background_jobs.json`, maintains heartbeat/log/exit-code state, and returns an
 `agent_status_fragment` workers can copy into `agent_status.json`. Long or
-failure-prone background jobs can opt into semantic watchdog checks with
-`--watchdog-interval-seconds`, `--watchdog-runner`, and `--watchdog-question`;
-the supervisor periodically runs the inspector, records recent check summaries,
-and can stop treating the job as healthy when the inspector recommends recovery.
+failure-prone background jobs can opt into cheap process/log probes with
+`--watchdog-interval-seconds`. Semantic inspector checks are separately throttled
+with `--watchdog-agent-interval-seconds` (7200 seconds by default),
+`--watchdog-runner`, and `--watchdog-question`; the supervisor records recent
+check summaries and can stop treating the job as healthy when the inspector
+recommends recovery. Ordinary jobs shorter than the agent interval therefore
+incur no LLM watchdog call.
 `loopplane health` treats malformed, stale, failed, timed-out, or recovery-needed
 background job records as degraded runtime state. It also inspects configured
 machine-level runner lock keys under `$LOOPPLANE_HOME/locks/runner_locks/` and

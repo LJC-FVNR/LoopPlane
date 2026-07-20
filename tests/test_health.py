@@ -198,6 +198,43 @@ class HealthProbeTest(unittest.TestCase):
             self.assertEqual(check["status"], "warn")
             self.assertIn("historical recovered run has status", "\n".join(check["details"]["warnings"]))  # type: ignore[index]
 
+    def test_recovered_background_source_agent_status_is_health_warning(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "Recovered background source status should not degrade workflow health.")
+            rel_status = ".loopplane/results/T001/runs/run_background/agent_status.json"
+            write_json(
+                project / rel_status,
+                {
+                    "schema_version": "1.5",
+                    "run_id": "run_background",
+                    "status": "running_background",
+                    "next_prompt_ready": False,
+                },
+            )
+            registry_path = project / ".loopplane" / "runtime" / "failure_registry.json"
+            registry = json.loads(registry_path.read_text(encoding="utf-8"))
+            registry["failures"] = [
+                {
+                    "failure_id": "fail_recovered_background",
+                    "task_id": "T001",
+                    "run_id": "run_background",
+                    "status": "recovered",
+                    "failure_class": "background_job_failed",
+                    "failure_signature": "background_job_failed:failed:exit_1:no_status_problem",
+                    "source_agent_status_path": rel_status,
+                }
+            ]
+            write_json(registry_path, registry)
+
+            result = run_health_probe(project)
+
+            self.assertEqual(result["status"], "healthy_with_warnings", json.dumps(result, indent=2, sort_keys=True))
+            check = check_by_name(result, "agent_status_files")
+            self.assertEqual(check["status"], "warn")
+            warnings = "\n".join(check["details"]["warnings"])  # type: ignore[index]
+            self.assertIn("unsafe background status must include wake_next_agent_when", warnings)
+
     def test_cli_json_strict_and_write_for_stale_completion_marker(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             project = Path(tmp) / "project"
@@ -485,6 +522,58 @@ class HealthProbeTest(unittest.TestCase):
             self.assertEqual(check["status"], "pass", json.dumps(result, indent=2, sort_keys=True))
             self.assertNotIn("no matching background_jobs.json record", json.dumps(check, sort_keys=True))
 
+    def test_non_background_false_next_prompt_ready_does_not_require_registry(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "Non-background terminal and blocked statuses need no background registry entry.")
+            for index, status in enumerate(("completed", "blocked_external", "recoverable_failed")):
+                write_json(
+                    project
+                    / ".loopplane"
+                    / "results"
+                    / "P0.T001"
+                    / "runs"
+                    / f"run_{index}"
+                    / "agent_status.json",
+                    {
+                        "schema_version": "1.5",
+                        "run_id": f"run_{index}",
+                        "task_id": "P0.T001",
+                        "status": status,
+                        "next_prompt_ready": False,
+                        "background_state": {"active_background_job": False},
+                    },
+                )
+
+            result = run_health_probe(project)
+
+            check = check_by_name(result, "agent_status_files")
+            self.assertEqual(check["status"], "pass", json.dumps(result, indent=2, sort_keys=True))
+
+    def test_explicit_active_background_state_requires_registry_and_wake_condition(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "An explicit active background handoff must be registered and wakeable.")
+            write_json(
+                project / ".loopplane" / "results" / "P0.T001" / "runs" / "run_active" / "agent_status.json",
+                {
+                    "schema_version": "1.5",
+                    "run_id": "run_active",
+                    "task_id": "P0.T001",
+                    "status": "blocked_external",
+                    "next_prompt_ready": False,
+                    "background_state": {"active_background_job": True},
+                },
+            )
+
+            result = run_health_probe(project)
+
+            check = check_by_name(result, "agent_status_files")
+            self.assertEqual(check["status"], "fail", json.dumps(result, indent=2, sort_keys=True))
+            serialized = json.dumps(check, sort_keys=True)
+            self.assertIn("must include wake_next_agent_when", serialized)
+            self.assertIn("no matching background_jobs.json record", serialized)
+
     def test_nonblocking_inspector_lease_does_not_degrade_workflow_health(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             project = Path(tmp) / "project"
@@ -538,6 +627,37 @@ class HealthProbeTest(unittest.TestCase):
             check = check_by_name(result, "validations")
             self.assertEqual(check["status"], "pass")
             self.assertEqual(check["count"], 0)
+
+    def test_remote_fresh_runner_lease_does_not_report_local_pid_as_dead(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "Remote runner PID must be interpreted in its own host namespace.")
+            now = datetime.now(UTC).replace(microsecond=0)
+            heartbeat = now.isoformat().replace("+00:00", "Z")
+            expires = (now + timedelta(minutes=5)).isoformat().replace("+00:00", "Z")
+            write_json(
+                project / ".loopplane" / "runtime" / "active_run_leases" / "run_remote.json",
+                {
+                    "schema_version": "1.5",
+                    "run_id": "run_remote",
+                    "task_id": "T001",
+                    "role": "worker",
+                    "runner_id": "worker",
+                    "status": "running",
+                    "blocks_scheduler": True,
+                    "heartbeat_at": heartbeat,
+                    "lease_expires_at": expires,
+                    "adapter_pid": 99999999,
+                    "scheduler_owner": f"remote-{socket.gethostname()}:99999999:owner",
+                },
+            )
+
+            result = run_health_probe(project)
+
+            check = check_by_name(result, "runner_liveness")
+            self.assertEqual(check["status"], "warn", json.dumps(result, indent=2, sort_keys=True))
+            self.assertEqual(check["details"]["remote_pid"], ["run_remote"])
+            self.assertNotEqual(result["status"], "degraded")
 
     def test_fresh_owner_lease_covers_stale_scheduler_lock_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

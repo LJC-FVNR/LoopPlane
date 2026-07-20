@@ -585,6 +585,35 @@ class SchedulerSelectionTest(unittest.TestCase):
             self.assertEqual(action["action"], "wait_background_job")
             self.assertEqual(action["selected"]["job_id"], "job1")
 
+    def test_starting_background_job_is_active_not_recovery_work(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "A supervisor startup handoff blocks duplicate recovery.")
+            write_active_plan(project, {"P0.T001": " ", "P1.T001": " "})
+            write_json(
+                project / ".loopplane" / "runtime" / "background_jobs.json",
+                {
+                    "schema_version": "1.5",
+                    "workflow_id": "wf_test",
+                    "jobs": [
+                        {
+                            "job_id": "bg_starting",
+                            "task_id": "P0.T001",
+                            "run_id": "run_starting",
+                            "status": "starting",
+                            "next_prompt_ready": False,
+                            "heartbeat_at": datetime.now(UTC).isoformat(),
+                        }
+                    ],
+                },
+            )
+
+            action = select_next_action(load_scheduler_snapshot(project))
+
+            self.assertEqual(action["action"], "wait_background_job")
+            self.assertEqual(action["selected"]["job_id"], "bg_starting")
+            self.assertEqual(action["selected"]["job"]["status"], "starting")
+
     def test_malformed_background_status_requires_attention_and_persists_needs_recovery(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             project = Path(tmp) / "project"
@@ -1402,6 +1431,147 @@ class SchedulerSelectionTest(unittest.TestCase):
             state = json.loads((project / ".loopplane" / "runtime" / "state.json").read_text(encoding="utf-8"))
             self.assertNotEqual(state["status"], "requires_attention")
 
+    def test_stale_dead_recovery_lease_returns_pre_result_failure_to_retry_queue(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "Interrupted recovery attempts must not remain stuck.")
+            write_active_plan(project, {"P0.T001": "x", "P1.T001": " "})
+            run_id = "run_dead_recovery"
+            lease_path = (
+                project / ".loopplane" / "runtime" / "active_run_leases" / f"{run_id}.json"
+            )
+            write_json(
+                lease_path,
+                {
+                    "schema_version": "1.5",
+                    "workflow_id": "wf_test",
+                    "run_id": run_id,
+                    "node_id": f"node_recovery_worker_P1_T001_{run_id}",
+                    "task_id": "P1.T001",
+                    "role": "recovery_worker",
+                    "runner_id": "worker",
+                    "status": "running",
+                    "heartbeat_at": "2000-01-01T00:00:00Z",
+                    "lease_expires_at": "2000-01-01T00:00:01Z",
+                    "adapter_pid": 99999999,
+                    "adapter_child_pid": 99999998,
+                    "adapter_result_path": f".loopplane/runtime/runs/{run_id}/adapter_result.json",
+                    "final_output_path": f".loopplane/runtime/runs/{run_id}/final.md",
+                    "role_output_dir": f".loopplane/results/P1.T001/runs/{run_id}",
+                },
+            )
+            write_json(
+                project / ".loopplane" / "runtime" / "failure_registry.json",
+                {
+                    "schema_version": "1.5",
+                    "workflow_id": "wf_test",
+                    "failures": [
+                        {
+                            "failure_id": "fail_interrupted_recovery",
+                            "task_id": "P1.T001",
+                            "status": "recovering",
+                            "recoverable": True,
+                            "recovery_attempts": 1,
+                            "max_recovery_attempts": 1,
+                            "budget_remaining": False,
+                            "active_recovery_run_id": run_id,
+                            "last_recovery_run_id": run_id,
+                            "first_seen_at": "2026-06-10T00:00:00Z",
+                        }
+                    ],
+                },
+            )
+
+            snapshot = load_scheduler_snapshot(project)
+
+            released = json.loads(lease_path.read_text(encoding="utf-8"))
+            self.assertEqual(released["status"], "released")
+            self.assertEqual(
+                released["failure_recovery_reset"]["failure_id"],
+                "fail_interrupted_recovery",
+            )
+            self.assertEqual(released["failure_recovery_reset"]["task_id"], "P1.T001")
+            self.assertEqual(released["failure_recovery_reset"]["recovery_attempts_before"], 1)
+            self.assertEqual(released["failure_recovery_reset"]["recovery_attempts"], 0)
+            self.assertTrue(released["failure_recovery_reset"]["reset_at"])
+            failure = snapshot["failure_registry"]["failures"][0]
+            self.assertEqual(failure["status"], "unrecovered")
+            self.assertEqual(failure["recovery_attempts"], 0)
+            self.assertTrue(failure["budget_remaining"])
+            self.assertNotIn("active_recovery_run_id", failure)
+            self.assertEqual(failure["interrupted_recovery_run_ids"], [run_id])
+            self.assertEqual(
+                failure["last_recovery_classification"],
+                "stale_dead_run_lease_reclaimed",
+            )
+
+            action = select_next_action(snapshot)
+            self.assertEqual(action["action"], "run_recovery")
+            self.assertEqual(action["selected"]["failure_id"], "fail_interrupted_recovery")
+
+    def test_stale_dead_recovery_lease_with_terminal_evidence_keeps_attempt_charged(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "Completed recovery work must retain its charged attempt.")
+            write_active_plan(project, {"P0.T001": "x", "P1.T001": " "})
+            run_id = "run_dead_recovery_with_result"
+            lease_path = (
+                project / ".loopplane" / "runtime" / "active_run_leases" / f"{run_id}.json"
+            )
+            agent_status_path = (
+                project / ".loopplane" / "results" / "P1.T001" / "runs" / run_id / "agent_status.json"
+            )
+            write_json(agent_status_path, {"status": "completed", "run_id": run_id})
+            write_json(
+                lease_path,
+                {
+                    "schema_version": "1.5",
+                    "workflow_id": "wf_test",
+                    "run_id": run_id,
+                    "node_id": f"node_recovery_worker_P1_T001_{run_id}",
+                    "task_id": "P1.T001",
+                    "role": "recovery_worker",
+                    "runner_id": "worker",
+                    "status": "running",
+                    "heartbeat_at": "2000-01-01T00:00:00Z",
+                    "lease_expires_at": "2000-01-01T00:00:01Z",
+                    "adapter_pid": 99999999,
+                    "adapter_child_pid": 99999998,
+                    "agent_status_path": agent_status_path.relative_to(project).as_posix(),
+                    "role_output_dir": agent_status_path.parent.relative_to(project).as_posix(),
+                },
+            )
+            write_json(
+                project / ".loopplane" / "runtime" / "failure_registry.json",
+                {
+                    "schema_version": "1.5",
+                    "workflow_id": "wf_test",
+                    "failures": [
+                        {
+                            "failure_id": "fail_recovery_with_result",
+                            "task_id": "P1.T001",
+                            "status": "recovering",
+                            "recoverable": True,
+                            "recovery_attempts": 1,
+                            "max_recovery_attempts": 1,
+                            "budget_remaining": False,
+                            "active_recovery_run_id": run_id,
+                        }
+                    ],
+                },
+            )
+
+            snapshot = load_scheduler_snapshot(project)
+
+            released = json.loads(lease_path.read_text(encoding="utf-8"))
+            self.assertEqual(released["status"], "released")
+            self.assertNotIn("failure_recovery_reset", released)
+            failure = snapshot["failure_registry"]["failures"][0]
+            self.assertEqual(failure["status"], "recovering")
+            self.assertEqual(failure["recovery_attempts"], 1)
+            self.assertFalse(failure["budget_remaining"])
+            self.assertEqual(failure["active_recovery_run_id"], run_id)
+
     def test_stale_active_run_lease_with_unknown_liveness_is_not_reclaimed(self) -> None:
         # Conservative boundary: when runner liveness cannot be determined
         # ("unavailable"/unknown, e.g. a PID we cannot probe) we must NOT reclaim,
@@ -1798,6 +1968,73 @@ class SchedulerPreviewTest(unittest.TestCase):
 
 
 class PrepareRunTest(unittest.TestCase):
+    def test_scheduler_archives_old_terminal_leases_out_of_hot_scan_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "Compact terminal run leases.")
+            context = load_scheduler_context(project)["context"]
+            lease_dir = context.paths.runtime_dir / "active_run_leases"
+            lease_dir.mkdir(parents=True, exist_ok=True)
+            total = scheduler_module.MAX_HOT_INACTIVE_RUN_LEASES + 4
+            for index in range(total):
+                lease = {
+                    "schema_version": "1.5",
+                    "workflow_id": context.workflow_id,
+                    "run_id": f"run_terminal_{index:04d}",
+                    "role": "worker",
+                    "task_id": "P0.T001",
+                    "status": "failed",
+                }
+                (lease_dir / f"run_terminal_{index:04d}.json").write_text(
+                    json.dumps(lease, sort_keys=True) + "\n",
+                    encoding="utf-8",
+                )
+
+            active = scheduler_module._read_active_run_leases(context.paths, now=datetime.now(UTC))
+
+            self.assertEqual(active, [])
+            self.assertEqual(len(list(lease_dir.glob("*.json"))), scheduler_module.MAX_HOT_INACTIVE_RUN_LEASES)
+            archive_dir = context.paths.runtime_dir / scheduler_module.ARCHIVED_RUN_LEASES_DIRNAME
+            self.assertEqual(len(list(archive_dir.glob("run_terminal_*.json"))), 4)
+            manifest = json.loads(
+                (archive_dir / scheduler_module.ARCHIVED_RUN_LEASES_MANIFEST_FILENAME).read_text(encoding="utf-8")
+            )
+            self.assertEqual(manifest["archived_count"], 4)
+            self.assertTrue(all(record["sha256"] for record in manifest["records"]))
+
+    def test_scheduler_compacts_terminal_leases_that_accumulate_after_initial_scan(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "Compact leases that accumulate during a long-lived supervisor.")
+            context = load_scheduler_context(project)["context"]
+            lease_dir = context.paths.runtime_dir / "active_run_leases"
+            lease_dir.mkdir(parents=True, exist_ok=True)
+
+            self.assertEqual(
+                scheduler_module._read_active_run_leases(context.paths, now=datetime.now(UTC)),
+                [],
+            )
+            total = scheduler_module.MAX_HOT_INACTIVE_RUN_LEASES + 3
+            for index in range(total):
+                write_json(
+                    lease_dir / f"run_late_terminal_{index:04d}.json",
+                    {
+                        "schema_version": "1.5",
+                        "workflow_id": context.workflow_id,
+                        "run_id": f"run_late_terminal_{index:04d}",
+                        "role": "worker",
+                        "task_id": "P0.T001",
+                        "status": "completed",
+                    },
+                )
+
+            active = scheduler_module._read_active_run_leases(context.paths, now=datetime.now(UTC))
+
+            self.assertEqual(active, [])
+            self.assertEqual(len(list(lease_dir.glob("*.json"))), scheduler_module.MAX_HOT_INACTIVE_RUN_LEASES)
+            archive_dir = context.paths.runtime_dir / scheduler_module.ARCHIVED_RUN_LEASES_DIRNAME
+            self.assertEqual(len(list(archive_dir.glob("run_late_terminal_*.json"))), 3)
+
     def test_prepare_run_allocates_worker_paths_and_active_lease_before_prompt_generation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             project = Path(tmp) / "project"
@@ -2000,6 +2237,48 @@ class WorkerRunExecutionTest(unittest.TestCase):
             self.assertIn("worker_adapter_started", event_types)
             self.assertNotIn("worker_adapter_completed", event_types)
             self.assertIn("worker_run_classified", event_types)
+
+    def test_missing_worker_command_does_not_consume_scientific_failure_budget(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project = root / "project"
+            init_project(project, "Treat a deleted runner binary as infrastructure, not scientific failure.")
+            write_active_plan(project, {"P0.T001": " ", "P1.T001": " "})
+            record_accepted_plan_hash(project)
+            config_path = project / ".loopplane" / "config" / "agent_runners.json"
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+            worker = config["runners"]["worker"]
+            missing_command = (root / "deleted-codex").as_posix()
+            worker["adapter"] = "codex_cli"
+            worker["command"] = missing_command
+            worker["prompt_delivery"] = {"mode": "file_argument", "argument_template": "{{prompt_path}}"}
+            worker["doctor"] = {
+                "check_command": f"{missing_command} --version",
+                "requires_auth": False,
+            }
+            config_path.write_text(json.dumps(config, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+            completed = subprocess.run(
+                [sys.executable, str(LoopPlane), "run", "--project", str(project), "--json"],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+
+            self.assertEqual(completed.returncode, EXIT_RUNNER_UNAVAILABLE, completed.stdout + completed.stderr)
+            payload = json.loads(completed.stdout)
+            execution = payload["selected_action"]["execution_result"]
+            self.assertEqual(execution["runner_availability"]["reason_class"], "runner_configuration_error")
+            self.assertEqual(execution["next_step"], "runner_availability_wait")
+            self.assertEqual(
+                execution["failure_registry_update"],
+                {"status": "skipped", "reason": "runner_availability_unavailable"},
+            )
+            failure_registry_path = project / ".loopplane" / "runtime" / "failure_registry.json"
+            if failure_registry_path.exists():
+                registry = json.loads(failure_registry_path.read_text(encoding="utf-8"))
+                self.assertEqual(registry.get("failures", []), [])
 
     def test_usage_limited_worker_sets_availability_hold_and_next_run_waits_without_retry(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -3539,10 +3818,10 @@ class FailureRegistryRecoveryTest(unittest.TestCase):
             self.assertEqual(action["selected"]["candidate"]["trigger"], "recovery_exhausted")
             self.assertEqual(action["selected"]["candidate"]["target_task_ids"], ["P0.T001"])
 
-    def test_exhausted_failure_does_not_expand_before_its_dependencies(self) -> None:
+    def test_exhausted_failure_expansion_waits_for_failed_task_dependencies(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             project = Path(tmp) / "project"
-            init_project(project, "Complete prerequisites before expanding a dependent failure.")
+            init_project(project, "Exhausted downstream failures must retain the task dependency gate.")
             write_active_plan(project, {"P0.T001": " ", "P1.T001": " "})
             workflow_id = json.loads(
                 (project / ".loopplane" / "config" / "workflow.json").read_text(encoding="utf-8")
@@ -3554,26 +3833,193 @@ class FailureRegistryRecoveryTest(unittest.TestCase):
                     "workflow_id": workflow_id,
                     "failures": [
                         {
-                            "failure_id": "fail_dependent_exhausted",
+                            "failure_id": "fail_exhausted_downstream",
                             "task_id": "P1.T001",
+                            "run_id": "run_failed_downstream",
                             "status": "exhausted",
                             "failure_class": "validation_failed",
-                            "failure_signature": "validation:missing-required-evidence",
+                            "failure_signature": "validation:missing-downstream-evidence",
+                            "first_seen_at": "2026-06-10T00:00:00Z",
                             "recovery_attempts": 1,
                             "max_recovery_attempts": 1,
                             "budget_remaining": False,
+                            "exhausted_reason": "max_recovery_attempts_exhausted",
                         }
                     ],
                 },
             )
 
-            action = select_next_action(load_scheduler_snapshot(project))
+            before_dependency = select_next_action(load_scheduler_snapshot(project))
 
-            self.assertEqual(action["action"], "run_worker")
-            self.assertEqual(action["selected"]["task_id"], "P0.T001")
+            self.assertEqual(before_dependency["action"], "run_worker")
+            self.assertEqual(before_dependency["selected"]["task_id"], "P0.T001")
+
+            write_active_plan(project, {"P0.T001": "x", "P1.T001": " "})
+            after_dependency = select_next_action(load_scheduler_snapshot(project))
+
+            self.assertEqual(after_dependency["action"], "run_expansion_planner")
+            self.assertEqual(after_dependency["selected"]["candidate"]["trigger"], "recovery_exhausted")
+            self.assertEqual(
+                after_dependency["selected"]["candidate"]["target_task_ids"],
+                ["P1.T001"],
+            )
 
 
 class SchedulerMainLoopTest(unittest.TestCase):
+    def test_completed_background_handoff_resumes_authoritative_validation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "Validate a completed background handoff before expansion.")
+            write_active_plan(project, {"P0.T001": " ", "P1.T001": " "})
+            context = load_scheduler_context(project)["context"]
+            paths = context.paths
+            run_id = "run_completed_background"
+            role_output_dir = paths.results_dir / "P0.T001" / "runs" / run_id
+            scheduler_run_dir = paths.runtime_dir / "runs" / run_id
+            role_output_dir.mkdir(parents=True, exist_ok=True)
+            scheduler_run_dir.mkdir(parents=True, exist_ok=True)
+            execution = {
+                "schema_version": "1.5",
+                "ok": True,
+                "status": "running_background",
+                "next_step": "waiting_background",
+                "project_root": project.as_posix(),
+                "workflow_id": context.workflow_id,
+                "run_id": run_id,
+                "task_id": "P0.T001",
+                "role": "worker",
+                "role_output_dir": role_output_dir.relative_to(project).as_posix(),
+                "task_evidence_run_dir": role_output_dir.relative_to(project).as_posix(),
+                "scheduler_run_dir": scheduler_run_dir.relative_to(project).as_posix(),
+            }
+            write_json(role_output_dir / "run_execution.json", execution)
+            write_json(scheduler_run_dir / "run_execution.json", execution)
+            write_json(
+                role_output_dir / "agent_status.json",
+                {
+                    "schema_version": "1.5",
+                    "workflow_id": context.workflow_id,
+                    "run_id": run_id,
+                    "task_id": "P0.T001",
+                    "primary_task_id": "P0.T001",
+                    "status": "completed_with_warnings",
+                    "next_prompt_ready": True,
+                    "ended_at": "2026-07-19T14:44:46Z",
+                },
+            )
+            write_json(
+                paths.runtime_dir / "background_jobs.json",
+                {
+                    "schema_version": "1.5",
+                    "workflow_id": context.workflow_id,
+                    "jobs": [
+                        {
+                            "job_id": "bg_completed_background",
+                            "task_id": "P0.T001",
+                            "run_id": run_id,
+                            "status": "completed",
+                            "next_prompt_ready": True,
+                            "ended_at": "2026-07-19T14:44:46Z",
+                        }
+                    ],
+                },
+            )
+            state_path = paths.runtime_dir / "state.json"
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            state["status"] = "expansion_planner_run_failed"
+            state["requires_attention"] = [{"type": "repeated_action_failure"}]
+            state.setdefault("scheduler", {})["last_run_id"] = "run_later_expansion_planner"
+            state["scheduler"]["active_run_id"] = None
+            write_json(state_path, state)
+            snapshot = load_scheduler_snapshot(project)
+
+            candidate = scheduler_module._completed_background_validation_candidate(snapshot)
+            self.assertIsNotNone(candidate)
+            self.assertEqual(candidate["run_id"], run_id)
+            with patch("runtime.validation.run_validator", return_value={"status": "pass"}) as validator:
+                with patch("runtime.reconciliation.run_reconciler", return_value={"status": "reconciled"}) as reconciler:
+                    result = scheduler_module._resume_completed_background_validation(snapshot)
+
+            self.assertIsNotNone(result)
+            self.assertTrue(result["resumed_after_background_completion"])
+            self.assertEqual(result["next_step"], "reconciled")
+            self.assertEqual(result["background_handoff"]["job_id"], "bg_completed_background")
+            validator.assert_called_once_with(
+                project,
+                task_id="P0.T001",
+                run_dir=role_output_dir.relative_to(project).as_posix(),
+                write=True,
+            )
+            reconciler.assert_called_once_with(
+                project,
+                task_id="P0.T001",
+                run_dir=role_output_dir.relative_to(project).as_posix(),
+                write=True,
+            )
+            persisted = json.loads((scheduler_run_dir / "run_execution.json").read_text(encoding="utf-8"))
+            self.assertEqual(persisted["next_step"], "reconciled")
+            events = read_jsonl(paths.runtime_dir / "events" / "events_000001.jsonl")
+            self.assertIn("completed_background_validation_resumed", [event["event_type"] for event in events])
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            self.assertEqual(state["status"], "background_validation_reconciled")
+            self.assertEqual(state["requires_attention"], [])
+
+    def test_interrupted_validation_resumes_without_rerunning_worker(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "Resume validation after a controller interruption.")
+            write_active_plan(project, {"P0.T001": " ", "P1.T001": " "})
+            context = load_scheduler_context(project)["context"]
+            paths = context.paths
+            run_id = "run_interrupted_validation"
+            role_output_dir = paths.results_dir / "P0.T001" / "runs" / run_id
+            scheduler_run_dir = paths.runtime_dir / "runs" / run_id
+            role_output_dir.mkdir(parents=True, exist_ok=True)
+            scheduler_run_dir.mkdir(parents=True, exist_ok=True)
+            execution = {
+                "schema_version": "1.5",
+                "ok": True,
+                "status": "completed",
+                "next_step": "validation_pending",
+                "project_root": project.as_posix(),
+                "workflow_id": context.workflow_id,
+                "run_id": run_id,
+                "task_id": "P0.T001",
+                "role": "worker",
+                "role_output_dir": role_output_dir.relative_to(project).as_posix(),
+                "scheduler_run_dir": scheduler_run_dir.relative_to(project).as_posix(),
+            }
+            write_json(role_output_dir / "run_execution.json", execution)
+            write_json(scheduler_run_dir / "run_execution.json", execution)
+            state_path = paths.runtime_dir / "state.json"
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            state.setdefault("scheduler", {})["last_run_id"] = run_id
+            state["scheduler"]["active_run_id"] = None
+            write_json(state_path, state)
+            snapshot = load_scheduler_snapshot(project)
+
+            with patch("runtime.validation.run_validator", return_value={"status": "pass"}) as validator:
+                with patch("runtime.reconciliation.run_reconciler", return_value={"status": "reconciled"}) as reconciler:
+                    result = scheduler_module._resume_interrupted_worker_validation(snapshot)
+
+            self.assertIsNotNone(result)
+            self.assertEqual(result["next_step"], "reconciled")
+            self.assertTrue(result["resumed_after_controller_interruption"])
+            validator.assert_called_once_with(
+                project,
+                task_id="P0.T001",
+                run_dir=role_output_dir.relative_to(project).as_posix(),
+                write=True,
+            )
+            reconciler.assert_called_once_with(
+                project,
+                task_id="P0.T001",
+                run_dir=role_output_dir.relative_to(project).as_posix(),
+                write=True,
+            )
+            persisted = json.loads((scheduler_run_dir / "run_execution.json").read_text(encoding="utf-8"))
+            self.assertEqual(persisted["next_step"], "reconciled")
+
     def test_event_append_writes_monotonic_hash_chain(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             project = Path(tmp) / "project"
@@ -3978,12 +4424,12 @@ class SchedulerMainLoopTest(unittest.TestCase):
                 ttl_seconds=2,
             )
             with lock.acquire() as held:
-                before_mtime = lock.owner_path.stat().st_mtime_ns
+                before = json.loads(lock.owner_path.read_text(encoding="utf-8"))
                 with held.keepalive(interval_seconds=0.05):
                     time.sleep(0.12)
-                after_mtime = lock.owner_path.stat().st_mtime_ns
+                after = json.loads(lock.owner_path.read_text(encoding="utf-8"))
 
-            self.assertGreater(after_mtime, before_mtime)
+            self.assertGreater(after["heartbeat_count"], before["heartbeat_count"])
 
     def test_replaced_lock_owner_cannot_be_overwritten_or_unlinked_by_old_holder(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

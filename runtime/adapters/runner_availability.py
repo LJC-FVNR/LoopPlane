@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from runtime.adapters.base import AdapterInput
+from runtime.exit_codes import ADAPTER_COMMAND_UNAVAILABLE_EXIT_CODE
 
 
 DEFAULT_COOLDOWNS = {
@@ -87,8 +88,19 @@ def classify_runner_availability(
         "stderr": _read_text(stderr_path),
         "final_output": _read_text(final_output_path),
     }
-    custom = _match_custom_classifier(policy, sources)
-    match = custom
+    custom = None
+    if exit_code == ADAPTER_COMMAND_UNAVAILABLE_EXIT_CODE:
+        message = sources["stderr"] or sources["final_output"] or "Configured runner command is unavailable."
+        match = {
+            "reason_class": "runner_configuration_error",
+            "source": "process_launch",
+            "message": message,
+            "requires_attention": True,
+            "confidence": "high",
+        }
+    else:
+        custom = _match_custom_classifier(policy, sources)
+        match = custom
     if match is None and _builtin_classifiers_enabled(adapter_input, policy):
         match = _match_builtin_classifier(sources)
     if match is None:

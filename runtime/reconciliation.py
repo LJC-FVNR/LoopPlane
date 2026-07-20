@@ -27,18 +27,25 @@ NODE_SUMMARY_FILENAME = "node_summary.json"
 RECONCILER_NAME = "reconciler"
 VALIDATION_STATUSES = frozenset({"pass", "pass_with_warnings", "fail", "blocked", "needs_human"})
 TERMINAL_FAILURE_STATUSES = frozenset({"recovered", "waived", "exhausted", "needs_human"})
+ACCEPTED_VALIDATION_RECOVERABLE_FAILURE_CLASSES = frozenset(
+    {"background_job_failed", "validation_failed", "worker_failed"}
+)
 TASK_LINE_RE = re.compile(r"^- \[(?P<status>[ x~!\-])\]\s+(?P<task_id>[A-Za-z0-9_.-]+):\s+(?P<title>.+?)\s*$")
 FIELD_LINE_RE = re.compile(r"^  - (?P<field>[A-Za-z0-9_ -]+):(?P<value>.*)$")
 PLAN_PATCH_APPEND_BEGIN = "LOOPPLANE_PLAN_APPEND_BEGIN"
 PLAN_PATCH_APPEND_END = "LOOPPLANE_PLAN_APPEND_END"
+PLAN_PATCH_REPLACE_BEGIN = "LOOPPLANE_PLAN_REPLACE_BEGIN"
+PLAN_PATCH_REPLACE_END = "LOOPPLANE_PLAN_REPLACE_END"
 PLAN_PATCH_OPERATION_APPEND = "append_to_end"
 PLAN_PATCH_OPERATION_INSERT_TASK_INTO_PHASE = "insert_task_into_phase"
 PLAN_PATCH_OPERATION_INSERT_PHASE_BEFORE_FINAL_OBJECTIVES = "insert_phase_before_final_objectives"
+PLAN_PATCH_OPERATION_REPLACE_TASKS = "replace_tasks"
 PLAN_PATCH_OPERATIONS = frozenset(
     {
         PLAN_PATCH_OPERATION_APPEND,
         PLAN_PATCH_OPERATION_INSERT_TASK_INTO_PHASE,
         PLAN_PATCH_OPERATION_INSERT_PHASE_BEFORE_FINAL_OBJECTIVES,
+        PLAN_PATCH_OPERATION_REPLACE_TASKS,
     }
 )
 FINAL_OBJECTIVE_HEADING_RE = re.compile(r"^##\s+Final Objective Checklist\s*$", re.IGNORECASE)
@@ -295,6 +302,7 @@ def apply_approved_plan_patch(
     before_checkpoint_id: str | None = None,
     plan_patch_operation: str = PLAN_PATCH_OPERATION_APPEND,
     target_phase_id: str | None = None,
+    expected_plan_patch_sha256: str | None = None,
     write: bool = True,
 ) -> dict[str, Any]:
     project = Path(project_root).expanduser().resolve()
@@ -324,6 +332,7 @@ def apply_approved_plan_patch(
             "started_at": started_at,
             "ended_at": utc_timestamp(),
             "added_tasks": [],
+            "modified_tasks": [],
             "added_phase_ids": [],
             "plan_patch_operation": str(plan_patch_operation or PLAN_PATCH_OPERATION_APPEND).strip(),
             "event_id": None,
@@ -331,18 +340,23 @@ def apply_approved_plan_patch(
             "warnings": [],
         }
 
-    append_block, block_error = _extract_plan_patch_append_block(patch_text)
-    if block_error:
+    expected_patch_sha256 = str(expected_plan_patch_sha256 or "").strip()
+    actual_patch_sha256 = "sha256:" + sha256(patch_text.encode("utf-8")).hexdigest()
+    if expected_patch_sha256 and actual_patch_sha256 != expected_patch_sha256:
         return _plan_patch_failure(
             project=project,
             workflow_id=workflow_id,
             change_request_id=change_request_id,
             patch_path=patch_path,
             started_at=started_at,
-            status="invalid_plan_patch",
-            errors=[block_error],
+            status="plan_patch_content_changed",
+            errors=[
+                "PLAN_PATCH.md content changed after validation or approval; "
+                f"expected {expected_patch_sha256}, observed {actual_patch_sha256}."
+            ],
+            plan_patch_operation=str(plan_patch_operation or PLAN_PATCH_OPERATION_APPEND).strip(),
         )
-    assert append_block is not None
+
     operation = str(plan_patch_operation or PLAN_PATCH_OPERATION_APPEND).strip()
     if operation not in PLAN_PATCH_OPERATIONS:
         return _plan_patch_failure(
@@ -355,7 +369,17 @@ def apply_approved_plan_patch(
             errors=[f"PLAN_PATCH.md operation must be one of: {', '.join(sorted(PLAN_PATCH_OPERATIONS))}."],
             plan_patch_operation=operation,
         )
-    if "## Phase " not in append_block:
+
+    existing_tasks = parse_plan_tasks(plan_text)
+    block: str | None
+    block_error: str | None
+    if operation == PLAN_PATCH_OPERATION_REPLACE_TASKS:
+        block, block_error = _extract_plan_patch_replace_block(patch_text)
+        if block_error and PLAN_PATCH_REPLACE_BEGIN not in patch_text and PLAN_PATCH_REPLACE_END not in patch_text:
+            block, block_error = _extract_legacy_plan_patch_replace_block(patch_text)
+    else:
+        block, block_error = _extract_plan_patch_append_block(patch_text)
+    if block_error:
         return _plan_patch_failure(
             project=project,
             workflow_id=workflow_id,
@@ -363,10 +387,26 @@ def apply_approved_plan_patch(
             patch_path=patch_path,
             started_at=started_at,
             status="invalid_plan_patch",
-            errors=["PLAN_PATCH.md append block must include a phase heading."],
+            errors=[block_error],
             plan_patch_operation=operation,
         )
-    patch_tasks = parse_plan_tasks(append_block)
+    assert block is not None
+
+    patch_task_blocks = _task_block_texts(block)
+    patch_task_ids = [task_id for task_id, _task_block in patch_task_blocks]
+    duplicate_patch_ids = sorted({task_id for task_id in patch_task_ids if patch_task_ids.count(task_id) > 1})
+    if duplicate_patch_ids:
+        return _plan_patch_failure(
+            project=project,
+            workflow_id=workflow_id,
+            change_request_id=change_request_id,
+            patch_path=patch_path,
+            started_at=started_at,
+            status="invalid_plan_patch",
+            errors=[f"PLAN_PATCH.md contains duplicate task IDs: {', '.join(duplicate_patch_ids)}"],
+            plan_patch_operation=operation,
+        )
+    patch_tasks = parse_plan_tasks(block)
     if not patch_tasks:
         return _plan_patch_failure(
             project=project,
@@ -375,28 +415,66 @@ def apply_approved_plan_patch(
             patch_path=patch_path,
             started_at=started_at,
             status="invalid_plan_patch",
-            errors=["PLAN_PATCH.md append block does not contain any task blocks."],
-            plan_patch_operation=operation,
-        )
-    existing_tasks = parse_plan_tasks(plan_text)
-    duplicate_ids = sorted(set(existing_tasks).intersection(patch_tasks))
-    if duplicate_ids:
-        return _plan_patch_failure(
-            project=project,
-            workflow_id=workflow_id,
-            change_request_id=change_request_id,
-            patch_path=patch_path,
-            started_at=started_at,
-            status="duplicate_task_ids",
-            errors=[f"PLAN_PATCH.md would duplicate existing task IDs: {', '.join(duplicate_ids)}"],
+            errors=["PLAN_PATCH.md task block does not contain any tasks."],
             plan_patch_operation=operation,
         )
 
     structural_errors: list[str] = []
     added_phase_ids: list[str] = []
+    added_tasks: list[str] = []
+    modified_tasks: list[str] = []
     normalized_target_phase_id = str(target_phase_id or "").strip()
-    patch_phase_headings = _phase_headings(append_block)
+    patch_phase_headings = _phase_headings(block)
     existing_phase_ids = {phase_id for _line_index, phase_id, _phase_title in _phase_headings(plan_text) if phase_id}
+    if operation == PLAN_PATCH_OPERATION_REPLACE_TASKS:
+        missing_task_ids = sorted(set(patch_tasks).difference(existing_tasks))
+        if missing_task_ids:
+            structural_errors.append(
+                "replace_tasks PLAN_PATCH.md may only target existing task IDs; missing: " + ", ".join(missing_task_ids)
+            )
+        existing_task_ids = [task_id for task_id, _task_block in _task_block_texts(plan_text)]
+        ambiguous_task_ids = sorted(
+            task_id for task_id in patch_tasks if existing_task_ids.count(task_id) != 1
+        )
+        if ambiguous_task_ids:
+            structural_errors.append(
+                "replace_tasks target IDs must occur exactly once in PLAN.md: " + ", ".join(ambiguous_task_ids)
+            )
+        if patch_phase_headings:
+            structural_errors.append("replace_tasks PLAN_PATCH.md replacement block must not contain phase headings.")
+        declared_plan_sha = _declared_target_plan_sha256(patch_text)
+        current_plan_sha = "sha256:" + sha256(plan_text.encode("utf-8")).hexdigest()
+        if declared_plan_sha and declared_plan_sha != current_plan_sha:
+            return _plan_patch_failure(
+                project=project,
+                workflow_id=workflow_id,
+                change_request_id=change_request_id,
+                patch_path=patch_path,
+                started_at=started_at,
+                status="stale_plan_patch",
+                errors=[
+                    f"PLAN_PATCH.md targets PLAN hash {declared_plan_sha}, but the active PLAN hash is {current_plan_sha}."
+                ],
+                plan_patch_operation=operation,
+            )
+        modified_tasks = list(patch_tasks)
+    else:
+        duplicate_ids = sorted(set(existing_tasks).intersection(patch_tasks))
+        if duplicate_ids:
+            return _plan_patch_failure(
+                project=project,
+                workflow_id=workflow_id,
+                change_request_id=change_request_id,
+                patch_path=patch_path,
+                started_at=started_at,
+                status="duplicate_task_ids",
+                errors=[f"PLAN_PATCH.md would duplicate existing task IDs: {', '.join(duplicate_ids)}"],
+                plan_patch_operation=operation,
+            )
+        if "## Phase " not in block:
+            structural_errors.append("PLAN_PATCH.md append block must include a phase heading.")
+        added_tasks = list(patch_tasks)
+
     if operation == PLAN_PATCH_OPERATION_INSERT_TASK_INTO_PHASE:
         if not normalized_target_phase_id:
             structural_errors.append("insert_task_into_phase requires target_phase_id.")
@@ -410,7 +488,7 @@ def apply_approved_plan_patch(
             )
         if normalized_target_phase_id and normalized_target_phase_id not in existing_phase_ids:
             structural_errors.append(f"insert_task_into_phase target phase {normalized_target_phase_id} was not found in PLAN.md.")
-        task_blocks = _task_blocks_for_phase(append_block, phase_id=normalized_target_phase_id)
+        task_blocks = _task_blocks_for_phase(block, phase_id=normalized_target_phase_id)
         if not task_blocks:
             structural_errors.append(f"insert_task_into_phase found no task blocks for target phase {normalized_target_phase_id}.")
     elif operation == PLAN_PATCH_OPERATION_INSERT_PHASE_BEFORE_FINAL_OBJECTIVES:
@@ -425,7 +503,7 @@ def apply_approved_plan_patch(
                 "insert_phase_before_final_objectives must create a new phase; duplicate phase id(s): "
                 + ", ".join(duplicate_phase_ids)
             )
-        if any(FINAL_OBJECTIVE_HEADING_RE.match(line) for line in append_block.splitlines()):
+        if any(FINAL_OBJECTIVE_HEADING_RE.match(line) for line in block.splitlines()):
             structural_errors.append("insert_phase_before_final_objectives PLAN_PATCH.md must not include the Final Objective Checklist.")
         if _final_objective_heading_index(plan_text.splitlines()) is None:
             structural_errors.append("insert_phase_before_final_objectives requires PLAN.md to contain a Final Objective Checklist.")
@@ -442,15 +520,16 @@ def apply_approved_plan_patch(
             plan_patch_operation=operation,
         )
 
-    added_tasks = list(patch_tasks)
     event: dict[str, Any] | None = None
     if write:
-        if operation == PLAN_PATCH_OPERATION_INSERT_TASK_INTO_PHASE:
-            updated_plan = _insert_plan_patch_tasks_into_phase(plan_text, append_block, phase_id=normalized_target_phase_id)
+        if operation == PLAN_PATCH_OPERATION_REPLACE_TASKS:
+            updated_plan = _replace_plan_task_blocks(plan_text, block)
+        elif operation == PLAN_PATCH_OPERATION_INSERT_TASK_INTO_PHASE:
+            updated_plan = _insert_plan_patch_tasks_into_phase(plan_text, block, phase_id=normalized_target_phase_id)
         elif operation == PLAN_PATCH_OPERATION_INSERT_PHASE_BEFORE_FINAL_OBJECTIVES:
-            updated_plan = _insert_plan_patch_phase_before_final_objectives(plan_text, append_block)
+            updated_plan = _insert_plan_patch_phase_before_final_objectives(plan_text, block)
         else:
-            updated_plan = _append_plan_patch_block(plan_text, append_block)
+            updated_plan = _append_plan_patch_block(plan_text, block)
         _atomic_write_text(paths.plan_file, updated_plan)
         event = append_event(
             paths,
@@ -465,6 +544,7 @@ def apply_approved_plan_patch(
                 "before_checkpoint_id": before_checkpoint_id,
                 "plan_patch_file": _path_for_record(project, patch_path),
                 "added_tasks": added_tasks,
+                "modified_tasks": modified_tasks,
                 "added_phase_ids": added_phase_ids,
                 "plan_patch_operation": operation,
                 "target_phase_id": normalized_target_phase_id or None,
@@ -480,6 +560,7 @@ def apply_approved_plan_patch(
                 "last_change_request_id": change_request_id,
                 "last_plan_patch_path": _path_for_record(project, patch_path),
                 "last_added_task_ids": added_tasks,
+                "last_modified_task_ids": modified_tasks,
                 "last_added_phase_ids": added_phase_ids,
                 "last_plan_patch_operation": operation,
                 "last_plan_update_event_id": event.get("event_id"),
@@ -504,6 +585,7 @@ def apply_approved_plan_patch(
         "started_at": started_at,
         "ended_at": utc_timestamp(),
         "added_tasks": added_tasks,
+        "modified_tasks": modified_tasks,
         "added_phase_ids": added_phase_ids,
         "plan_patch_operation": operation,
         "target_phase_id": normalized_target_phase_id or None,
@@ -530,7 +612,11 @@ def parse_plan_tasks(plan_text: str) -> dict[str, PlanTask]:
         start = index
         index += 1
         while index < len(lines):
-            if TASK_LINE_RE.match(lines[index]) or lines[index].startswith("## Phase ") or is_task_block_terminator(lines[index]):
+            if (
+                TASK_LINE_RE.match(lines[index])
+                or re.match(r"^#{1,6}\s", lines[index])
+                or is_task_block_terminator(lines[index])
+            ):
                 break
             index += 1
         fields = _task_fields(lines[start:index])
@@ -918,9 +1004,109 @@ def _extract_plan_patch_append_block(patch_text: str) -> tuple[str | None, str |
     return block + "\n", None
 
 
+def _extract_plan_patch_replace_block(patch_text: str) -> tuple[str | None, str | None]:
+    start = patch_text.find(PLAN_PATCH_REPLACE_BEGIN)
+    end = patch_text.find(PLAN_PATCH_REPLACE_END)
+    if start < 0 or end < 0 or end <= start:
+        return None, f"PLAN_PATCH.md must contain {PLAN_PATCH_REPLACE_BEGIN} and {PLAN_PATCH_REPLACE_END} markers."
+    block = patch_text[start + len(PLAN_PATCH_REPLACE_BEGIN) : end].strip()
+    if not block:
+        return None, "PLAN_PATCH.md replacement block is empty."
+    return block + "\n", None
+
+
+def _extract_legacy_plan_patch_replace_block(patch_text: str) -> tuple[str | None, str | None]:
+    declared_modify = re.search(
+        r"(?im)^(?:\s*-\s*)?operation:\s*.*\b(?:modify|replace)\b|^##\s+(?:modify|replace)\b",
+        patch_text,
+    )
+    if declared_modify is None or PLAN_PATCH_APPEND_BEGIN in patch_text or PLAN_PATCH_APPEND_END in patch_text:
+        return None, (
+            f"PLAN_PATCH.md must contain {PLAN_PATCH_REPLACE_BEGIN} and {PLAN_PATCH_REPLACE_END} markers; "
+            "legacy replacement extraction requires an explicit MODIFY or REPLACE declaration and no append markers."
+        )
+    task_blocks = _task_block_texts(patch_text)
+    if not task_blocks:
+        return None, "Legacy replacement PLAN_PATCH.md does not contain a complete task block."
+    return "\n\n".join(block for _task_id, block in task_blocks).rstrip() + "\n", None
+
+
+def _declared_target_plan_sha256(patch_text: str) -> str | None:
+    match = re.search(
+        r"(?im)^\s*-\s*target_plan_sha256:\s*(?:sha256:)?(?P<digest>[0-9a-f]{64})\s*$",
+        patch_text,
+    )
+    if match is None:
+        return None
+    return "sha256:" + match.group("digest").lower()
+
+
+def _task_block_texts(plan_text: str) -> list[tuple[str, str]]:
+    lines = plan_text.splitlines()
+    blocks: list[tuple[str, str]] = []
+    index = 0
+    while index < len(lines):
+        match = TASK_LINE_RE.match(lines[index])
+        if match is None:
+            index += 1
+            continue
+        start = index
+        index += 1
+        while index < len(lines):
+            if (
+                TASK_LINE_RE.match(lines[index])
+                or re.match(r"^#{1,6}\s", lines[index])
+                or is_task_block_terminator(lines[index])
+            ):
+                break
+            index += 1
+        content_end = index
+        while content_end > start and not lines[content_end - 1].strip():
+            content_end -= 1
+        blocks.append((match.group("task_id"), "\n".join(lines[start:content_end]).rstrip()))
+    return blocks
+
+
 def _append_plan_patch_block(plan_text: str, append_block: str) -> str:
     base = plan_text.rstrip()
     return f"{base}\n\n{append_block.rstrip()}\n"
+
+
+def _replace_plan_task_blocks(plan_text: str, replacement_block: str) -> str:
+    replacements = {task_id: block for task_id, block in _task_block_texts(replacement_block)}
+    lines = plan_text.splitlines()
+    ranges: list[tuple[int, int, str]] = []
+    seen: dict[str, int] = {}
+    index = 0
+    while index < len(lines):
+        match = TASK_LINE_RE.match(lines[index])
+        if match is None:
+            index += 1
+            continue
+        task_id = match.group("task_id")
+        start = index
+        index += 1
+        while index < len(lines):
+            if (
+                TASK_LINE_RE.match(lines[index])
+                or re.match(r"^#{1,6}\s", lines[index])
+                or is_task_block_terminator(lines[index])
+            ):
+                break
+            index += 1
+        content_end = index
+        while content_end > start and not lines[content_end - 1].strip():
+            content_end -= 1
+        if task_id in replacements:
+            seen[task_id] = seen.get(task_id, 0) + 1
+            ranges.append((start, content_end, task_id))
+    invalid = sorted(task_id for task_id in replacements if seen.get(task_id, 0) != 1)
+    if invalid:
+        raise ReconciliationError("Replacement task IDs must occur exactly once in PLAN.md: " + ", ".join(invalid))
+    for start, end, task_id in sorted(ranges, reverse=True):
+        lines[start:end] = replacements[task_id].splitlines()
+    trailing_newline = "\n" if plan_text.endswith("\n") else ""
+    return "\n".join(lines) + trailing_newline
 
 
 def _insert_plan_patch_tasks_into_phase(plan_text: str, append_block: str, *, phase_id: str) -> str:
@@ -1051,6 +1237,7 @@ def _plan_patch_failure(
         "started_at": started_at,
         "ended_at": utc_timestamp(),
         "added_tasks": [],
+        "modified_tasks": [],
         "added_phase_ids": [],
         "plan_patch_operation": plan_patch_operation,
         "event_id": None,
@@ -1173,11 +1360,7 @@ def _mark_accepted_validation_failures_recovered(
                 continue
             if str(failure.get("task_id") or "") not in accepted:
                 continue
-            if str(failure.get("failure_class") or "") not in {
-                "background_job_failed",
-                "validation_failed",
-                "worker_failed",
-            }:
+            if str(failure.get("failure_class") or "") not in ACCEPTED_VALIDATION_RECOVERABLE_FAILURE_CLASSES:
                 continue
             if str(failure.get("status") or "unrecovered") in {"recovered", "waived"}:
                 continue
@@ -1299,7 +1482,7 @@ def _auto_human_summaries_after_reconcile_enabled(workflow_config: Mapping[str, 
                     return config.get(option) is not False
     if "auto_human_summaries_after_reconcile" in workflow_config:
         return workflow_config.get("auto_human_summaries_after_reconcile") is not False
-    return True
+    return False
 
 
 def _request_read_model_rebuild(

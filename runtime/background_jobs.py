@@ -38,7 +38,8 @@ BACKGROUND_JOB_TTL_SECONDS = 600
 BACKGROUND_JOB_PID_STARTUP_GRACE_SECONDS = 15
 RECORDED_PROCESS_TERMINATE_TIMEOUT_SECONDS = 1.0
 RECORDED_PROCESS_KILL_TIMEOUT_SECONDS = 1.0
-DEFAULT_HEARTBEAT_SECONDS = 5.0
+DEFAULT_HEARTBEAT_SECONDS = 15.0
+DEFAULT_WATCHDOG_AGENT_INTERVAL_SECONDS = 7200
 DEFAULT_WATCHDOG_RECENT_CHECK_LIMIT = 5
 SUPERVISOR_SCHEMA_VERSION = "1.0"
 BACKGROUND_REGISTRY_LOCK_TTL_SECONDS = 30
@@ -60,6 +61,7 @@ def start_background_job(
     timeout_seconds: int | None = None,
     wake_next_agent_when: str | None = None,
     watchdog_interval_seconds: int | None = None,
+    watchdog_agent_interval_seconds: int | None = None,
     watchdog_runner: str | None = None,
     watchdog_question: str | None = None,
 ) -> dict[str, Any]:
@@ -99,6 +101,14 @@ def start_background_job(
     watchdog_interval = _positive_int(watchdog_interval_seconds) or _positive_int(
         os.environ.get("LOOPPLANE_BACKGROUND_WATCHDOG_INTERVAL_SECONDS")
     )
+    watchdog_agent_interval = _positive_int(watchdog_agent_interval_seconds) or _positive_int(
+        os.environ.get("LOOPPLANE_BACKGROUND_WATCHDOG_AGENT_INTERVAL_SECONDS")
+    )
+    if watchdog_interval is not None:
+        watchdog_agent_interval = max(
+            watchdog_interval,
+            watchdog_agent_interval or DEFAULT_WATCHDOG_AGENT_INTERVAL_SECONDS,
+        )
     watchdog_runner = _non_empty_text(watchdog_runner) or _non_empty_text(os.environ.get("LOOPPLANE_BACKGROUND_WATCHDOG_RUNNER"))
     watchdog_question = _non_empty_text(watchdog_question)
     cwd_path = Path(cwd).expanduser() if cwd else project
@@ -135,6 +145,7 @@ def start_background_job(
         launch.update(
             {
                 "watchdog_interval_seconds": watchdog_interval,
+                "watchdog_agent_interval_seconds": watchdog_agent_interval,
                 "watchdog_runner": watchdog_runner,
                 "watchdog_question": watchdog_question,
             }
@@ -170,12 +181,16 @@ def start_background_job(
     if watchdog_interval is not None:
         watchdog_record = {
             "enabled": True,
-            "interval_seconds": watchdog_interval,
+            "interval_seconds": watchdog_agent_interval,
+            "probe_interval_seconds": watchdog_interval,
+            "agent_interval_seconds": watchdog_agent_interval,
             "runner_id": watchdog_runner or "inspector",
             "status": "pending",
+            "probe_count": 0,
             "check_count": 0,
             "recent_checks": [],
-            "next_check_after": _timestamp_after(started_at, watchdog_interval),
+            "next_probe_after": _timestamp_after(started_at, watchdog_interval),
+            "next_check_after": _timestamp_after(started_at, watchdog_agent_interval),
         }
         if watchdog_question:
             watchdog_record["question"] = watchdog_question
@@ -616,8 +631,19 @@ def _run_supervisor(project: Path, *, workflow_id: str, job_id: str, launch_path
     heartbeat_seconds = max(0.5, _float_value(launch.get("heartbeat_seconds"), DEFAULT_HEARTBEAT_SECONDS))
     timeout_seconds = _positive_int(launch.get("timeout_seconds"))
     timeout_at = time.monotonic() + timeout_seconds if timeout_seconds else None
-    watchdog_interval = _positive_int(launch.get("watchdog_interval_seconds"))
-    next_watchdog_at = time.monotonic() + watchdog_interval if watchdog_interval is not None else None
+    watchdog_probe_interval = _positive_int(launch.get("watchdog_interval_seconds"))
+    watchdog_agent_interval = _positive_int(launch.get("watchdog_agent_interval_seconds"))
+    if watchdog_probe_interval is not None:
+        watchdog_agent_interval = max(
+            watchdog_probe_interval,
+            watchdog_agent_interval or DEFAULT_WATCHDOG_AGENT_INTERVAL_SECONDS,
+        )
+    next_watchdog_probe_at = (
+        time.monotonic() + watchdog_probe_interval if watchdog_probe_interval is not None else None
+    )
+    next_watchdog_agent_at = (
+        time.monotonic() + watchdog_agent_interval if watchdog_agent_interval is not None else None
+    )
     env = os.environ.copy()
     launch_env = launch.get("env")
     if isinstance(launch_env, Mapping):
@@ -740,7 +766,17 @@ def _run_supervisor(project: Path, *, workflow_id: str, job_id: str, launch_path
                     _append_log(supervisor_log, "timeout_reached")
                     exit_code = _terminate_popen_process(process)
                     break
-                if next_watchdog_at is not None and time.monotonic() >= next_watchdog_at:
+                if next_watchdog_probe_at is not None and time.monotonic() >= next_watchdog_probe_at:
+                    _record_watchdog_probe(
+                        paths,
+                        workflow_id=workflow_id,
+                        job_id=job_id,
+                        launch=launch,
+                        supervisor_log=supervisor_log,
+                        process=process,
+                    )
+                    next_watchdog_probe_at = time.monotonic() + watchdog_probe_interval
+                if next_watchdog_agent_at is not None and time.monotonic() >= next_watchdog_agent_at:
                     watchdog_result = _run_watchdog_check(
                         project,
                         paths,
@@ -784,7 +820,7 @@ def _run_supervisor(project: Path, *, workflow_id: str, job_id: str, launch_path
                         if preserved_status is not None and preserved_status != final_status:
                             _append_log(supervisor_log, f"watchdog_terminal_update_preserved status={preserved_status}")
                         return 0
-                    next_watchdog_at = time.monotonic() + watchdog_interval
+                    next_watchdog_agent_at = time.monotonic() + watchdog_agent_interval
                 heartbeat_job = _supervisor_update_job(
                     paths,
                     workflow_id=workflow_id,
@@ -810,8 +846,10 @@ def _run_supervisor(project: Path, *, workflow_id: str, job_id: str, launch_path
                     _terminate_popen_process(process)
                     return 0
                 wait_seconds = heartbeat_seconds
-                if next_watchdog_at is not None:
-                    wait_seconds = max(0.1, min(wait_seconds, next_watchdog_at - time.monotonic()))
+                if next_watchdog_probe_at is not None:
+                    wait_seconds = max(0.1, min(wait_seconds, next_watchdog_probe_at - time.monotonic()))
+                if next_watchdog_agent_at is not None:
+                    wait_seconds = max(0.1, min(wait_seconds, next_watchdog_agent_at - time.monotonic()))
                 if timeout_at is not None:
                     wait_seconds = max(0.1, min(wait_seconds, timeout_at - time.monotonic()))
                 try:
@@ -981,7 +1019,12 @@ def _run_watchdog_check(
                     process=process,
                 ),
                 runner_id=runner_id,
-                allowed_paths=_watchdog_allowed_paths(project, paths, job_id=job_id),
+                allowed_paths=_watchdog_allowed_paths(
+                    project,
+                    paths,
+                    workflow_id=workflow_id,
+                    job_id=job_id,
+                ),
                 source="background_watchdog",
             )
     except BaseException as error:
@@ -1104,6 +1147,68 @@ def _watchdog_heartbeat_keepalive(
         thread.join(timeout=max(1.0, interval_seconds + 0.5))
 
 
+def _record_watchdog_probe(
+    paths: Any,
+    *,
+    workflow_id: str,
+    job_id: str,
+    launch: Mapping[str, Any],
+    supervisor_log: Path,
+    process: subprocess.Popen[bytes],
+) -> None:
+    """Record cheap process/log progress without launching an inspector agent."""
+    observed_at = utc_timestamp()
+    observation: dict[str, Any] = {
+        "observed_at": observed_at,
+        "process_alive": process.poll() is None,
+        "pid": process.pid,
+    }
+    for key in ("stdout_path", "stderr_path"):
+        raw_path = _non_empty_text(launch.get(key))
+        if raw_path is None:
+            continue
+        try:
+            stat = Path(raw_path).stat()
+        except OSError:
+            continue
+        observation[key.removesuffix("_path")] = {
+            "size_bytes": stat.st_size,
+            "mtime_ns": stat.st_mtime_ns,
+        }
+
+    current = _registry_job(paths, workflow_id=workflow_id, job_id=job_id) or {}
+    watchdog = current.get("watchdog") if isinstance(current.get("watchdog"), Mapping) else {}
+    previous = watchdog.get("last_probe_observation") if isinstance(watchdog, Mapping) else None
+    progress_observed = previous is None or any(
+        observation.get(stream) != previous.get(stream)
+        for stream in ("stdout", "stderr")
+        if isinstance(previous, Mapping)
+    )
+    interval = _positive_int(watchdog.get("probe_interval_seconds")) if isinstance(watchdog, Mapping) else None
+    update = {
+        "status": "probing",
+        "probe_count": int(watchdog.get("probe_count") or 0) + 1 if isinstance(watchdog, Mapping) else 1,
+        "last_probe_at": observed_at,
+        "last_probe_progress_observed": progress_observed,
+        "last_probe_observation": observation,
+    }
+    if interval is not None:
+        update["next_probe_after"] = _timestamp_after(observed_at, interval)
+    _supervisor_update_job(
+        paths,
+        workflow_id=workflow_id,
+        job_id=job_id,
+        supervisor_log=supervisor_log,
+        operation="watchdog_probe",
+        durable=False,
+        update=lambda job: _job_with_watchdog_update(job, update),
+    )
+    _append_log(
+        supervisor_log,
+        f"watchdog_probe process_alive={observation['process_alive']} progress_observed={progress_observed}",
+    )
+
+
 def _watchdog_question(
     project: Path,
     paths: Any,
@@ -1164,15 +1269,21 @@ def _watchdog_question(
     )
 
 
-def _watchdog_allowed_paths(project: Path, paths: Any, *, job_id: str) -> list[str]:
+def _watchdog_allowed_paths(
+    project: Path,
+    paths: Any,
+    *,
+    job_id: str,
+    workflow_id: str | None = None,
+) -> list[str]:
     refs = [
-        paths.value("plan_file"),
-        paths.value("shared_context_file"),
-        paths.value("read_models_dir").rstrip("/") + "/",
-        paths.value("results_dir").rstrip("/") + "/",
         paths.value("runtime_dir").rstrip("/") + "/state.json",
         paths.value("runtime_dir").rstrip("/") + f"/background_jobs/{job_id}/",
     ]
+    job = _registry_job(paths, workflow_id=workflow_id, job_id=job_id) if workflow_id else None
+    task_id = _non_empty_text(job.get("task_id")) if isinstance(job, Mapping) else None
+    if task_id:
+        refs.append(paths.value("results_dir").rstrip("/") + f"/{task_id}/")
     return sorted(dict.fromkeys(ref for ref in refs if ref))
 
 
@@ -1223,7 +1334,9 @@ def _watchdog_inspector_run_id(result: Mapping[str, Any]) -> str | None:
 
 def _watchdog_record_update(job: Mapping[str, Any], record: Mapping[str, Any], status: str) -> dict[str, Any]:
     watchdog = dict(job.get("watchdog") if isinstance(job.get("watchdog"), Mapping) else {})
-    interval = _positive_int(watchdog.get("interval_seconds"))
+    interval = _positive_int(watchdog.get("agent_interval_seconds")) or _positive_int(
+        watchdog.get("interval_seconds")
+    )
     update = {
         "enabled": watchdog.get("enabled") is not False,
         "status": status,
@@ -1476,7 +1589,7 @@ def _refresh_job(project: Path, paths: Any, job: Mapping[str, Any]) -> dict[str,
     if status in {"failed", "timed_out", "stale"}:
         refreshed["next_prompt_ready"] = False
         return refreshed
-    if status in {"pending", "running"}:
+    if status in {"starting", "pending", "running"}:
         heartbeat = _parse_timestamp(refreshed.get("heartbeat_at") or refreshed.get("started_at"))
         age: int | None = None
         if heartbeat is None:

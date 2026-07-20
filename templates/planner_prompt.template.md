@@ -65,6 +65,43 @@ single worker can complete and validate that bundle end to end. Split tasks
 only when dependencies, approvals, risk, ownership, background execution, or
 validation boundaries materially require separation.
 
+## Experiment Workflow Efficiency
+
+When the brief depends on empirical evidence, optimize the plan for
+time-to-first-informative-result without assuming a particular machine,
+scheduler, cloud, or execution backend:
+
+- Treat the shared context and referenced project skills as the authority for
+  environment access, resource selection, launch commands, and storage policy.
+  Encode project-specific requirements in those project artifacts, not in the
+  generic LoopPlane lifecycle.
+- Put one minimal environment-readiness check and one real pilot near the start
+  of the executable plan. Do not place publication contracts, provenance
+  genealogy, venue rubrics, exhaustive documentation, or paper-writing tasks
+  before empirical viability is established.
+- Freeze only the minimum split, metric, comparator, and seed rules needed to
+  interpret the pilot. Add stronger audit machinery after a signal justifies it
+  or at a claim-bearing phase gate.
+- Build or reuse one tested, config-driven experiment harness. Represent the
+  experimental factors as compact configuration; do not ask each worker to
+  copy and rewrite a predecessor's large script.
+- Keep agent-side preparation bounded. If the shared context specifies a launch
+  latency target or resource policy, make it an explicit task constraint and
+  route substantive work through the declared project launcher.
+- Use task-level deterministic validation for routine cells and aggregate
+  semantic review at claim-bearing campaign gates. Reserve `risk: high` for
+  genuinely high-risk or conclusion-bearing tasks.
+- Background supervision should use cheap probes. Expensive semantic watchdog
+  checks should follow project configuration and are unnecessary for ordinary
+  short jobs.
+- Separate substantive scientific computation from agent control work. Use the
+  execution mechanism declared by the project, and do not let an agent spend
+  hours interactively polling, rereading context, rebuilding environments, or
+  generating administrative artifacts.
+- Keep deterministic preprocessing off the repeated critical path. Expensive
+  data builds should produce content-addressed, resumable artifacts for
+  downstream reuse while respecting any protected-split policy.
+
 ## Workflow Title
 
 Choose a concise semantic workflow title from the project brief and write it in

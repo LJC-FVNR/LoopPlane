@@ -66,7 +66,7 @@
       "properties": {
         "validator_agent_mode": {
           "type": "string",
-          "enum": ["disabled", "on_deterministic_failure", "always"]
+          "enum": ["disabled", "high_risk_pass_only", "on_deterministic_failure", "always"]
         },
         "validator_agent_for_high_risk": {"type": "boolean"}
       },

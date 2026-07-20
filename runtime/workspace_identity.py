@@ -53,9 +53,27 @@ def discover_enclosing_git_root(project_root: Path | str) -> Path | None:
     project = Path(project_root).expanduser().resolve()
     for candidate in (project, *project.parents):
         git_marker = candidate / ".git"
-        if git_marker.exists():
+        if _valid_git_marker(git_marker):
             return candidate
     return None
+
+
+def _valid_git_marker(marker: Path) -> bool:
+    if marker.is_dir():
+        return (marker / "HEAD").is_file()
+    if not marker.is_file():
+        return False
+    try:
+        first_line = marker.read_text(encoding="utf-8", errors="replace").splitlines()[0]
+    except (OSError, IndexError):
+        return False
+    prefix = "gitdir:"
+    if not first_line.lower().startswith(prefix):
+        return False
+    git_dir = Path(first_line[len(prefix) :].strip()).expanduser()
+    if not git_dir.is_absolute():
+        git_dir = marker.parent / git_dir
+    return (git_dir.resolve(strict=False) / "HEAD").is_file()
 
 
 def resolve_identity_path(project_root: Path | str, value: object, *, allow_parent: bool = False) -> Path:

@@ -1229,6 +1229,46 @@ draft.write_text(f'''# Project Plan
 
 
 class PlanReadinessInspectionTest(unittest.TestCase):
+    def test_operational_efficiency_lint_flags_broad_reads_artifacts_and_missing_reuse(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            draft = Path(tmp) / "PLAN_DRAFT.md"
+            artifacts = ", ".join(f"artifact_{index}.json" for index in range(13))
+            draft.write_text(
+                f"""# Project Plan
+
+## Metadata
+
+- workflow_id: wf_test
+- plan_version: 1
+- generated_from: PROJECT_BRIEF.md
+- active: false
+
+## Phase P0: Experiment Pilot
+
+- [ ] P0.T001: Run experiment
+  - acceptance: Reread and cite the complete historical source set, tokenize and pack the dataset, then launch the experiment.
+  - evidence: .loopplane/results/P0.T001/
+  - latest: .loopplane/results/P0.T001/latest.json
+  - depends_on: []
+  - risk: medium
+  - validation: file_exists: {artifacts}
+  - max_attempts: 3
+  - approval: not_required
+  - deliverables: Primary metrics and decision record.
+""",
+                encoding="utf-8",
+            )
+
+            report = inspect_plan_draft(draft, workflow_id="wf_test")
+
+            self.assertTrue(report["valid"], report["errors"])
+            warnings = "\n".join(report["warnings"])
+            self.assertIn("blanket rereading of complete historical sources", warnings)
+            self.assertIn("validation requires 13 files", warnings)
+            self.assertIn("data preprocessing has no durable reuse contract", warnings)
+            self.assertEqual(report["tasks"][0]["required_artifact_count"], 13)
+            self.assertTrue(report["tasks"][0]["data_build"])
+
     def test_validation_strategy_lint_reports_command_and_report_marker_risks(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             draft = Path(tmp) / "PLAN_DRAFT.md"

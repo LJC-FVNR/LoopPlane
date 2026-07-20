@@ -22,6 +22,10 @@ LoopPlane = REPO_ROOT / "scripts" / "loopplane"
 
 def configure_fake_summary_agent(project: Path) -> None:
     paths = WorkflowPaths.from_config(project, load_workflow_config(project))
+    workflow_path = paths.workflow_config_file
+    workflow = json.loads(workflow_path.read_text(encoding="utf-8"))
+    workflow.setdefault("human_summaries", {})["auto_after_reconcile"] = True
+    workflow_path.write_text(json.dumps(workflow, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     config_path = paths.config_file("agent_runners.json")
     script = config_path.parent / "fake_summary_agent.py"
     script.write_text(
@@ -153,6 +157,10 @@ print("fake summary agent wrote markdown")
 def disable_summary_agent(project: Path) -> None:
     """Force the deterministic mechanical fallback by disabling the summary runner."""
     paths = WorkflowPaths.from_config(project, load_workflow_config(project))
+    workflow_path = paths.workflow_config_file
+    workflow = json.loads(workflow_path.read_text(encoding="utf-8"))
+    workflow.setdefault("human_summaries", {})["auto_after_reconcile"] = True
+    workflow_path.write_text(json.dumps(workflow, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     config_path = paths.config_file("agent_runners.json")
     config = json.loads(config_path.read_text(encoding="utf-8"))
     config["runners"]["summary"]["enabled"] = False
@@ -161,6 +169,10 @@ def disable_summary_agent(project: Path) -> None:
 
 def configure_slow_summary_agent(project: Path) -> None:
     paths = WorkflowPaths.from_config(project, load_workflow_config(project))
+    workflow_path = paths.workflow_config_file
+    workflow = json.loads(workflow_path.read_text(encoding="utf-8"))
+    workflow.setdefault("human_summaries", {})["auto_after_reconcile"] = True
+    workflow_path.write_text(json.dumps(workflow, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     config_path = paths.config_file("agent_runners.json")
     script = config_path.parent / "slow_summary_agent.py"
     script.write_text(

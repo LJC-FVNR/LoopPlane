@@ -130,6 +130,7 @@ BACKGROUND_REGISTRY_LOCK_TTL_SECONDS = 30
 BACKGROUND_REGISTRY_LOCK_WAIT_SECONDS = 35.0
 ALLOWED_BACKGROUND_JOB_STATUSES = frozenset(
     {
+        "starting",
         "pending",
         "running",
         "completed",
@@ -146,6 +147,9 @@ BACKGROUND_JOB_ATTENTION_STATUSES = frozenset({"failed", "timed_out", "stale", "
 ACTIVE_RUN_LEASE_ACTIVE_STATUSES = frozenset({"starting", "running", "pending", "waiting"})
 ACTIVE_RUN_LEASE_INACTIVE_STATUSES = frozenset({"completed", "succeeded", "failed", "cancelled", "aborted", "released"})
 ACTIVE_RUN_LEASE_FINGERPRINT_FILENAME = "active_run_leases_fingerprint.json"
+ARCHIVED_RUN_LEASES_DIRNAME = "archived_run_leases"
+ARCHIVED_RUN_LEASES_MANIFEST_FILENAME = "manifest.json"
+MAX_HOT_INACTIVE_RUN_LEASES = 128
 
 
 class SchedulerError(RuntimeError):
@@ -282,6 +286,9 @@ class HeldOwnerLock:
             try:
                 self._assert_current_owner()
                 self.metadata["heartbeat_at"] = utc_timestamp()
+                self.metadata["heartbeat_count"] = _int_value(
+                    self.metadata.get("heartbeat_count"), default=0
+                ) + 1
                 encoded = (json.dumps(self.metadata, indent=2, sort_keys=True) + "\n").encode("utf-8")
                 os.lseek(self.fd, 0, os.SEEK_SET)
                 os.ftruncate(self.fd, 0)
@@ -564,6 +571,14 @@ def run_scheduler(
     action_history: list[dict[str, Any]] = []
     with held_lock, held_lock.keepalive():
         completion_snapshot = load_scheduler_snapshot(project)
+        resumed_background_validation = _resume_completed_background_validation(
+            completion_snapshot
+        )
+        if resumed_background_validation is not None:
+            completion_snapshot = load_scheduler_snapshot(project)
+        resumed_validation = _resume_interrupted_worker_validation(completion_snapshot)
+        if resumed_validation is not None:
+            completion_snapshot = load_scheduler_snapshot(project)
         completion_selected = select_next_action(completion_snapshot)
         if completion_selected.get("action") == "complete":
             selected = completion_selected
@@ -1210,6 +1225,7 @@ def _read_active_run_leases(paths: WorkflowPaths, *, now: datetime) -> list[dict
     lease_dir = paths.runtime_dir / "active_run_leases"
     if not lease_dir.exists():
         return []
+    _archive_old_inactive_run_leases(paths, lease_dir=lease_dir)
     leases: list[dict[str, Any]] = []
     for lease_file in sorted(path for path in lease_dir.glob("*.json") if path.is_file()):
         rel = _path_for_record(paths.project_root, lease_file)
@@ -1260,7 +1276,7 @@ def _read_active_run_leases(paths: WorkflowPaths, *, now: datetime) -> list[dict
             normalized_status = "stale"
             status_problem = "stale_heartbeat"
         if reclaimed:
-            _release_stale_dead_run_lease(lease_file, lease)
+            _release_stale_dead_run_lease(paths, lease_file, lease)
             # Released leases are inactive: drop from the active set so the
             # scheduler can proceed with normal work on this same tick.
             continue
@@ -1283,7 +1299,91 @@ def _read_active_run_leases(paths: WorkflowPaths, *, now: datetime) -> list[dict
     return leases
 
 
-def _release_stale_dead_run_lease(lease_file: Path, lease: Mapping[str, Any]) -> None:
+def _archive_old_inactive_run_leases(paths: WorkflowPaths, *, lease_dir: Path) -> None:
+    lease_files = [path for path in lease_dir.glob("*.json") if path.is_file()]
+    if len(lease_files) <= MAX_HOT_INACTIVE_RUN_LEASES:
+        return
+    inactive: list[tuple[int, Path, Mapping[str, Any]]] = []
+    for lease_file in lease_files:
+        lease = _read_json_object(lease_file, default=None)
+        if not isinstance(lease, Mapping):
+            continue
+        status = str(lease.get("status") or "running").strip().lower()
+        if status not in ACTIVE_RUN_LEASE_INACTIVE_STATUSES:
+            continue
+        try:
+            mtime_ns = lease_file.stat().st_mtime_ns
+        except OSError:
+            continue
+        inactive.append((mtime_ns, lease_file, lease))
+    if len(inactive) <= MAX_HOT_INACTIVE_RUN_LEASES:
+        return
+
+    inactive.sort(key=lambda item: item[0], reverse=True)
+    archive_dir = paths.runtime_dir / ARCHIVED_RUN_LEASES_DIRNAME
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    manifest_path = archive_dir / ARCHIVED_RUN_LEASES_MANIFEST_FILENAME
+    manifest = _read_json_object(manifest_path, default={})
+    records = manifest.get("records") if isinstance(manifest, Mapping) else None
+    by_name = {
+        str(record.get("lease_file")): dict(record)
+        for record in records or []
+        if isinstance(record, Mapping) and record.get("lease_file")
+    }
+    archived_at = utc_timestamp()
+    archived_count = 0
+    for _, lease_file, lease in inactive[MAX_HOT_INACTIVE_RUN_LEASES:]:
+        archive_path = archive_dir / lease_file.name
+        if archive_path.exists():
+            continue
+        digest = _sha256_file(lease_file)
+        try:
+            lease_file.replace(archive_path)
+        except OSError:
+            continue
+        by_name[lease_file.name] = {
+            "lease_file": lease_file.name,
+            "run_id": lease.get("run_id"),
+            "role": lease.get("role"),
+            "task_id": lease.get("task_id"),
+            "terminal_status": lease.get("status"),
+            "sha256": digest,
+            "original_path": _path_for_record(paths.project_root, lease_file),
+            "archive_path": _path_for_record(paths.project_root, archive_path),
+            "archived_at": archived_at,
+        }
+        archived_count += 1
+    if not archived_count:
+        return
+    _write_json(
+        manifest_path,
+        {
+            "schema_version": SCHEMA_VERSION,
+            "workflow_id": str(inactive[0][2].get("workflow_id") or "unknown_workflow"),
+            "updated_at": archived_at,
+            "hot_inactive_lease_limit": MAX_HOT_INACTIVE_RUN_LEASES,
+            "archived_count": len(by_name),
+            "records": sorted(by_name.values(), key=lambda record: str(record.get("lease_file") or "")),
+        },
+    )
+    _write_json(
+        paths.runtime_dir / ACTIVE_RUN_LEASE_FINGERPRINT_FILENAME,
+        {
+            "schema_version": SCHEMA_VERSION,
+            "updated_at": archived_at,
+            "update_id": uuid.uuid4().hex,
+            "reason": "inactive_run_lease_compaction",
+            "archived_in_this_pass": archived_count,
+            "archive_manifest": _path_for_record(paths.project_root, manifest_path),
+        },
+    )
+
+
+def _release_stale_dead_run_lease(
+    paths: WorkflowPaths,
+    lease_file: Path,
+    lease: Mapping[str, Any],
+) -> None:
     """Persist a 'released' terminal status onto a stale lease whose runner is
     confirmed dead, so the reclaim survives across ticks and is auditable. Best
     effort: a failed write simply leaves the lease for the next tick to retry."""
@@ -1293,9 +1393,102 @@ def _release_stale_dead_run_lease(lease_file: Path, lease: Mapping[str, Any]) ->
         record["status_problem"] = "stale_heartbeat_process_dead_reclaimed"
         record["released_at"] = utc_timestamp()
         record["released_reason"] = "runner_process_dead_and_heartbeat_stale"
+        recovery_reset = _reset_abandoned_recovery_failure(paths, lease)
+        if recovery_reset is not None:
+            record["failure_recovery_reset"] = recovery_reset
         _write_active_run_lease(lease_file, record)
     except OSError:
         pass
+
+
+def _reset_abandoned_recovery_failure(
+    paths: WorkflowPaths,
+    lease: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    """Return a pre-result recovery attempt to the autonomous retry queue.
+
+    A controller or node can disappear after ``_mark_failure_recovering`` but
+    before the adapter writes any terminal output.  Releasing only the dead
+    lease leaves the failure permanently stuck in ``recovering``.  Reset the
+    matching failure only when the lease is for a recovery worker and no
+    terminal adapter, final-output, or agent-status evidence exists.  The
+    interrupted infrastructure attempt is not charged against the scientific
+    recovery budget.
+    """
+
+    if str(lease.get("role") or "").strip().lower() != "recovery_worker":
+        return None
+    run_id = str(lease.get("run_id") or "").strip()
+    if not run_id:
+        return None
+
+    terminal_paths: list[Path] = []
+    for field in ("adapter_result_path", "final_output_path", "agent_status_path"):
+        path = _project_relative_path(paths.project_root, lease.get(field))
+        if path is not None:
+            terminal_paths.append(path)
+    for field in ("role_output_dir", "task_evidence_run_dir"):
+        output_dir = _project_relative_path(paths.project_root, lease.get(field))
+        if output_dir is not None:
+            terminal_paths.append(output_dir / "agent_status.json")
+    if any(path.exists() for path in terminal_paths):
+        return None
+
+    changed: dict[str, Any] | None = None
+    now = utc_timestamp()
+
+    def update(registry: dict[str, Any]) -> None:
+        nonlocal changed
+        failures = registry.get("failures", [])
+        if not isinstance(failures, list):
+            return
+        for failure in failures:
+            if not isinstance(failure, dict):
+                continue
+            if str(failure.get("status") or "") != "recovering":
+                continue
+            if str(failure.get("active_recovery_run_id") or "") != run_id:
+                continue
+            lease_task_id = str(lease.get("task_id") or "").strip()
+            failure_task_id = str(failure.get("task_id") or "").strip()
+            if lease_task_id and failure_task_id != lease_task_id:
+                continue
+            attempts_before = _int_value(failure.get("recovery_attempts"), default=0)
+            attempts_after = max(0, attempts_before - 1)
+            failure["recovery_attempts"] = attempts_after
+            failure["status"] = "unrecovered"
+            failure["last_seen_at"] = now
+            failure["last_recovery_ended_at"] = now
+            failure["last_recovery_status"] = "interrupted_system"
+            failure["last_recovery_classification"] = "stale_dead_run_lease_reclaimed"
+            failure["last_recovery_message"] = (
+                "Recovery controller ended before terminal adapter or agent-status evidence was written; "
+                "the infrastructure-only attempt was returned to the retry queue."
+            )
+            failure["interrupted_recovery_run_ids"] = _append_unique_string(
+                failure.get("interrupted_recovery_run_ids"),
+                run_id,
+            )
+            failure.pop("active_recovery_run_id", None)
+            _refresh_failure_budget(failure)
+            changed = {
+                "failure_id": str(failure.get("failure_id") or ""),
+                "run_id": run_id,
+                "task_id": failure_task_id,
+                "status": str(failure.get("status") or ""),
+                "recovery_attempts_before": attempts_before,
+                "recovery_attempts": attempts_after,
+                "reset_at": now,
+                "reason": "stale_dead_recovery_lease_without_terminal_output",
+            }
+            return
+
+    _update_failure_registry_locked(
+        paths,
+        workflow_id=str(lease.get("workflow_id") or "unknown_workflow"),
+        update=update,
+    )
+    return changed
 
 
 def _lease_output_inspection(paths: WorkflowPaths, lease: Mapping[str, Any]) -> dict[str, Any]:
@@ -2043,6 +2236,310 @@ def _auto_validate_and_reconcile_after_worker(result: dict[str, Any]) -> dict[st
     result["next_step"] = "needs_human" if validation_status == "needs_human" else "recovery_pending"
     result["status"] = "failed_validation" if validation_status != "needs_human" else "needs_human"
     return result
+
+
+def _completed_background_validation_candidate(
+    snapshot: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    """Return the newest completed background handoff awaiting task authority.
+
+    A worker may legitimately exit with ``running_background`` while a
+    LoopPlane-managed supervisor continues the task.  The supervisor can later
+    update that same run's ``agent_status.json`` to a successful terminal
+    status.  Such a run still needs the normal validator/reconciler authority
+    path; a terminal background registry record alone must never make the
+    scheduler skip directly to new work or self-expansion.
+    """
+    if snapshot.get("ok") is not True:
+        return None
+    paths = snapshot.get("paths")
+    if not isinstance(paths, WorkflowPaths):
+        return None
+
+    pending_tasks = {
+        str(task.get("task_id") or ""): task
+        for task in snapshot.get("tasks", [])
+        if isinstance(task, Mapping) and str(task.get("status") or "") in {" ", "~"}
+    }
+    if not pending_tasks:
+        return None
+
+    candidates: list[dict[str, Any]] = []
+    seen_runs: set[tuple[str, str]] = set()
+    for job in snapshot.get("background_jobs", []):
+        if not isinstance(job, Mapping) or str(job.get("status") or "").lower() != "completed":
+            continue
+        task_id = _non_empty_text(job.get("task_id"))
+        run_id = _non_empty_text(job.get("run_id"))
+        if task_id is None or run_id is None or task_id not in pending_tasks:
+            continue
+        run_key = (task_id, run_id)
+        if run_key in seen_runs:
+            continue
+        seen_runs.add(run_key)
+
+        role_output_dir = paths.results_dir / task_id / "runs" / run_id
+        agent_status_path = role_output_dir / "agent_status.json"
+        status_record = _read_json_object(agent_status_path, default={})
+        if not isinstance(status_record, Mapping):
+            continue
+        source_run_id = _non_empty_text(status_record.get("run_id"))
+        source_task_id = _non_empty_text(
+            status_record.get("task_id") or status_record.get("primary_task_id")
+        )
+        if source_run_id not in {None, run_id} or source_task_id not in {None, task_id}:
+            continue
+        worker_status = normalize_worker_status(status_record.get("status")) or str(
+            status_record.get("status") or ""
+        ).strip().lower()
+        if (
+            not is_success_worker_status(worker_status)
+            or _agent_status_blocks_next_prompt(worker_status, status_record)
+            or _agent_next_prompt_ready(status_record) is False
+        ):
+            continue
+
+        validation_path = role_output_dir / "validation.json"
+        if validation_path.is_file():
+            validation = _read_json_object(validation_path, default={})
+            from runtime.validation import PASSING_STATUSES
+
+            if str(validation.get("status") or "") not in PASSING_STATUSES:
+                # Failed validation is ingested through the ordinary recovery
+                # registry path; do not repeatedly replay it here.
+                continue
+
+        candidates.append(
+            {
+                "task_id": task_id,
+                "run_id": run_id,
+                "job": dict(job),
+                "agent_status": dict(status_record),
+                "agent_status_path": agent_status_path,
+                "role_output_dir": role_output_dir,
+                "scheduler_run_dir": paths.runtime_dir / "runs" / run_id,
+                "sort_key": str(
+                    job.get("ended_at")
+                    or status_record.get("ended_at")
+                    or job.get("updated_at")
+                    or ""
+                ),
+            }
+        )
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: (str(item.get("sort_key") or ""), str(item["run_id"])), reverse=True)
+    return candidates[0]
+
+
+def _resume_completed_background_validation(
+    snapshot: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    """Validate and reconcile a successful terminal background handoff.
+
+    This is deterministic control-plane recovery: it reuses the original task
+    run and invokes the same validator/reconciler authority path used after a
+    foreground worker, without rerunning the worker or launching a new agent.
+    """
+    candidate = _completed_background_validation_candidate(snapshot)
+    if candidate is None:
+        return None
+    paths = snapshot.get("paths")
+    if not isinstance(paths, WorkflowPaths):
+        return None
+
+    task_id = str(candidate["task_id"])
+    run_id = str(candidate["run_id"])
+    role_output_dir = candidate["role_output_dir"]
+    scheduler_run_dir = candidate["scheduler_run_dir"]
+    assert isinstance(role_output_dir, Path)
+    assert isinstance(scheduler_run_dir, Path)
+    scheduler_run_dir.mkdir(parents=True, exist_ok=True)
+
+    execution_path = scheduler_run_dir / RUN_EXECUTION_FILENAME
+    role_execution_path = role_output_dir / RUN_EXECUTION_FILENAME
+    execution = _read_json_object(execution_path, default={})
+    if not isinstance(execution, Mapping) or not execution:
+        execution = _read_json_object(role_execution_path, default={})
+    result = dict(execution) if isinstance(execution, Mapping) else {}
+    status_record = candidate["agent_status"]
+    assert isinstance(status_record, Mapping)
+    worker_status = normalize_worker_status(status_record.get("status")) or "completed"
+    result.update(
+        {
+            "schema_version": SCHEMA_VERSION,
+            "ok": True,
+            "status": worker_status,
+            "message": (
+                "Completed LoopPlane background handoff adopted for authoritative "
+                "validation and reconciliation."
+            ),
+            "project_root": paths.project_root.as_posix(),
+            "workflow_id": str(snapshot.get("workflow_id") or ""),
+            "run_id": run_id,
+            "task_id": task_id,
+            "role": str(result.get("role") or "worker"),
+            "role_output_dir": _path_for_record(paths.project_root, role_output_dir),
+            "task_evidence_run_dir": _path_for_record(paths.project_root, role_output_dir),
+            "scheduler_run_dir": _path_for_record(paths.project_root, scheduler_run_dir),
+            "agent_status_path": _path_for_record(
+                paths.project_root, candidate["agent_status_path"]
+            ),
+            "agent_status_exists": True,
+            "worker_provided_agent_status": True,
+            "next_step": "validation_pending",
+            "ended_at": str(status_record.get("ended_at") or utc_timestamp()),
+            "background_handoff": {
+                "job_id": _record_id(candidate["job"]),
+                "status": "completed",
+                "adopted_at": utc_timestamp(),
+            },
+        }
+    )
+
+    validation_path = role_output_dir / "validation.json"
+    if validation_path.is_file():
+        validation = _read_json_object(validation_path, default={})
+        from runtime.reconciliation import run_reconciler
+
+        reconciliation = run_reconciler(
+            paths.project_root,
+            task_id=task_id,
+            run_dir=result["role_output_dir"],
+            write=True,
+        )
+        result["auto_validation"] = validation
+        result["auto_reconciliation"] = reconciliation
+        if str(reconciliation.get("status") or "") == "reconciled":
+            result["next_step"] = "reconciled"
+        else:
+            result["ok"] = False
+            result["next_step"] = "recovery_pending"
+            result["status"] = "failed_validation"
+    else:
+        result = _auto_validate_and_reconcile_after_worker(result)
+
+    resumed_at = utc_timestamp()
+    result["resumed_after_background_completion"] = True
+    result["resumed_at"] = resumed_at
+    _write_json(execution_path, result)
+    _write_json(role_execution_path, result)
+    node_summary = _worker_node_summary(result)
+    _write_json(role_output_dir / NODE_SUMMARY_FILENAME, node_summary)
+    _write_json(scheduler_run_dir / NODE_SUMMARY_FILENAME, node_summary)
+    append_event(
+        paths,
+        workflow_id=str(snapshot.get("workflow_id") or ""),
+        run_id=run_id,
+        event_type="completed_background_validation_resumed",
+        data={
+            "task_id": task_id,
+            "background_job_id": _record_id(candidate["job"]),
+            "validation_status": (
+                result.get("auto_validation", {}).get("status")
+                if isinstance(result.get("auto_validation"), Mapping)
+                else None
+            ),
+            "reconciliation_status": (
+                result.get("auto_reconciliation", {}).get("status")
+                if isinstance(result.get("auto_reconciliation"), Mapping)
+                else None
+            ),
+        },
+    )
+    if result.get("next_step") == "reconciled":
+        _update_runtime_state(
+            paths,
+            status="background_validation_reconciled",
+            scheduler_update={
+                "last_action": "resume_completed_background_validation",
+                "last_run_id": run_id,
+                "last_task_id": task_id,
+                "active_run_id": None,
+                "active_node_id": None,
+                "active_task_id": None,
+                "active_background_job_id": None,
+                "active_background_job_status": None,
+                "requires_attention_id": None,
+                "requires_attention_type": None,
+            },
+            requires_attention=[],
+        )
+    return result
+
+
+def _resume_interrupted_worker_validation(snapshot: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Resume the narrow worker-to-validator crash window without rerunning the worker."""
+    if snapshot.get("ok") is not True:
+        return None
+    state = snapshot.get("state") if isinstance(snapshot.get("state"), Mapping) else {}
+    scheduler_state = state.get("scheduler") if isinstance(state.get("scheduler"), Mapping) else {}
+    if _non_empty_text(scheduler_state.get("active_run_id")) is not None:
+        return None
+    run_id = _non_empty_text(scheduler_state.get("last_run_id"))
+    if run_id is None:
+        return None
+    paths = snapshot.get("paths")
+    if not isinstance(paths, WorkflowPaths):
+        return None
+    scheduler_run_dir = paths.runtime_dir / "runs" / run_id
+    execution_path = scheduler_run_dir / RUN_EXECUTION_FILENAME
+    execution = _read_json_object(execution_path, default={})
+    if not isinstance(execution, Mapping):
+        return None
+    result = dict(execution)
+    if (
+        result.get("ok") is not True
+        or str(result.get("next_step") or "") != "validation_pending"
+        or _non_empty_text(result.get("run_id")) != run_id
+    ):
+        return None
+    task_id = _non_empty_text(result.get("task_id"))
+    if task_id is None:
+        return None
+    task = next(
+        (
+            item
+            for item in snapshot.get("tasks", [])
+            if isinstance(item, Mapping) and str(item.get("task_id") or "") == task_id
+        ),
+        None,
+    )
+    if isinstance(task, Mapping) and str(task.get("status") or "") in {"x", "-"}:
+        return None
+    project = paths.project_root
+    role_output_dir = _project_relative_path(project, result.get("role_output_dir"))
+    if role_output_dir is None or not role_output_dir.is_dir():
+        return None
+    if (role_output_dir / "validation.json").is_file():
+        return None
+
+    resumed = _auto_validate_and_reconcile_after_worker(result)
+    resumed["resumed_after_controller_interruption"] = True
+    resumed["resumed_at"] = utc_timestamp()
+    _write_json(execution_path, resumed)
+    _write_json(role_output_dir / RUN_EXECUTION_FILENAME, resumed)
+    append_event(
+        paths,
+        workflow_id=str(snapshot.get("workflow_id") or ""),
+        run_id=run_id,
+        event_type="worker_validation_resumed",
+        data={
+            "task_id": task_id,
+            "role": result.get("role"),
+            "validation_status": (
+                resumed.get("auto_validation", {}).get("status")
+                if isinstance(resumed.get("auto_validation"), Mapping)
+                else None
+            ),
+            "reconciliation_status": (
+                resumed.get("auto_reconciliation", {}).get("status")
+                if isinstance(resumed.get("auto_reconciliation"), Mapping)
+                else None
+            ),
+        },
+    )
+    return resumed
 
 
 def append_event(
@@ -3326,7 +3823,7 @@ def _background_job_not_ready(snapshot: Mapping[str, Any]) -> Mapping[str, Any] 
         next_prompt_ready = job.get("next_prompt_ready")
         if status in BACKGROUND_JOB_SAFE_STATUSES and next_prompt_ready is not False:
             continue
-        if status in {"pending", "running"}:
+        if status in {"starting", "pending", "running"}:
             return job
         if status in ALLOWED_BACKGROUND_JOB_STATUSES or next_prompt_ready is False:
             deferred_problem_jobs.append(job)
@@ -3447,6 +3944,17 @@ def _task_dependencies_completed(snapshot: Mapping[str, Any], task_id: str) -> b
 def _oldest_recoverable_failure(snapshot: Mapping[str, Any]) -> Mapping[str, Any] | None:
     registry = snapshot.get("failure_registry")
     failures = registry.get("failures", []) if isinstance(registry, Mapping) else []
+    tasks = [task for task in snapshot.get("tasks", []) if isinstance(task, Mapping)]
+    tasks_by_id = {
+        str(task.get("task_id") or ""): task
+        for task in tasks
+        if str(task.get("task_id") or "")
+    }
+    completed_task_ids = {
+        str(task.get("task_id") or "")
+        for task in tasks
+        if str(task.get("status") or "") in {"x", "-"}
+    }
     candidates: list[tuple[str, int, Mapping[str, Any]]] = []
     for index, failure in enumerate(failures):
         if not isinstance(failure, Mapping):
@@ -3471,6 +3979,18 @@ def _oldest_recoverable_failure(snapshot: Mapping[str, Any]) -> Mapping[str, Any
         )
         if attempts >= budget:
             continue
+        # Reopening a failed task after self-expansion does not waive the
+        # task graph.  Expansion may introduce a new synthesis or evidence
+        # task and make the original task depend on it.  Selecting recovery
+        # before that dependency is accepted would run the old task against
+        # incomplete evidence and bypass the same gate enforced for ordinary
+        # worker dispatch.
+        task_id = str(failure.get("task_id") or "")
+        task = tasks_by_id.get(task_id)
+        if task is not None:
+            dependencies = [str(dep) for dep in task.get("depends_on", []) if str(dep)]
+            if any(dep not in completed_task_ids for dep in dependencies):
+                continue
         created = str(failure.get("first_seen_at") or failure.get("created_at") or failure.get("detected_at") or f"{index:08d}")
         candidates.append((created, index, failure))
     if not candidates:
@@ -3837,14 +4357,23 @@ def _handle_control_request(
         message = "Read models rebuilt by control request." if response_status == "applied" else "Read model rebuild failed."
         response_details["read_model_rebuild"] = dict(rebuild_result)
     if clear_resolved_attention:
-        cleared_holds = _clear_manual_runner_availability_holds(
+        request_payload = request.get("payload") if isinstance(request.get("payload"), Mapping) else {}
+        override_automatic_holds = (
+            action == "resume"
+            and isinstance(request_payload, Mapping)
+            and request_payload.get("clear_runner_availability_holds") is True
+        )
+        cleared_holds = _clear_runner_availability_holds(
             paths,
             workflow_id=str(snapshot.get("workflow_id") or ""),
             request_id=request_id,
             control_type=action,
+            include_automatic=override_automatic_holds,
         )
         if cleared_holds:
             response_details["cleared_runner_availability_holds"] = cleared_holds
+        if override_automatic_holds:
+            response_details["runner_availability_hold_override"] = True
     resulting_status = runtime_status or current_status
     response = {
         "schema_version": SCHEMA_VERSION,
@@ -3907,22 +4436,25 @@ def _handle_control_request(
     return response
 
 
-def _clear_manual_runner_availability_holds(
+def _clear_runner_availability_holds(
     paths: WorkflowPaths,
     *,
     workflow_id: str,
     request_id: str,
     control_type: str,
+    include_automatic: bool = False,
 ) -> list[dict[str, Any]]:
-    """Release acknowledged manual holds at a start/resume boundary.
+    """Release acknowledged runner holds at a start/resume boundary.
 
     A manual availability hold otherwise prevents the success event that would
     clear it, creating a permanent scheduler deadlock.  Start/resume is already
     the explicit acknowledgement boundary for repaired attention conditions.
-    Automatic cooldown holds are intentionally left untouched.
+    Automatic cooldown holds remain untouched unless a resume request contains
+    an explicit override.  That override is intended for use after an external
+    end-to-end runner probe demonstrates recovery before the cooldown expires.
     """
 
-    return _clear_runner_availability_holds(
+    return _clear_runner_availability_holds_matching(
         paths,
         workflow_id=workflow_id,
         request_id=request_id,
@@ -3968,7 +4500,7 @@ def clear_verified_runner_availability_holds(
             "cleared_count": 0,
             "cleared_holds": [],
         }
-    cleared_holds = _clear_runner_availability_holds(
+    cleared_holds = _clear_runner_availability_holds_matching(
         context.paths,
         workflow_id=context.workflow_id,
         request_id=str(request_id),
@@ -3991,7 +4523,7 @@ def clear_verified_runner_availability_holds(
     }
 
 
-def _clear_runner_availability_holds(
+def _clear_runner_availability_holds_matching(
     paths: WorkflowPaths,
     *,
     workflow_id: str,
@@ -4019,6 +4551,7 @@ def _clear_runner_availability_holds(
             is_manual = hold.get("requires_attention") is True
             if (is_manual and not include_manual) or (not is_manual and not include_automatic):
                 continue
+            automatic_hold = not is_manual
             released = dict(hold)
             released.update(
                 {
@@ -4027,6 +4560,7 @@ def _clear_runner_availability_holds(
                     "cleared_by_control_request_id": request_id,
                     "cleared_by_control_type": control_type,
                     "clear_reason": clear_reason,
+                    "cleared_by_control_override": bool(automatic_hold and include_automatic),
                 }
             )
             record["availability_hold"] = released
@@ -4047,6 +4581,10 @@ def _clear_runner_availability_holds(
                 "cleared_by_control_request_id": request_id,
                 "cleared_by_control_type": control_type,
                 "clear_reason": clear_reason,
+                "cleared_by_control_override": bool(
+                    isinstance(item.get("hold"), Mapping)
+                    and item["hold"].get("cleared_by_control_override")
+                ),
             },
         )
     return cleared_holds
@@ -5198,10 +5736,21 @@ def _run_adapter_with_active_run_lease(
 
     thread = threading.Thread(target=run_adapter, name=f"loopplane-adapter-{prepared.run_id}", daemon=True)
     thread.start()
-    interval = min(max(0.01, float(heartbeat_interval_seconds)), 0.5)
+    heartbeat_interval = min(
+        max(0.05, float(heartbeat_interval_seconds)),
+        ACTIVE_RUN_LEASE_TTL_SECONDS / 3,
+    )
+    poll_interval = min(heartbeat_interval, 0.5)
+    next_heartbeat = time.monotonic() + heartbeat_interval
+    child_pid_recorded = _adapter_child_pid(prepared) is not None
     while thread.is_alive():
-        thread.join(interval)
-        _refresh_active_run_lease(prepared, status="running", owner=owner, adapter_pid=os.getpid())
+        thread.join(poll_interval)
+        now = time.monotonic()
+        child_pid_available = not child_pid_recorded and _adapter_child_pid(prepared) is not None
+        if thread.is_alive() and (child_pid_available or now >= next_heartbeat):
+            _refresh_active_run_lease(prepared, status="running", owner=owner, adapter_pid=os.getpid())
+            next_heartbeat = now + heartbeat_interval
+            child_pid_recorded = child_pid_recorded or child_pid_available
     error = result.get("error")
     if error is not None:
         raise error
@@ -5394,6 +5943,9 @@ def _finish_worker_execution(
         "ended_at": ended_at,
         "next_step": next_step,
     }
+    adapter_termination_reason = _adapter_termination_reason(adapter_output)
+    if adapter_termination_reason:
+        result["adapter_termination_reason"] = adapter_termination_reason
     runner_availability = _adapter_runner_availability(adapter_output)
     if runner_availability is not None:
         result["runner_availability"] = runner_availability
@@ -5589,7 +6141,13 @@ def _mark_prepared_run_lease_failed(prepared: PreparedRun | None, *, owner: str)
         pass
 
 
-def _worker_adapter_env(project: Path, paths: WorkflowPaths, prepared: PreparedRun, *, failure_id: str | None = None) -> dict[str, str]:
+def _worker_adapter_env(
+    project: Path,
+    paths: WorkflowPaths,
+    prepared: PreparedRun,
+    *,
+    failure_id: str | None = None,
+) -> dict[str, str]:
     env = {
         "LOOPPLANE_PROJECT_ROOT": project.as_posix(),
         "LOOPPLANE_PROJECT_ROOT_REL": ".",
@@ -5608,6 +6166,7 @@ def _worker_adapter_env(project: Path, paths: WorkflowPaths, prepared: PreparedR
         "LOOPPLANE_ACTIVE_RUN_LEASE": prepared.active_run_lease_path.as_posix(),
         "LOOPPLANE_ACTIVE_RUN_LEASE_REL": _path_for_record(project, prepared.active_run_lease_path),
         "LOOPPLANE_ADAPTER_CHILD_PID_FILE": (prepared.scheduler_run_dir / "adapter_child_pid.txt").as_posix(),
+        "LOOPPLANE_RUN_PREPARED_AT": prepared.prepared_at,
     }
     if failure_id:
         env["LOOPPLANE_FAILURE_ID"] = failure_id
@@ -5615,6 +6174,14 @@ def _worker_adapter_env(project: Path, paths: WorkflowPaths, prepared: PreparedR
         env["LOOPPLANE_TASK_EVIDENCE_RUN_DIR"] = prepared.task_evidence_run_dir.as_posix()
         env["LOOPPLANE_TASK_EVIDENCE_RUN_DIR_REL"] = _path_for_record(project, prepared.task_evidence_run_dir)
     return env
+
+
+def _adapter_termination_reason(adapter_output: AdapterOutput) -> str | None:
+    metadata = adapter_output.adapter_metadata
+    if not isinstance(metadata, Mapping):
+        return None
+    value = metadata.get("termination_reason")
+    return str(value).strip() if value is not None and str(value).strip() else None
 
 
 def _adapter_child_pid(prepared: PreparedRun) -> int | None:
@@ -5821,6 +6388,7 @@ def _worker_node_summary(result: Mapping[str, Any]) -> dict[str, Any]:
         "ok": result.get("ok"),
         "message": result.get("message"),
         "adapter_exit_code": result.get("adapter_exit_code"),
+        "control_plane": result.get("control_plane"),
         "agent_status_path": result.get("agent_status_path"),
         "run_execution_path": f"{result.get('role_output_dir')}/{RUN_EXECUTION_FILENAME}",
         "updated_at": result.get("ended_at"),
@@ -6071,7 +6639,7 @@ def _normalize_background_job_record(
 
     started_at = _non_empty_text(record.get("started_at")) or _non_empty_text(agent_status_record.get("started_at")) or observed_at
     heartbeat_at = _non_empty_text(record.get("heartbeat_at")) or _non_empty_text(agent_status_record.get("heartbeat_at"))
-    if heartbeat_at is None and status in {"pending", "running"}:
+    if heartbeat_at is None and status in {"starting", "pending", "running"}:
         heartbeat_at = observed_at
 
     wake_next = _non_empty_text(record.get("wake_next_agent_when")) or _agent_wake_next_agent_when(agent_status_record)
@@ -6274,7 +6842,7 @@ def _evaluate_background_job_record(
         job["next_prompt_ready"] = False
         return job
 
-    if status in {"pending", "running"}:
+    if status in {"starting", "pending", "running"}:
         heartbeat = _parse_iso_timestamp(job.get("heartbeat_at") or job.get("started_at"))
         if heartbeat is None:
             job["status"] = "needs_recovery"
@@ -9121,6 +9689,7 @@ def _owner_metadata(owner: str, ttl_seconds: int) -> dict[str, Any]:
         "pid": os.getpid(),
         "started_at": now,
         "heartbeat_at": now,
+        "heartbeat_count": 0,
         "ttl_seconds": ttl_seconds,
     }
     process_start_time = _process_start_time(os.getpid())

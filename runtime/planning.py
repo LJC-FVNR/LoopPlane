@@ -68,6 +68,12 @@ REQUIRED_TASK_FIELDS = (
 BLOCKED_TASK_FIELDS = ("blocked_reason", "unblock_condition")
 SKIPPED_TASK_FIELDS = ("skip_reason",)
 ALLOWED_RISK_LEVELS = {"low", "medium", "high"}
+TASK_CONTRACT_WARNING_CHARS = 6_000
+TASK_CONTRACT_ERROR_CHARS = 16_000
+ACCEPTANCE_WARNING_CHARS = 3_000
+ACCEPTANCE_ERROR_CHARS = 10_000
+REQUIRED_ARTIFACT_WARNING_COUNT = 12
+REQUIRED_ARTIFACT_ERROR_COUNT = 24
 TASK_LINE_RE = re.compile(r"^- \[(?P<status>[ x~!\-])\]\s+(?P<task_id>[A-Za-z0-9_.-]+):\s+(?P<title>.+?)\s*$")
 FIELD_LINE_RE = re.compile(r"^  - (?P<field>[A-Za-z0-9_ -]+):(?P<value>.*)$")
 PHASE_LINE_RE = re.compile(r"^## Phase\b")
@@ -1977,6 +1983,15 @@ def _inspect_plan(
         if validation_strategy:
             warnings.extend(_validation_strategy_warnings(task_id, validation_strategy))
 
+        efficiency_errors, efficiency_warnings, efficiency_metrics = _task_operational_efficiency_findings(
+            task_id=task_id,
+            title=str(task.get("title") or ""),
+            fields=fields,
+            canonical_fields=canonical_fields,
+        )
+        errors.extend(efficiency_errors)
+        warnings.extend(efficiency_warnings)
+
         if str(task.get("status")) == "!":
             blocked_tasks += 1
             for field in BLOCKED_TASK_FIELDS:
@@ -2008,7 +2023,17 @@ def _inspect_plan(
                     else None
                 ),
                 "requires_human_approval": task_requires_human_approval,
+                "contract_chars": efficiency_metrics["contract_chars"],
+                "required_artifact_count": efficiency_metrics["required_artifact_count"],
+                "data_build": efficiency_metrics["data_build"],
             }
+        )
+
+    if tasks and high_risk_tasks * 4 >= len(tasks) * 3:
+        warnings.append(
+            "High-risk saturation: at least 75% of tasks are marked high risk. Reserve high risk for "
+            "claim-bearing or genuinely hazardous boundaries so routine tasks do not trigger redundant "
+            "semantic validation."
         )
 
     objective_report = _inspect_objective_structure(text, task_summaries)
@@ -2157,6 +2182,106 @@ def _validation_strategy_warnings(task_id: str, value: str) -> list[str]:
                     f"{task_id}: report_contains target {needle!r} looks prose-like; this advisory check is easier to inspect with a stable marker token such as LoopPlane-{task_id.replace('.', '-')}-DONE"
                 )
     return warnings
+
+
+def _task_operational_efficiency_findings(
+    *,
+    task_id: str,
+    title: str,
+    fields: Mapping[str, Any],
+    canonical_fields: Mapping[str, str],
+) -> tuple[list[str], list[str], dict[str, Any]]:
+    errors: list[str] = []
+    warnings: list[str] = []
+    field_text = "\n".join(f"{key}: {value}" for key, value in fields.items())
+    contract_text = f"{title}\n{field_text}"
+    contract_chars = len(contract_text)
+    acceptance = canonical_fields.get("acceptance", "")
+    acceptance_chars = len(acceptance)
+    required_artifact_count = _required_artifact_count(canonical_fields.get("validation", ""))
+
+    if contract_chars > TASK_CONTRACT_ERROR_CHARS:
+        errors.append(
+            f"{task_id}: task contract is {contract_chars} characters; split or compress it below "
+            f"{TASK_CONTRACT_ERROR_CHARS} characters so workers do not spend their run rereading a monolithic protocol"
+        )
+    elif contract_chars > TASK_CONTRACT_WARNING_CHARS:
+        warnings.append(
+            f"{task_id}: task contract is {contract_chars} characters; move stable protocol detail into one "
+            "campaign-level reference and keep the task block decision-focused"
+        )
+
+    if acceptance_chars > ACCEPTANCE_ERROR_CHARS:
+        errors.append(
+            f"{task_id}: acceptance text is {acceptance_chars} characters; acceptance must be a compact, "
+            "testable gate rather than a repeated research dossier"
+        )
+    elif acceptance_chars > ACCEPTANCE_WARNING_CHARS:
+        warnings.append(
+            f"{task_id}: acceptance text is {acceptance_chars} characters; replace repeated history and "
+            "protocol prose with named immutable references and concise decision criteria"
+        )
+
+    if required_artifact_count > REQUIRED_ARTIFACT_ERROR_COUNT:
+        errors.append(
+            f"{task_id}: validation requires {required_artifact_count} files; cap per-task mandatory artifacts "
+            f"at {REQUIRED_ARTIFACT_ERROR_COUNT} and consolidate related evidence into structured tables or manifests"
+        )
+    elif required_artifact_count > REQUIRED_ARTIFACT_WARNING_COUNT:
+        warnings.append(
+            f"{task_id}: validation requires {required_artifact_count} files; this is likely artifact bureaucracy. "
+            "Prefer metrics, a run manifest, a decision record, and primary logs"
+        )
+
+    lowered = contract_text.lower()
+    if "complete historical source" in lowered or "complete historical evidence" in lowered:
+        warnings.append(
+            f"{task_id}: blanket rereading of complete historical sources is prohibited as routine setup. "
+            "Use a hash-indexed evidence digest and open an original source only for a named unresolved question"
+        )
+    elif "reread and cite" in lowered and len(re.findall(r"(?:/[^\s`,;]+|`[^`]+`)", contract_text)) >= 6:
+        warnings.append(
+            f"{task_id}: broad reread-and-cite setup is likely to dominate control-plane time; bind a compact "
+            "source digest and read only changed or decision-relevant originals"
+        )
+
+    data_build = bool(
+        re.search(r"\b(?:data|corpus|dataset)\b", contract_text, flags=re.IGNORECASE)
+        and re.search(
+            r"\b(?:materializ|preprocess|tokeniz|pack(?:ing|ed)?|shard)\w*\b",
+            contract_text,
+            flags=re.IGNORECASE,
+        )
+    )
+    if data_build and not re.search(
+        r"\b(?:content[- ]addressed|durable|retained|reusable|reuse|resume|cache(?:d|able)?|checkpoint)\b",
+        contract_text,
+        flags=re.IGNORECASE,
+    ):
+        warnings.append(
+            f"{task_id}: data preprocessing has no durable reuse contract; require a content-addressed, "
+            "resumable artifact so downstream tasks do not repeat expensive materialization"
+        )
+
+    return errors, warnings, {
+        "contract_chars": contract_chars,
+        "acceptance_chars": acceptance_chars,
+        "required_artifact_count": required_artifact_count,
+        "data_build": data_build,
+    }
+
+
+def _required_artifact_count(validation_strategy: str) -> int:
+    paths: set[str] = set()
+    for clause in _strategy_clauses(validation_strategy):
+        if not clause.strip().lower().startswith("file_exists:"):
+            continue
+        payload = clause.split(":", 1)[1]
+        for item in payload.split(","):
+            path = item.strip().strip("\"'")
+            if path:
+                paths.add(path)
+    return len(paths)
 
 
 def _validation_clause_supported(clause: str) -> bool:

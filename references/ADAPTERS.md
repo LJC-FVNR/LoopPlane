@@ -30,6 +30,8 @@ resources. When present after inheritance and local overrides, it must include
 `global_concurrency_limit`, `lock_scope`, `lock_key`, and `queue_when_busy`.
 Supported `lock_scope` values are `machine` and `workspace`; machine-scoped
 runtime locks are reserved for `$LOOPPLANE_HOME/locks/runner_locks/<lock_key>.lock`.
+Machine-scoped ownership uses a lifetime POSIX advisory lock and fails closed
+when the host or shared filesystem cannot provide that primitive.
 
 Planner, auditor, worker, inspector, and other role runners may inherit common
 configuration, but the resulting role and permission policy must still match

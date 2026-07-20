@@ -1107,6 +1107,7 @@ def _process_env(adapter_input: AdapterInput, paths: Any) -> dict[str, str]:
     env = dict(os.environ)
     env.update(_project_dotenv_env(adapter_input, env))
     env.update(dict(adapter_input.env))
+    _configure_isolated_codex_home(adapter_input, env)
     env.update(
         {
             "LOOPPLANE_RUN_ID": adapter_input.run_id,
@@ -1131,6 +1132,42 @@ def adapter_process_env(adapter_input: AdapterInput) -> dict[str, str]:
     """Return the exact environment used by shell-family child processes."""
 
     return _process_env(adapter_input, adapter_input.output_paths())
+
+
+def _configure_isolated_codex_home(adapter_input: AdapterInput, env: dict[str, str]) -> None:
+    isolate_value = env.get("LOOPPLANE_ISOLATE_CODEX_STATE", "1").strip().lower()
+    if (
+        adapter_input.adapter != "codex_cli"
+        or isolate_value in {"0", "false", "no", "off"}
+        or adapter_input.env.get("CODEX_HOME")
+    ):
+        return
+    state_root = env.get("LOOPPLANE_AGENT_STATE_ROOT") or env.get("TMPDIR") or "/tmp"
+    uid = os.getuid() if hasattr(os, "getuid") else 0
+    codex_home = (
+        Path(state_root)
+        / f"loopplane-agent-state-{uid}"
+        / adapter_input.workflow_id
+        / adapter_input.runner_id
+    )
+    codex_home.mkdir(parents=True, exist_ok=True, mode=0o700)
+    try:
+        codex_home.chmod(0o700)
+    except OSError:
+        pass
+
+    auth_source_value = env.get("LOOPPLANE_CODEX_AUTH_FILE")
+    inherited_codex_home = Path(os.environ.get("CODEX_HOME") or (Path.home() / ".codex"))
+    auth_source = Path(auth_source_value).expanduser() if auth_source_value else inherited_codex_home / "auth.json"
+    auth_target = codex_home / "auth.json"
+    if auth_source.is_file() and not auth_target.exists():
+        try:
+            auth_target.symlink_to(auth_source.resolve())
+        except OSError:
+            pass
+
+    env["CODEX_HOME"] = codex_home.as_posix()
+    env["LOOPPLANE_CODEX_STATE_ISOLATED"] = "1"
 
 
 

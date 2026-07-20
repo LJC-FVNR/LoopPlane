@@ -5,7 +5,9 @@ import tempfile
 import unittest
 from hashlib import sha256
 from pathlib import Path
+from unittest.mock import patch
 
+from runtime.approval import record_approval_response
 from runtime.init_workflow import init_project
 from runtime.plan_objectives import parse_plan_objectives
 from runtime.prompt_builder import build_prompt_for_prepared_run
@@ -13,6 +15,7 @@ from runtime.read_models import rebuild_read_models
 from runtime.scheduler import load_scheduler_snapshot, prepare_run, select_next_action
 from runtime.self_expansion import (
     apply_expansion_proposal,
+    expansion_candidate,
     load_expansion_status,
     reopen_expansion_failures,
     validate_expansion_proposal,
@@ -72,7 +75,12 @@ def record_active_plan(project: Path) -> None:
     state_path.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
-def write_failure(project: Path, *, status: str = "exhausted") -> None:
+def write_failure(
+    project: Path,
+    *,
+    status: str = "exhausted",
+    failure_class: str = "validation_failed",
+) -> None:
     workflow = json.loads((project / ".loopplane" / "config" / "workflow.json").read_text(encoding="utf-8"))
     write_json(
         project / ".loopplane" / "runtime" / "failure_registry.json",
@@ -84,7 +92,7 @@ def write_failure(project: Path, *, status: str = "exhausted") -> None:
                     "failure_id": "fail_T001",
                     "task_id": "T001",
                     "status": status,
-                    "failure_class": "validation_failed",
+                    "failure_class": failure_class,
                     "failure_signature": "missing-base-artifact",
                     "recovery_attempts": 1,
                     "max_recovery_attempts": 1,
@@ -430,6 +438,66 @@ class SelfExpansionTest(unittest.TestCase):
             self.assertEqual(registry["proposals"][0]["failure_resolution_status"], "pending_evidence")
             self.assertEqual(registry["proposals"][0]["target_phase_id"], "P0")
 
+    def test_repeat_budget_counts_applied_transitions_not_unapplied_attempts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "Separate proposal audit attempts from semantic expansion cycles.")
+            write_plan(project)
+            record_active_plan(project)
+            write_failure(project)
+            proposal_path = write_patch_and_proposal(project)
+
+            workflow_path = project / ".loopplane" / "config" / "workflow.json"
+            workflow = json.loads(workflow_path.read_text(encoding="utf-8"))
+            workflow["self_expansion"]["max_repeated_signature_count"] = 3
+            write_json(workflow_path, workflow)
+            registry_path = project / ".loopplane" / "runtime" / "expansion_registry.json"
+            base_records = [
+                {
+                    "schema_version": "1.5",
+                    "proposal_id": f"exp_attempt_{index}",
+                    "workflow_id": workflow["workflow_id"],
+                    "status": "requires_attention",
+                    "loop_signature": "test-signature",
+                }
+                for index in range(3)
+            ]
+            write_json(
+                registry_path,
+                {
+                    "schema_version": "1.5",
+                    "workflow_id": workflow["workflow_id"],
+                    "cycle": 0,
+                    "events": [],
+                    "proposals": base_records,
+                },
+            )
+
+            pending_validation = validate_expansion_proposal(project, proposal_path)
+
+            self.assertTrue(pending_validation["ok"], pending_validation)
+
+            for record in base_records:
+                record["status"] = "applied"
+            write_json(
+                registry_path,
+                {
+                    "schema_version": "1.5",
+                    "workflow_id": workflow["workflow_id"],
+                    "cycle": 3,
+                    "events": [],
+                    "proposals": base_records,
+                },
+            )
+
+            applied_validation = validate_expansion_proposal(project, proposal_path)
+
+            self.assertFalse(applied_validation["ok"], applied_validation)
+            self.assertIn(
+                "loop_signature was already applied 3 time(s), reaching policy limit.",
+                applied_validation["errors"],
+            )
+
     def test_pending_reopen_evidence_task_runs_before_reexpanding_same_failure(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             project = Path(tmp) / "project"
@@ -655,6 +723,167 @@ class SelfExpansionTest(unittest.TestCase):
             self.assertIn("self_expansion_plan_patch_applied", rebuild_request["pending_reasons"])
             self.assertEqual(rebuild_request["status"], "pending")
 
+    def test_high_risk_expansion_can_be_explicitly_approved_when_interactive_policy_is_disabled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "Approve a high-risk expansion through the operator override path.")
+            write_plan(project)
+            record_active_plan(project)
+            write_failure(project)
+            proposal_path = write_patch_and_proposal(project)
+            proposal = json.loads(proposal_path.read_text(encoding="utf-8"))
+            proposal["approval_required"] = True
+            proposal["risk"] = "high"
+            write_json(proposal_path, proposal)
+
+            waiting = apply_expansion_proposal(
+                project,
+                proposal_path,
+                run_id="run_high_risk_waiting",
+                runner_id="expansion_planner",
+            )
+
+            self.assertFalse(waiting["ok"])
+            self.assertEqual(waiting["status"], "requires_attention")
+            approval_id = waiting["approval"]["approval_id"]
+            self.assertIn("SE001", waiting["approval"]["scope"].split())
+            self.assertTrue(waiting["approval"]["proposal_sha256"].startswith("sha256:"))
+            self.assertTrue(waiting["approval"]["plan_patch_sha256"].startswith("sha256:"))
+            response = record_approval_response(
+                project,
+                approval_id,
+                decision="approved",
+                approved_by="test_operator",
+                notes="Explicit test authorization.",
+                allow_disabled_policy=True,
+            )
+            self.assertTrue(response["ok"], response)
+
+            applied = apply_expansion_proposal(
+                project,
+                proposal_path,
+                run_id="run_high_risk_approved",
+                runner_id="expansion_planner",
+            )
+
+            self.assertTrue(applied["ok"], json.dumps(applied, indent=2, sort_keys=True))
+            self.assertEqual(applied["status"], "applied")
+            self.assertEqual(applied["approval"]["status"], "approved")
+            self.assertEqual(applied["approval"]["approval_id"], approval_id)
+            self.assertIn("- [ ] SE001: Gather independent evidence", (project / "PLAN.md").read_text(encoding="utf-8"))
+            requests = (
+                project / ".loopplane" / "runtime" / "human_approval_requests.jsonl"
+            ).read_text(encoding="utf-8").splitlines()
+            self.assertEqual(len(requests), 1)
+
+    def test_approved_expansion_requires_new_approval_after_plan_patch_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "Do not reuse approval after expansion content changes.")
+            write_plan(project)
+            record_active_plan(project)
+            write_failure(project)
+            proposal_path = write_patch_and_proposal(project)
+            proposal = json.loads(proposal_path.read_text(encoding="utf-8"))
+            proposal["approval_required"] = True
+            proposal["risk"] = "high"
+            write_json(proposal_path, proposal)
+
+            waiting = apply_expansion_proposal(project, proposal_path, run_id="run_before_approval")
+            approval_id = waiting["approval"]["approval_id"]
+            approved = record_approval_response(
+                project,
+                approval_id,
+                decision="approved",
+                approved_by="test_operator",
+                allow_disabled_policy=True,
+            )
+            self.assertTrue(approved["ok"], approved)
+
+            patch_path = Path(proposal["plan_patch_path"])
+            patch_path.write_text(
+                patch_path.read_text(encoding="utf-8") + "\n<!-- changed after approval -->\n",
+                encoding="utf-8",
+            )
+            result = apply_expansion_proposal(project, proposal_path, run_id="run_after_mutation")
+
+            self.assertFalse(result["ok"])
+            self.assertEqual(result["status"], "requires_attention")
+            self.assertNotEqual(result["approval"]["approval_id"], approval_id)
+            self.assertNotEqual(
+                result["approval"]["plan_patch_sha256"],
+                waiting["approval"]["plan_patch_sha256"],
+            )
+            self.assertNotIn("SE001", (project / "PLAN.md").read_text(encoding="utf-8"))
+            requests = [
+                json.loads(line)
+                for line in (project / ".loopplane" / "runtime" / "human_approval_requests.jsonl")
+                .read_text(encoding="utf-8")
+                .splitlines()
+                if line.strip()
+            ]
+            self.assertEqual(len(requests), 2)
+
+    def test_apply_rejects_content_change_during_validation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "Reject self-expansion content races.")
+            write_plan(project)
+            record_active_plan(project)
+            write_failure(project)
+            proposal_path = write_patch_and_proposal(project)
+            original_plan = (project / "PLAN.md").read_text(encoding="utf-8")
+
+            with patch(
+                "runtime.self_expansion._expansion_approval_binding",
+                return_value={
+                    "proposal_sha256": "sha256:changed-during-validation",
+                    "plan_patch_sha256": "sha256:changed-during-validation",
+                },
+            ):
+                result = apply_expansion_proposal(project, proposal_path, run_id="run_content_race")
+
+            self.assertFalse(result["ok"])
+            self.assertEqual(result["status"], "proposal_content_changed")
+            self.assertEqual((project / "PLAN.md").read_text(encoding="utf-8"), original_plan)
+
+    def test_approved_expansion_requires_new_approval_after_proposal_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "Do not reuse approval after proposal content changes.")
+            write_plan(project)
+            record_active_plan(project)
+            write_failure(project)
+            proposal_path = write_patch_and_proposal(project)
+            proposal = json.loads(proposal_path.read_text(encoding="utf-8"))
+            proposal["approval_required"] = True
+            proposal["risk"] = "high"
+            write_json(proposal_path, proposal)
+
+            waiting = apply_expansion_proposal(project, proposal_path, run_id="run_before_proposal_approval")
+            approval_id = waiting["approval"]["approval_id"]
+            approved = record_approval_response(
+                project,
+                approval_id,
+                decision="approved",
+                approved_by="test_operator",
+                allow_disabled_policy=True,
+            )
+            self.assertTrue(approved["ok"], approved)
+
+            proposal["confidence"] = 0.81
+            write_json(proposal_path, proposal)
+            result = apply_expansion_proposal(project, proposal_path, run_id="run_after_proposal_mutation")
+
+            self.assertFalse(result["ok"])
+            self.assertEqual(result["status"], "requires_attention")
+            self.assertNotEqual(result["approval"]["approval_id"], approval_id)
+            self.assertNotEqual(
+                result["approval"]["proposal_sha256"],
+                waiting["approval"]["proposal_sha256"],
+            )
+            self.assertNotIn("SE001", (project / "PLAN.md").read_text(encoding="utf-8"))
+
     def test_workflow_objective_gap_apply_inserts_new_phase_before_final_objectives_and_selects_it_next(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             project = Path(tmp) / "project"
@@ -806,6 +1035,25 @@ class SelfExpansionTest(unittest.TestCase):
             self.assertEqual(action["selected"]["candidate"]["trigger"], "final_verification_failed")
             self.assertEqual(action["selected"]["candidate"]["blockers"][0]["check"], "semantic_final_review")
 
+    def test_background_failure_does_not_suppress_no_executable_expansion(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "Infrastructure failures must not become a global no-work latch.")
+            write_plan(project)
+            record_active_plan(project)
+            write_failure(project, failure_class="background_job_failed")
+
+            candidate = expansion_candidate(load_scheduler_snapshot(project), mode="no_executable")
+
+            self.assertIsNotNone(candidate)
+            assert candidate is not None
+            self.assertEqual(candidate["trigger"], "no_executable_tasks")
+            self.assertEqual(candidate["target_task_ids"], ["T001", "T002"])
+            self.assertEqual(
+                candidate["non_scientific_failures"][0]["failure_id"],
+                "fail_T001",
+            )
+
     def test_reopen_expansion_failure_after_added_evidence_task_is_terminal(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             project = Path(tmp) / "project"
@@ -858,6 +1106,14 @@ class SelfExpansionTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             project = Path(tmp) / "project"
             init_project(project, "Expansion prompt.")
+            (project / "PROJECT_BRIEF.md").write_text(
+                "# Project Brief\n\nPROJECT-BRIEF-BINDING-SENTINEL\n",
+                encoding="utf-8",
+            )
+            (project / ".loopplane" / "SHARED_CONTEXT.md").write_text(
+                "# Shared Context\n\nSHARED-CONTEXT-BINDING-SENTINEL\n",
+                encoding="utf-8",
+            )
             write_plan(project)
             record_active_plan(project)
 
@@ -874,10 +1130,17 @@ class SelfExpansionTest(unittest.TestCase):
             self.assertIn("phase_objective_gap", built.content)
             self.assertIn("This workflow is fully autonomous", built.content)
             self.assertIn("never emit requires_human", built.content)
+            self.assertNotIn("PROJECT-BRIEF-BINDING-SENTINEL", built.content)
+            self.assertNotIn("SHARED-CONTEXT-BINDING-SENTINEL", built.content)
+            self.assertIn("Binding Context", built.content)
+            self.assertNotIn('"title": "LoopPlane self expansion proposal"', built.content)
+            self.assertIn("must not depend on the failed target task itself", built.content)
             self.assertNotIn("Produce base artifact", built.content)
             manifest = json.loads((Path(run.role_output_dir) / "expansion_context_manifest.json").read_text(encoding="utf-8"))
             self.assertEqual(manifest["references"]["active_plan"]["path"], "PLAN.md")
             self.assertIn("Produce base artifact", manifest["references"]["active_plan"]["excerpt"])
+            self.assertIn("Read them from their referenced paths", " ".join(manifest["instructions"]))
+            self.assertEqual(manifest["references"]["proposal_schema"]["exists"], True)
 
 
 if __name__ == "__main__":

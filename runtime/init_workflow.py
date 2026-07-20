@@ -1227,8 +1227,11 @@ def _workflow_config(
             "recovery_before_new_work": True,
         },
         "validation": {
-            "validator_agent_mode": "on_deterministic_failure",
+            "validator_agent_mode": "high_risk_pass_only",
             "validator_agent_for_high_risk": False,
+        },
+        "human_summaries": {
+            "auto_after_reconcile": False,
         },
         "self_expansion": {
             "enabled": True,
@@ -1541,6 +1544,12 @@ def _agent_runners_config() -> dict[str, Any]:
                 "strategy": "ordered",
                 "runners": ["worker", "worker_fallback"],
                 "mark_unhealthy_after": 4,
+                "failure_window_seconds": 900,
+            },
+            "validator": {
+                "strategy": "ordered",
+                "runners": ["validator", "validator_fallback"],
+                "mark_unhealthy_after": 1,
                 "failure_window_seconds": 900,
             },
             "expansion_planner": {

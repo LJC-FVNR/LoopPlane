@@ -402,6 +402,7 @@ def _build_agent_inspector_prompt(
         "workflow_id": str(request.get("workflow_id") or ""),
         "inspection_request_id": str(request.get("request_id") or ""),
         "inspection_question": str(request.get("user_message") or ""),
+        "inspection_source": str(request.get("source") or "cli"),
         "brief_file": paths.value("brief_file"),
         "shared_context_file": paths.value("shared_context_file"),
         "plan_file": paths.value("plan_file"),

@@ -10,13 +10,56 @@ Before proposing anything, read the project brief and shared context referenced 
 
 {{autonomous_recovery_policy}}
 
+## Binding Context
+
+Read the following authoritative files from their manifest references before
+proposing work. Apply every constraint they contain and verify their hashes.
+They are paths to read, not content to restate in the proposal.
+
+### Project Brief
+
+- path: `{{brief_file}}`
+- sha256: `{{binding_project_brief_sha256}}`
+
+### Shared Context
+
+- path: `{{shared_context_file}}`
+- sha256: `{{binding_shared_context_sha256}}`
+
+### Expansion Proposal Schema
+
+- path: `{{proposal_schema_path}}`
+- sha256: `{{proposal_schema_sha256}}`
+
 ## Hard Requirements
 
 - Write exactly one JSON proposal to `{{expansion_proposal_path}}`.
 - Write the matching PLAN patch to `{{plan_patch_path}}`.
 - Write a short human-readable report to `{{expansion_report_path}}`.
 - Write `agent_status.json` in `{{role_output_dir}}`.
-- The proposal must satisfy `runtime/schemas/expansion_proposal.schema.json`.
+- The proposal must satisfy the referenced expansion proposal schema.
+- Never create scientific tasks in response to provider quota, runner outage,
+  stale supervision, malformed background state, or another infrastructure
+  failure. Preserve/retry the original task through infrastructure recovery.
+  An operational failure may motivate an operational repair task, and it must
+  never suppress independently justified scientific work. Scientific
+  self-expansion still requires a semantic evidence or objective gap.
+- In a research-owner workflow, distinguish claim admission from permission to
+  explore. Failure of one hypothesis, gate, dataset, model, or estimator closes
+  only the corresponding claim. It must not prohibit controlled experiments,
+  independent evidence tracks, alternative mathematical hypotheses, or broad
+  searches that remain within the project brief. When the high-level objective
+  is unmet and expansion budget remains, propose genuinely informative work
+  instead of a no-job closure packet.
+- Treat negative and weak aggregate results as branching evidence. First audit
+  implementation, design, power, comparator fairness, and data validity; then
+  propose a structurally different hypothesis or an independent diagnostic.
+  Preserve credible local positives as separate strata and propose mechanism
+  tests and independent replication rather than averaging them away.
+- `requires_human` is reserved for a concrete missing external authority or
+  input that an autonomous agent cannot obtain. A negative result, failed gate,
+  lack of a current positive, scientific ambiguity, or difficult planning is not
+  a reason to hand the workflow to a human.
 - Use only these `resolution_strategy` values:
   - `append_followup_only`
   - `reopen_failure_after_new_evidence`
@@ -24,6 +67,7 @@ Before proposing anything, read the project brief and shared context referenced 
   - `requires_human`
 - If targeting an exhausted failure, do not claim the failure is recovered. Use `reopen_failure_after_new_evidence` and add independent evidence tasks, or use `requires_human`.
 - In a fully autonomous workflow, `requires_human` and `supersede_task_with_approval` are invalid even though they remain schema values for human-governed workflows. Exhaust local repair, dedicated recovery-worker, control-plane, tooling-installation, and executable self-expansion options first.
+- A diagnostic, decomposition, or evidence task added for an unresolved or exhausted failure must not depend on the failed target task itself. Depend only on already completed/skipped prerequisites and any schedulable new tasks; otherwise the follow-up can never run and validation will fail.
 - If targeting an objective gap, use `expansion_type: "objective_gap"`, include `target_objective_ids`, prefer `resolution_strategy: "append_followup_only"`, and add the smallest follow-up work likely to close those objectives. Every objective-gap `new_tasks` entry must include `objective_links` naming the objective ids it is intended to close.
 - For objective gaps, respect the structural gate:
   - `phase_objective_gap` must use `plan_patch_operation: "insert_task_into_phase"`, set `target_phase_id`, and add task(s) inside that same phase as the next work before the phase objective checklist.

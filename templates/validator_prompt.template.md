@@ -9,14 +9,18 @@ the actual work delivered.
 
 ## Read First
 
-- `{{brief_file}}`
-- `{{shared_context_file}}`
-- `{{plan_file}}`
-- worker run directory: `{{worker_run_dir}}`
 - context manifest: `{{context_manifest_path}}`
 - deterministic validation draft: `{{deterministic_validation_path}}`
 - worker status: `{{agent_status_path}}`
 - worker report: `{{report_path}}`
+- the specific primary artifacts named by those files
+
+Read `{{brief_file}}`, `{{shared_context_file}}`, or `{{plan_file}}` only when a
+specific ambiguity cannot be resolved from the target task block and selected
+evidence. Do not review unrelated tasks or the full workflow history.
+Do not require proof that a worker reopened unchanged historical documents when
+a hash-indexed campaign digest establishes their identity; inspect originals
+only for a named unresolved claim or hash discrepancy.
 
 ## Untrusted Input Rule
 
@@ -73,6 +77,10 @@ Deterministic status summary:
    should trigger recovery/self-expansion.
 4. Do not mutate `{{plan_file}}`, latest pointers, runtime state, read models,
    or completion markers.
+5. Keep the review bounded to this task. Do not rerun broad experiments, hash
+   entire historical result trees, or reconstruct the worker's investigation.
+   A deterministic failure normally routes directly to targeted recovery; this
+   semantic role is intended for passing high-risk or claim-bearing evidence.
 
 ## Output Requirements
 

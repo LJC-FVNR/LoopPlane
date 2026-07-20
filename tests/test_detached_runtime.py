@@ -482,6 +482,40 @@ class DetachedRuntimeTest(unittest.TestCase):
             self.assertEqual(status["metadata"]["last_loop_reason"], "complete")
             self.assertNotEqual(status["metadata"].get("stop_reason"), "exception:SchedulerLockError")
 
+    def test_supervisor_retries_stale_scheduler_instance_lock_during_startup(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "Detached stale scheduler-instance lock retry.")
+            duplicate_tick = {
+                "ok": False,
+                "status": "duplicate_scheduler",
+                "exit_code": 11,
+                "message": "lock is already held",
+                "selected_action": None,
+            }
+            completed_tick = {
+                "ok": True,
+                "status": "ok",
+                "exit_code": 0,
+                "selected_action": {
+                    "action": "complete",
+                    "reason": "Workflow is complete.",
+                    "selected": {},
+                },
+            }
+
+            with mock.patch(
+                "runtime.detached.run_scheduler",
+                side_effect=[duplicate_tick, completed_tick],
+            ) as run_scheduler_mock, mock.patch("runtime.detached.time.sleep") as sleep_mock:
+                exit_code = run_supervisor(project)
+
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(run_scheduler_mock.call_count, 2)
+            self.assertEqual(sleep_mock.call_args_list[0].args[0], 5.0)
+            status = load_supervisor_status(project)
+            self.assertEqual(status["metadata"]["last_loop_reason"], "complete")
+
     def test_detached_supervisor_continues_after_recoverable_validation_follow_up_failure(self) -> None:
         selected = {"action": "run_worker"}
         follow_up = {

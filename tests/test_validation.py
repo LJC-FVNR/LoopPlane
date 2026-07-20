@@ -219,6 +219,62 @@ def configure_broken_validator_agent(project: Path) -> None:
     config_path.write_text(json.dumps(config, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
+def configure_fake_validator_fallback(project: Path) -> None:
+    script = project / ".loopplane" / "config" / "fake_validator_fallback.py"
+    script.write_text(
+        r'''
+import json
+import os
+import pathlib
+
+
+review_path = pathlib.Path(os.environ["LOOPPLANE_VALIDATOR_REVIEW_PATH"])
+review_path.parent.mkdir(parents=True, exist_ok=True)
+review_path.write_text(
+    json.dumps(
+        {
+            "schema_version": "1.0",
+            "workflow_id": os.environ.get("LOOPPLANE_WORKFLOW_ID"),
+            "run_id": os.environ.get("LOOPPLANE_RUN_ID"),
+            "task_id": os.environ.get("LOOPPLANE_TASK_ID"),
+            "status": "accepted",
+            "confidence": "high",
+            "rationale": "The fallback validator independently accepted the evidence.",
+            "evidence_reviewed": ["report.md"],
+            "material_gaps": [],
+            "recommended_action": "accept",
+        },
+        indent=2,
+        sort_keys=True,
+    )
+    + "\n",
+    encoding="utf-8",
+)
+''',
+        encoding="utf-8",
+    )
+    config_path = project / ".loopplane" / "config" / "agent_runners.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config["runners"]["worker_fallback"]["enabled"] = True
+    config["runners"]["validator_fallback"] = {
+        "inherits": "worker_fallback",
+        "role": "validator",
+        "adapter": "shell",
+        "command": sys.executable,
+        "args": [script.as_posix()],
+        "cwd": "{{project_root}}",
+        "prompt_delivery": {"mode": "stdin"},
+        "enabled": True,
+    }
+    config["runner_failover"]["validator"] = {
+        "strategy": "ordered",
+        "runners": ["validator", "validator_fallback"],
+        "mark_unhealthy_after": 1,
+        "failure_window_seconds": 900,
+    }
+    config_path.write_text(json.dumps(config, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
 def write_absorption_plan(project: Path, tasks: list[dict[str, object]]) -> None:
     disable_default_validator_agent(project)
     workflow = json.loads((project / ".loopplane" / "config" / "workflow.json").read_text(encoding="utf-8"))
@@ -351,6 +407,7 @@ class AuthoritativeValidatorTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             project = Path(tmp) / "project"
             init_project(project, "Agentic validation override.")
+            set_validator_agent_mode(project, "on_deterministic_failure")
             write_plan(project, validation="file_exists: artifacts/result.txt")
             configure_fake_validator_agent(project, status="accepted")
             run_dir = write_worker_run(
@@ -379,12 +436,33 @@ class AuthoritativeValidatorTest(unittest.TestCase):
 
             self.assertEqual(validation["status"], "pass", json.dumps(validation, indent=2, sort_keys=True))
             self.assertEqual(validation["validator"], "deterministic_validation_evidence_collector")
-            self.assertEqual(validation["validator_agent_policy"]["mode"], "on_deterministic_failure")
+            self.assertEqual(validation["validator_agent_policy"]["mode"], "high_risk_pass_only")
             self.assertFalse(validation["validator_agent_policy"]["run"])
-            self.assertEqual(validation["validator_agent_policy"]["reason"], "deterministic_validation_passed")
+            self.assertEqual(
+                validation["validator_agent_policy"]["reason"],
+                "deterministic_validation_passed_low_or_medium_risk",
+            )
             self.assertNotIn("validator_agent", validation)
             self.assertEqual(validation["accepted_task_ids"], ["T001"])
             self.assertEqual(validation["rejected_task_ids"], [])
+
+    def test_default_validator_routes_deterministic_failure_directly_to_recovery(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "Deterministic failure should not trigger duplicate semantic review.")
+            write_plan(project, validation="file_exists: artifacts/result.txt")
+            configure_fake_validator_agent(project, status="accepted")
+            run_dir = write_worker_run(project, create_artifact=False)
+
+            validation = run_validator(project, task_id="T001", run_dir=run_dir)
+
+            self.assertEqual(validation["status"], "fail")
+            self.assertFalse(validation["validator_agent_policy"]["run"])
+            self.assertEqual(
+                validation["validator_agent_policy"]["reason"],
+                "deterministic_failure_routes_directly_to_recovery",
+            )
+            self.assertNotIn("validator_agent", validation)
 
     def test_validator_agent_always_mode_fails_closed_when_agent_unavailable(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -433,6 +511,34 @@ class AuthoritativeValidatorTest(unittest.TestCase):
             self.assertTrue(
                 any("Required validator agent failed" in failure for failure in validation["failures"]),
                 json.dumps(validation, indent=2, sort_keys=True),
+            )
+
+    def test_required_validator_uses_ordered_fallback_when_primary_runner_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "Validator runner failover fixture.")
+            write_plan(project, validation="file_exists: artifacts/result.txt; command_exit_code: 0")
+            set_validator_agent_mode(project, "always")
+            configure_broken_validator_agent(project)
+            configure_fake_validator_fallback(project)
+            run_dir = write_worker_run(project, create_artifact=True)
+
+            validation = run_validator(project, task_id="T001", run_dir=run_dir)
+
+            self.assertEqual(validation["status"], "pass", json.dumps(validation, indent=2, sort_keys=True))
+            validator = validation["validator_agent"]
+            self.assertEqual(validator["runner_id"], "validator_fallback")
+            self.assertTrue(validator["validator_failover"]["used_fallback"])
+            self.assertEqual(
+                validator["validator_failover"]["configured_runner_ids"],
+                ["validator", "validator_fallback"],
+            )
+            self.assertEqual(len(validator["runner_attempts"]), 2)
+            self.assertFalse(validator["runner_attempts"][0]["ok"])
+            self.assertTrue(validator["runner_attempts"][1]["ok"])
+            self.assertNotEqual(
+                validator["runner_attempts"][0]["role_output_dir"],
+                validator["runner_attempts"][1]["role_output_dir"],
             )
 
     def test_file_exists_accepts_comma_separated_paths(self) -> None:

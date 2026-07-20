@@ -19,7 +19,7 @@ from runtime.control import record_control_request
 from runtime.exit_codes import EXIT_GENERIC_FAILURE, EXIT_INVALID_CONFIG, EXIT_SUCCESS
 from runtime.path_resolution import WorkflowPathError, WorkflowPaths, load_workflow_config
 from runtime.reconciliation import reconciliation_exit_code, run_reconciler
-from runtime.scheduler import SchedulerLockError, run_scheduler, scheduler_exit_code
+from runtime.scheduler import EXIT_DUPLICATE_SCHEDULER, SchedulerLockError, run_scheduler, scheduler_exit_code
 from runtime.validation import run_validator, validation_exit_code
 
 
@@ -48,6 +48,11 @@ SUPERVISOR_HEARTBEAT_INTERVAL_SECONDS = _positive_float_from_env(
     SUPERVISOR_HEARTBEAT_TTL_SECONDS / 4,
 )
 BACKGROUND_WAIT_INTERVAL_SECONDS = _positive_float_from_env("LOOPPLANE_BACKGROUND_WAIT_INTERVAL_SECONDS", 60.0)
+DUPLICATE_SCHEDULER_STARTUP_GRACE_SECONDS = _positive_float_from_env(
+    "LOOPPLANE_DUPLICATE_SCHEDULER_STARTUP_GRACE_SECONDS",
+    150.0,
+)
+DUPLICATE_SCHEDULER_RETRY_INTERVAL_SECONDS = 5.0
 TERMINAL_SUPERVISOR_STATUSES = frozenset(
     {
         "completed",
@@ -155,7 +160,11 @@ def start_detached_scheduler(project_root: Path | str) -> dict[str, Any]:
     }
 
 
-def resume_detached_scheduler(project_root: Path | str) -> dict[str, Any]:
+def resume_detached_scheduler(
+    project_root: Path | str,
+    *,
+    clear_runner_availability_holds: bool = False,
+) -> dict[str, Any]:
     project = Path(project_root).expanduser().resolve()
     started_at = utc_timestamp()
     try:
@@ -164,7 +173,8 @@ def resume_detached_scheduler(project_root: Path | str) -> dict[str, Any]:
         return _failure(project, f"Unable to load workflow configuration: {error}", started_at=started_at)
     paths = context["paths"]
 
-    control_result = record_control_request(project, "resume", source="cli")
+    payload = {"clear_runner_availability_holds": True} if clear_runner_availability_holds else None
+    control_result = record_control_request(project, "resume", source="cli", payload=payload)
     if not control_result.get("ok"):
         result = dict(control_result)
         result["supervisor"] = load_supervisor_status(project)
@@ -274,6 +284,8 @@ def run_supervisor(project_root: Path | str, *, poll_interval_seconds: float = D
     previous_action_failure_signature: str | None = None
     consecutive_action_failures = 0
     action_failure_repeat_limit = _action_failure_repeat_limit(context["workflow"])
+    startup_duplicate_first_seen: float | None = None
+    successful_scheduler_tick = False
     try:
         while True:
             _heartbeat(paths, owner=owner, status="running")
@@ -298,6 +310,29 @@ def run_supervisor(project_root: Path | str, *, poll_interval_seconds: float = D
                 )
                 time.sleep(poll_interval)
                 continue
+            if scheduler_exit_code(result) == EXIT_DUPLICATE_SCHEDULER and not successful_scheduler_tick:
+                now = time.monotonic()
+                startup_duplicate_first_seen = (
+                    startup_duplicate_first_seen if startup_duplicate_first_seen is not None else now
+                )
+                elapsed = max(0.0, now - startup_duplicate_first_seen)
+                if elapsed <= DUPLICATE_SCHEDULER_STARTUP_GRACE_SECONDS:
+                    _merge_supervisor_metadata(
+                        paths,
+                        {
+                            "status": "running",
+                            "updated_at": utc_timestamp(),
+                            "heartbeat_at": utc_timestamp(),
+                            "last_action": "duplicate_scheduler_startup_retry",
+                            "last_loop_reason": "duplicate_scheduler_startup_grace",
+                            "last_scheduler_result": _compact_scheduler_result(result),
+                            "duplicate_scheduler_retry_elapsed_seconds": elapsed,
+                            "duplicate_scheduler_retry_grace_seconds": DUPLICATE_SCHEDULER_STARTUP_GRACE_SECONDS,
+                        },
+                    )
+                    time.sleep(DUPLICATE_SCHEDULER_RETRY_INTERVAL_SECONDS)
+                    continue
+            successful_scheduler_tick = True
             selected = result.get("selected_action") if isinstance(result.get("selected_action"), Mapping) else {}
             action = str(selected.get("action") or "")
             follow_up = _complete_worker_follow_up(project, selected)

@@ -72,6 +72,23 @@ LOOPPLANE_PLAN_APPEND_BEGIN
 LOOPPLANE_PLAN_APPEND_END
 ```
 
+If `PLAN_PATCH.md` modifies existing tasks, wrap only the complete resulting
+task block or blocks in:
+
+```text
+LOOPPLANE_PLAN_REPLACE_BEGIN
+- [ ] EXISTING_TASK_ID: Complete resulting task block
+  - acceptance: ...
+  ... all preserved required fields ...
+LOOPPLANE_PLAN_REPLACE_END
+```
+
+Declare `plan_patch.type` as `replace_tasks` in
+`change_request_response.json`. Every replacement ID must already occur exactly
+once in the active plan. Include the active plan SHA-256 as
+`target_plan_sha256` in `PLAN_PATCH.md`; replacement fails closed if that guard
+is stale. Do not mix appended and replaced tasks in one patch.
+
 The response may propose a patch and request approval, but it must not mutate
 `{{plan_file}}`. The reconciler is the only component allowed to apply an
 approved `PLAN_PATCH.md` to the active plan.
