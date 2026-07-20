@@ -217,6 +217,12 @@ evidence, then use a structural clause such as `file_exists: report.md` plus a
 stable `report_contains:` marker that the validator agent can interpret in
 context.
 
+When a workflow's acceptance depends on appearance, include explicit inspection
+of the exact release candidates with an available visual-inspection capability.
+Use the visual criteria declared by the brief or referenced protocol. File
+existence, hashes, geometry, source code, and producer-written reports are not
+sufficient evidence for criteria that require looking at the artifact.
+
 Before writing the draft, self-check that:
 
 - every executable task line matches the exact checkbox grammar;
@@ -230,6 +236,8 @@ Before writing the draft, self-check that:
 - the plan has a `## Final Objective Checklist`;
 - objectives are high-level delivery gates with `verifier: objective_verifier`
   and `unmet_action: self_expand`.
+- appearance-dependent workflows contain direct-artifact review tasks when the
+  brief or acceptance criteria require them.
 
 ## Output Requirements
 

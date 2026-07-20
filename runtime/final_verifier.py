@@ -107,6 +107,97 @@ class FinalVerifierTask:
         return _first_field(self.fields, "deliverables", "final_deliverables") or ""
 
 
+def final_verification_input_fingerprint(
+    paths: WorkflowPaths,
+    *,
+    tasks: Sequence[FinalVerifierTask] | None = None,
+    plan_sha256: str | None = None,
+) -> dict[str, Any]:
+    """Return a deterministic digest of the inputs that can change a final verdict.
+
+    The plan digest captures task/objective structure and terminal markers.  The
+    per-task digest additionally binds each latest pointer, its authoritative
+    validation, and the selected evidence-run tree.  Timestamps and filesystem
+    metadata are deliberately excluded from the fingerprint.
+    """
+
+    resolved_plan_sha256 = plan_sha256 or _sha256_file(paths.plan_file)
+    if tasks is None:
+        try:
+            plan_text = paths.plan_file.read_text(encoding="utf-8")
+            parsed_tasks, _errors = _parse_plan_tasks(plan_text)
+        except OSError:
+            parsed_tasks = []
+    else:
+        parsed_tasks = list(tasks)
+
+    state = _read_json_object(paths.runtime_dir / "state.json", default={})
+    recorded_active_plan_sha256 = str(state.get("active_plan_sha256") or "") or None
+    task_records = [
+        _final_verification_task_input_record(paths, task)
+        for task in parsed_tasks
+    ]
+    task_payload = json.dumps(task_records, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    task_validation_evidence_sha256 = "sha256:" + sha256(task_payload).hexdigest()
+    payload = {
+        "schema_version": "1.0",
+        "active_plan_sha256": resolved_plan_sha256,
+        "recorded_active_plan_sha256": recorded_active_plan_sha256,
+        "task_validation_evidence_sha256": task_validation_evidence_sha256,
+        "tasks": task_records,
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return {
+        "schema_version": "1.0",
+        "algorithm": "sha256",
+        "fingerprint": "sha256:" + sha256(encoded).hexdigest(),
+        "active_plan_sha256": resolved_plan_sha256,
+        "recorded_active_plan_sha256": recorded_active_plan_sha256,
+        "task_validation_evidence_sha256": task_validation_evidence_sha256,
+        "task_count": len(task_records),
+        "terminal_task_count": sum(1 for record in task_records if record.get("status") in {"x", "-"}),
+    }
+
+
+def final_verification_report_freshness(
+    paths: WorkflowPaths,
+    report: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Compare a final report with current authoritative final-verifier inputs."""
+
+    current = final_verification_input_fingerprint(paths)
+    raw_report_fingerprint = report.get("input_fingerprint")
+    if isinstance(raw_report_fingerprint, Mapping):
+        report_fingerprint = str(
+            raw_report_fingerprint.get("fingerprint")
+            or raw_report_fingerprint.get("sha256")
+            or ""
+        )
+    else:
+        report_fingerprint = str(raw_report_fingerprint or "")
+    if report_fingerprint:
+        current_fingerprint = str(current.get("fingerprint") or "")
+        stale_reasons = [] if report_fingerprint == current_fingerprint else ["input_fingerprint_mismatch"]
+        components = report.get("input_fingerprint_components")
+        if isinstance(components, Mapping):
+            report_plan_sha256 = str(components.get("active_plan_sha256") or "")
+            if report_plan_sha256 and report_plan_sha256 != str(current.get("active_plan_sha256") or ""):
+                stale_reasons.append("active_plan_sha256_mismatch")
+            report_evidence_sha256 = str(components.get("task_validation_evidence_sha256") or "")
+            if report_evidence_sha256 and report_evidence_sha256 != str(current.get("task_validation_evidence_sha256") or ""):
+                stale_reasons.append("task_validation_evidence_sha256_mismatch")
+        return {
+            "fresh": not stale_reasons,
+            "mode": "input_fingerprint",
+            "stale_reasons": _dedupe_strings(stale_reasons),
+            "report_input_fingerprint": report_fingerprint,
+            "current_input_fingerprint": current_fingerprint,
+            "current_components": current,
+        }
+
+    return _legacy_final_verification_report_freshness(paths, report, current=current)
+
+
 def run_final_verifier(
     project_root: Path | str,
     *,
@@ -128,6 +219,7 @@ def run_final_verifier(
     warnings: list[str] = []
     tasks: list[FinalVerifierTask] = []
     final_reviewer_result: dict[str, Any] | None = None
+    runner_availability: dict[str, Any] | None = None
     objectives = []
     objective_parse_errors: list[str] = []
     plan_sha = _sha256_file(paths.plan_file)
@@ -184,6 +276,11 @@ def run_final_verifier(
     checks.append(task_state_check)
     latest_check, manifest_task_records = _check_latest_and_validations(project, paths, tasks)
     checks.append(latest_check)
+    input_fingerprint = final_verification_input_fingerprint(
+        paths,
+        tasks=tasks,
+        plan_sha256=plan_sha,
+    )
     latest_details = latest_check.get("details") if isinstance(latest_check.get("details"), Mapping) else {}
     warnings.extend(str(warning) for warning in latest_details.get("warnings", []) if str(warning))
     checks.append(_check_skipped_tasks(tasks))
@@ -245,6 +342,9 @@ def run_final_verifier(
             write=write,
         )
     if final_reviewer_result is not None:
+        availability = final_reviewer_result.get("runner_availability")
+        if isinstance(availability, Mapping):
+            runner_availability = _json_safe(availability)
         checks.append(_final_reviewer_check(final_reviewer_result))
         if final_reviewer_result.get("warning"):
             warnings.append(str(final_reviewer_result["warning"]))
@@ -382,10 +482,15 @@ def run_final_verifier(
             )
         )
 
-    status = _status_from_checks(checks)
+    verification_status = _status_from_checks(checks)
+    status = "waiting_runner_availability" if runner_availability is not None else verification_status
     blockers = _blockers(checks)
     if status != "pass" and write:
-        _update_runtime_state(paths, status="final_verification_failed", scheduler_update={"last_action": "run_final_verification", "owner": owner})
+        _update_runtime_state(
+            paths,
+            status=status if runner_availability is not None else "final_verification_failed",
+            scheduler_update={"last_action": "run_final_verification", "owner": owner},
+        )
 
     report = {
         "schema_version": SCHEMA_VERSION,
@@ -401,6 +506,13 @@ def run_final_verifier(
         "write_requested": requested_write,
         "write_performed": bool(write),
         "force": bool(force),
+        "input_fingerprint": input_fingerprint["fingerprint"],
+        "input_fingerprint_schema_version": input_fingerprint["schema_version"],
+        "input_fingerprint_components": {
+            key: value
+            for key, value in input_fingerprint.items()
+            if key not in {"fingerprint", "algorithm", "schema_version"}
+        },
         "evidence_manifest": _path_for_record(project, evidence_manifest_path),
         "evidence_manifest_sha256": _sha256_file(evidence_manifest_path),
         "archived_completion_markers": archived_markers,
@@ -408,6 +520,8 @@ def run_final_verifier(
         "read_model_rebuild": _compact_read_model_result(read_model_result),
         "projection_sync": projection_sync,
         "final_reviewer": final_reviewer_result,
+        "runner_availability": runner_availability,
+        "next_step": "runner_availability_wait" if runner_availability is not None else None,
     }
     report_path = paths.runtime_dir / FINAL_REPORT_FILENAME
     if write:
@@ -568,7 +682,7 @@ def _run_final_reviewer_agent(
 
     review = _read_json_object(review_path, default={})
     ok = output.exit_code == 0 and not output.timed_out and isinstance(review, Mapping) and bool(review)
-    return {
+    result = {
         **base,
         "status": "agent_reviewed" if ok else "agent_failed",
         "ok": ok,
@@ -581,6 +695,10 @@ def _run_final_reviewer_agent(
         "review": _json_safe(review if isinstance(review, Mapping) else {}),
         "error": None if ok else "final reviewer agent did not produce a readable final_reviewer_report.json",
     }
+    availability = output.adapter_metadata.get("runner_availability")
+    if isinstance(availability, Mapping) and availability.get("status") == "unavailable":
+        result["runner_availability"] = _json_safe(availability)
+    return result
 
 
 def _final_reviewer_hard_blockers(checks: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
@@ -1000,6 +1118,175 @@ def _manifest_tasks_by_id(records: Sequence[Mapping[str, Any]]) -> dict[str, dic
             continue
         tasks[task_id] = dict(record)
     return tasks
+
+
+def _final_verification_task_input_record(
+    paths: WorkflowPaths,
+    task: FinalVerifierTask,
+) -> dict[str, Any]:
+    record: dict[str, Any] = {
+        "task_id": task.task_id,
+        "status": task.status,
+        "evidence_root": task.evidence_root,
+        "latest_path": task.latest_path_value or None,
+    }
+    if task.status != "x":
+        return record
+
+    latest_path = _latest_path(paths.project_root, paths, task)
+    latest = _read_json_object(latest_path, default={})
+    record["latest_path"] = _path_for_record(paths.project_root, latest_path)
+    record["latest_sha256"] = _sha256_file(latest_path)
+    if not latest:
+        record["latest_state"] = "missing_or_malformed"
+        return record
+
+    validation_path = _project_path(paths.project_root, latest.get("validation_path"))
+    latest_run_dir = _project_path(paths.project_root, latest.get("latest_run_dir"))
+    if latest_run_dir is None and validation_path is not None:
+        latest_run_dir = validation_path.parent
+    record.update(
+        {
+            "latest_run_id": latest.get("latest_run_id"),
+            "latest_run_dir": _path_for_record(paths.project_root, latest_run_dir),
+            "validation_path": _path_for_record(paths.project_root, validation_path),
+            "validation_status": latest.get("validation_status"),
+            "validation_sha256": _sha256_file(validation_path),
+            "evidence_run_tree": _directory_tree_fingerprint(paths.project_root, latest_run_dir),
+        }
+    )
+    return record
+
+
+def _directory_tree_fingerprint(project: Path, root: Path | None) -> dict[str, Any] | None:
+    if root is None:
+        return None
+    root_record = _path_for_record(project, root)
+    if not root.is_dir():
+        return {"path": root_record, "state": "missing_or_not_directory", "file_count": 0, "tree_sha256": None}
+    entries: list[dict[str, Any]] = []
+    try:
+        candidates = sorted(root.rglob("*"), key=lambda item: item.relative_to(root).as_posix())
+    except OSError:
+        candidates = []
+    for path in candidates:
+        relative = path.relative_to(root).as_posix()
+        try:
+            if path.is_symlink():
+                entries.append({"path": relative, "kind": "symlink", "target": path.readlink().as_posix()})
+            elif path.is_file():
+                entries.append({"path": relative, "kind": "file", "sha256": _sha256_file(path)})
+        except OSError as error:
+            entries.append({"path": relative, "kind": "unreadable", "error": error.__class__.__name__})
+    encoded = json.dumps(entries, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return {
+        "path": root_record,
+        "state": "present",
+        "file_count": len(entries),
+        "tree_sha256": "sha256:" + sha256(encoded).hexdigest(),
+    }
+
+
+def _legacy_final_verification_report_freshness(
+    paths: WorkflowPaths,
+    report: Mapping[str, Any],
+    *,
+    current: Mapping[str, Any],
+) -> dict[str, Any]:
+    stale_reasons: list[str] = []
+    checked_at = _parse_utc_timestamp(report.get("checked_at"))
+    if checked_at is None:
+        stale_reasons.append("legacy_checked_at_missing_or_invalid")
+
+    report_plan_sha256 = str(report.get("plan_sha256") or "")
+    if report_plan_sha256 and report_plan_sha256 != str(current.get("active_plan_sha256") or ""):
+        stale_reasons.append("legacy_plan_sha256_mismatch")
+
+    report_task_count = _legacy_report_task_count(report)
+    current_task_count = int(current.get("task_count") or 0)
+    if report_task_count is not None and report_task_count != current_task_count:
+        stale_reasons.append("legacy_task_count_mismatch")
+
+    newer_authoritative_records: list[dict[str, str]] = []
+    if checked_at is not None:
+        for record in _authoritative_task_update_times(paths):
+            updated_at = _parse_utc_timestamp(record.get("updated_at"))
+            if updated_at is not None and updated_at > checked_at:
+                newer_authoritative_records.append(
+                    {
+                        "task_id": str(record.get("task_id") or ""),
+                        "source": str(record.get("source") or ""),
+                        "updated_at": str(record.get("updated_at") or ""),
+                    }
+                )
+        if newer_authoritative_records:
+            stale_reasons.append("legacy_authoritative_task_state_newer_than_report")
+
+    return {
+        "fresh": not stale_reasons,
+        "mode": "legacy_timestamp_fallback",
+        "stale_reasons": _dedupe_strings(stale_reasons),
+        "report_checked_at": report.get("checked_at"),
+        "report_task_count": report_task_count,
+        "current_task_count": current_task_count,
+        "newer_authoritative_records": newer_authoritative_records,
+        "current_components": dict(current),
+    }
+
+
+def _legacy_report_task_count(report: Mapping[str, Any]) -> int | None:
+    checks = report.get("checks")
+    if not isinstance(checks, Sequence) or isinstance(checks, (str, bytes)):
+        return None
+    for check in checks:
+        if not isinstance(check, Mapping) or str(check.get("check") or "") != "plan_parseable":
+            continue
+        details = check.get("details") if isinstance(check.get("details"), Mapping) else {}
+        value = details.get("task_count")
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+def _authoritative_task_update_times(paths: WorkflowPaths) -> list[dict[str, str]]:
+    try:
+        plan_text = paths.plan_file.read_text(encoding="utf-8")
+        tasks, _errors = _parse_plan_tasks(plan_text)
+    except OSError:
+        return []
+    records: list[dict[str, str]] = []
+    for task in tasks:
+        if task.status != "x":
+            continue
+        latest_path = _latest_path(paths.project_root, paths, task)
+        latest = _read_json_object(latest_path, default={})
+        latest_updated_at = str(latest.get("updated_at") or "")
+        if latest_updated_at:
+            records.append({"task_id": task.task_id, "source": "latest", "updated_at": latest_updated_at})
+        validation_path = _project_path(paths.project_root, latest.get("validation_path"))
+        validation = _read_json_object(validation_path, default={}) if validation_path is not None else {}
+        for field in ("validated_at", "completed_at", "checked_at", "updated_at"):
+            value = str(validation.get(field) or "")
+            if value:
+                records.append({"task_id": task.task_id, "source": f"validation.{field}", "updated_at": value})
+    return records
+
+
+def _parse_utc_timestamp(value: object) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    normalized = value.strip()
+    if normalized.endswith("Z"):
+        normalized = normalized[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
 
 
 def _check_skipped_tasks(tasks: Sequence[FinalVerifierTask]) -> dict[str, Any]:

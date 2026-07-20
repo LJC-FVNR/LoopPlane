@@ -128,6 +128,7 @@ BACKGROUND_JOB_HEARTBEAT_TTL_SECONDS = 600
 BACKGROUND_JOB_PID_STARTUP_GRACE_SECONDS = 15
 BACKGROUND_REGISTRY_LOCK_TTL_SECONDS = 30
 BACKGROUND_REGISTRY_LOCK_WAIT_SECONDS = 35.0
+EVENT_APPEND_LOCK_WAIT_SECONDS = 5.0
 ALLOWED_BACKGROUND_JOB_STATUSES = frozenset(
     {
         "pending",
@@ -1589,6 +1590,18 @@ def select_next_action(snapshot: Mapping[str, Any]) -> dict[str, Any]:
 
     final = _final_verification_candidate(snapshot)
     if final is not None:
+        final_reviewer_candidates = _runner_candidates_for_role(snapshot, "final_reviewer")
+        if final_reviewer_candidates:
+            final_reviewer = _runner_for_role(snapshot, "final_reviewer")
+            if final_reviewer is None:
+                return _runner_wait_or_config_action(
+                    snapshot,
+                    roles=("final_reviewer",),
+                    config_reason="No available final reviewer runner is configured.",
+                    config_code="final_reviewer_runner_unavailable",
+                    considered=considered,
+                )
+            final["runner_id"] = final_reviewer.runner_id
         return _action(
             "run_final_verification",
             reason="No executable task remains; final verification gates selected.",
@@ -2056,7 +2069,7 @@ def append_event(
 ) -> dict[str, Any]:
     owner = f"event-append:{os.getpid()}:{uuid.uuid4().hex[:8]}"
     lock = AtomicOwnerLock(paths.runtime_dir / "lock" / "event_append_lock", owner, ttl_seconds=30)
-    with lock.acquire():
+    with lock.acquire(timeout_seconds=EVENT_APPEND_LOCK_WAIT_SECONDS):
         return _append_event_unlocked(
             paths,
             workflow_id=workflow_id,
@@ -2241,6 +2254,8 @@ def _execution_result_exit_code(action: str, result: Mapping[str, Any]) -> int:
 
 
 def _final_verification_result_exit_code(result: Mapping[str, Any]) -> int:
+    if isinstance(result.get("runner_availability"), Mapping):
+        return EXIT_RUNNER_UNAVAILABLE
     checks = result.get("checks")
     if isinstance(checks, Sequence) and not isinstance(checks, (str, bytes)):
         failed_checks = {
@@ -6533,8 +6548,16 @@ def _record_runner_health_event(
                 updated["last_seen_at"] = observed_at
                 updated["last_source_run_id"] = result.get("run_id")
                 updated["seen_count"] = _int_value(updated.get("seen_count"), default=1) + 1
-                if hold.get("cooldown_until"):
-                    updated["cooldown_until"] = hold.get("cooldown_until")
+                for field in (
+                    "cooldown_until",
+                    "retry_after_seconds",
+                    "recoverability",
+                    "requires_attention",
+                    "confidence",
+                    "message_excerpt",
+                ):
+                    if hold.get(field) is not None:
+                        updated[field] = hold.get(field)
                 record["availability_hold"] = updated
                 availability_transition = {"transition": "updated", "hold": updated}
             else:
@@ -7461,7 +7484,42 @@ def _resolve_cwd(project: Path, cwd: str) -> Path:
 def _run_final_verification(paths: WorkflowPaths, snapshot: Mapping[str, Any], *, owner: str) -> dict[str, Any]:
     from runtime.final_verifier import run_final_verifier
 
-    return run_final_verifier(paths.project_root, owner=owner, write=True)
+    result = run_final_verifier(paths.project_root, owner=owner, write=True)
+    availability = result.get("runner_availability")
+    if not isinstance(availability, Mapping):
+        return result
+
+    final_reviewer = result.get("final_reviewer")
+    reviewer = final_reviewer if isinstance(final_reviewer, Mapping) else {}
+    health_result = {
+        "schema_version": SCHEMA_VERSION,
+        "ok": False,
+        "status": "waiting_runner_availability",
+        "classification": "runner_unavailable",
+        "workflow_id": str(result.get("workflow_id") or snapshot.get("workflow_id") or ""),
+        "run_id": reviewer.get("run_id"),
+        "task_id": None,
+        "role": "final_reviewer",
+        "runner_id": str(reviewer.get("runner_id") or "final_reviewer"),
+        "adapter": reviewer.get("adapter"),
+        "adapter_exit_code": reviewer.get("exit_code"),
+        "adapter_timed_out": reviewer.get("timed_out"),
+        "failure_scope": "runner",
+        "ended_at": str(result.get("checked_at") or utc_timestamp()),
+        "runner_availability": _json_safe_object(availability),
+    }
+    runner_health_update = _record_runner_health_event(
+        paths=paths,
+        workflow_id=str(health_result["workflow_id"]),
+        result=health_result,
+    )
+    if runner_health_update:
+        result["runner_health_update"] = dict(runner_health_update)
+        result["runner_health_path"] = _path_for_record(
+            paths.project_root,
+            paths.runtime_dir / RUNNER_HEALTH_FILENAME,
+        )
+    return result
 
 
 def run_objective_verifier_once(

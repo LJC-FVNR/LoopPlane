@@ -248,7 +248,11 @@ def _matched_line(text: str, found: re.Match[str]) -> str:
 
 def _cooldown_seconds_from_retry_at(message: str, *, now: datetime) -> int | None:
     found = re.search(
-        r"\btry again (?:at|after)\s+(?P<hour>\d{1,2})(?::(?P<minute>\d{2}))?\s*(?P<period>[ap]\.?m\.?)\b",
+        r"\btry again (?:at|after)\s+"
+        r"(?:(?P<month>jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|"
+        r"jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+"
+        r"(?P<day>\d{1,2})(?:st|nd|rd|th)?(?:,?\s+(?P<year>\d{4}))?\s+(?:at\s+)?)?"
+        r"(?P<hour>\d{1,2})(?::(?P<minute>\d{2}))?\s*(?P<period>[ap]\.?m\.?)\b",
         message,
         flags=re.IGNORECASE,
     )
@@ -263,11 +267,50 @@ def _cooldown_seconds_from_retry_at(message: str, *, now: datetime) -> int | Non
         hour += 12
     elif period == "am" and hour == 12:
         hour = 0
-    target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    month_text = found.group("month")
+    if month_text:
+        month_lookup = {
+            "jan": 1,
+            "feb": 2,
+            "mar": 3,
+            "apr": 4,
+            "may": 5,
+            "jun": 6,
+            "jul": 7,
+            "aug": 8,
+            "sep": 9,
+            "oct": 10,
+            "nov": 11,
+            "dec": 12,
+        }
+        month = month_lookup[month_text[:3].lower()]
+        day = int(found.group("day"))
+        explicit_year = found.group("year")
+        year = int(explicit_year) if explicit_year else now.year
+        try:
+            target = now.replace(
+                year=year,
+                month=month,
+                day=day,
+                hour=hour,
+                minute=minute,
+                second=0,
+                microsecond=0,
+            )
+        except ValueError:
+            return None
+        if explicit_year is None and target < now - timedelta(hours=12):
+            try:
+                target = target.replace(year=target.year + 1)
+            except ValueError:
+                return None
+    else:
+        target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
     seconds = int((target - now).total_seconds())
     if seconds <= 0:
-        # A just-expired absolute retry time should not become a next-day hold.
-        if seconds >= -12 * 60 * 60:
+        # An explicit past date and a just-expired time both mean retry soon;
+        # neither should become an accidental next-day or next-year hold.
+        if month_text or seconds >= -12 * 60 * 60:
             return RETRY_AT_BUFFER_SECONDS
         target += timedelta(days=1)
         seconds = int((target - now).total_seconds())

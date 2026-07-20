@@ -89,6 +89,13 @@ budget before using a human-blocked status.
    After validation, remove common local test caches you created, such as
    `.pytest_cache/` and `__pycache__/`, unless the task explicitly asks to
    preserve them.
+   When task acceptance depends on appearance, inspect the exact candidate with
+   an available visual-inspection capability and record observations tied to
+   concrete locations. Apply the visual criteria declared by the task, brief,
+   and plan. Do not infer visual acceptance from source code, hashes, geometry,
+   captions, filenames, or producer-written reports. If required inspection is
+   unavailable, report the missing evidence so recovery can route the task to a
+   capable runner.
 10. Write `metadata.json`, `report.md`, `agent_status.json`, and `commands.sh`.
     `agent_status.json` must use schema `"{{schema_version}}"`, one canonical
     status from the manifest output contract, and include `validation_claim`,

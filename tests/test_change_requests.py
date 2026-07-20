@@ -138,6 +138,94 @@ print("fake change request planner wrote PLAN_PATCH.md")
     config_path.write_text(json.dumps(config, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
+def configure_fake_structural_change_request_planner(project: Path) -> None:
+    script = project / ".loopplane" / "config" / "fake_structural_change_request_planner.py"
+    script.write_text(
+        r'''
+import json
+import os
+import pathlib
+
+change_request_id = os.environ.get("LOOPPLANE_CHANGE_REQUEST_ID", "cr_fixture")
+patch_path = pathlib.Path(os.environ["LOOPPLANE_PLAN_PATCH_PATH"])
+response_path = pathlib.Path(os.environ["LOOPPLANE_CHANGE_REQUEST_RESPONSE_PATH"])
+patch_path.parent.mkdir(parents=True, exist_ok=True)
+patch_path.write_text(
+    f"""# LoopPlane PLAN_PATCH
+
+- schema_version: 1.5
+- change_request_id: {change_request_id}
+- type: append_tasks
+- plan_patch_operation: insert_task_into_phase
+- target_phase_id: P0
+
+LOOPPLANE_PLAN_APPEND_BEGIN
+## Phase P0: Validation Fixture
+
+- [ ] CR.T002: Run the approved replacement path
+  - acceptance: The replacement path is complete.
+  - evidence: .loopplane/results/CR.T002/
+  - latest: .loopplane/results/CR.T002/latest.json
+  - depends_on: []
+  - risk: low
+  - validation: file_exists: report.md
+  - max_attempts: 2
+  - approval: not_required
+  - deliverables: report.md
+LOOPPLANE_PLAN_APPEND_END
+""",
+    encoding="utf-8",
+)
+response_path.write_text(
+    json.dumps(
+        {
+            "status": "proposal_created",
+            "impact": {
+                "scope_change": True,
+                "requires_approval": True,
+                "adds_tasks": ["CR.T002"],
+                "modifies_tasks": [],
+                "supersedes_tasks": ["T001"],
+            },
+            "plan_patch": {
+                "type": "append_tasks",
+                "operation": "insert_task_into_phase",
+                "target_phase_id": "P0",
+                "patch_file": str(patch_path),
+            },
+            "can_continue_before_resolution": False,
+        },
+        indent=2,
+        sort_keys=True,
+    )
+    + "\n",
+    encoding="utf-8",
+)
+print("fake structural change request planner wrote PLAN_PATCH.md")
+''',
+        encoding="utf-8",
+    )
+    config_path = project / ".loopplane" / "config" / "agent_runners.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config["runners"]["change_request_planner"].update(
+        {
+            "adapter": "shell",
+            "command": sys.executable,
+            "args": [script.as_posix()],
+            "cwd": "{{project_root}}",
+            "prompt_delivery": {"mode": "stdin"},
+            "permission_policy": {
+                "allow_project_file_edit": True,
+                "allow_command_execution": True,
+                "require_approval_for_risky_commands": False,
+                "read_only": False,
+            },
+            "enabled": True,
+        }
+    )
+    config_path.write_text(json.dumps(config, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
 def run_json(args: list[str]) -> tuple[int, dict[str, Any], str]:
     completed = subprocess.run(
         [sys.executable, str(LoopPlane), *args],
@@ -262,6 +350,65 @@ class ChangeRequestProtocolTest(unittest.TestCase):
             reasons = [checkpoint["reason"] for checkpoint in checkpoints]
             self.assertIn("before_change_request_apply", reasons)
             self.assertIn("after_change_request_apply", reasons)
+
+    def test_apply_preserves_structural_routing_and_supersedes_pending_task(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "Structural change request semantics.")
+            configure_fake_structural_change_request_planner(project)
+            write_plan(project)
+            workflow = json.loads((project / ".loopplane" / "config" / "workflow.json").read_text(encoding="utf-8"))
+            failure_registry = {
+                "schema_version": "1.5",
+                "workflow_id": workflow["workflow_id"],
+                "failures": [
+                    {
+                        "failure_id": "fail_fixture",
+                        "task_id": "T001",
+                        "status": "unrecovered",
+                        "recoverable": True,
+                    }
+                ],
+            }
+            (project / ".loopplane" / "runtime" / "failure_registry.json").write_text(
+                json.dumps(failure_registry, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+            )
+
+            submitted = run_json(
+                [
+                    "change-request",
+                    "submit",
+                    "--project",
+                    str(project),
+                    "Replace the failed task with a corrected path.",
+                    "--json",
+                ]
+            )[1]
+            change_request_id = submitted["change_request_id"]
+            code, reviewed, output = run_json(
+                ["change-request", "review", change_request_id, "--project", str(project), "--json"]
+            )
+            self.assertEqual(code, 0, output)
+            self.assertEqual(reviewed["status"], "approved")
+
+            code, applied, output = run_json(
+                ["change-request", "apply", change_request_id, "--project", str(project), "--json"]
+            )
+            self.assertEqual(code, 0, output)
+            self.assertEqual(applied["status"], "applied")
+            self.assertEqual(applied["apply_result"]["plan_patch_operation"], "insert_task_into_phase")
+            self.assertEqual(applied["apply_result"]["target_phase_id"], "P0")
+            self.assertEqual(applied["apply_result"]["superseded_tasks"], ["T001"])
+            self.assertEqual(applied["apply_result"]["recovered_superseded_failure_ids"], ["fail_fixture"])
+
+            plan_text = (project / "PLAN.md").read_text(encoding="utf-8")
+            self.assertEqual(plan_text.count("## Phase P0:"), 1)
+            self.assertIn("- [-] T001: Produce result artifact", plan_text)
+            self.assertIn(f"skip_authorization: change_request:{change_request_id}", plan_text)
+            self.assertIn("- [ ] CR.T002: Run the approved replacement path", plan_text)
+            registry = json.loads((project / ".loopplane" / "runtime" / "failure_registry.json").read_text(encoding="utf-8"))
+            self.assertEqual(registry["failures"][0]["status"], "recovered")
+            self.assertEqual(registry["failures"][0]["resolution"], "superseded_by_approved_change_request")
 
     def test_apply_requires_approval_and_preserves_plan_before_approval(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

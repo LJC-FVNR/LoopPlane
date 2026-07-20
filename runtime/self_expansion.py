@@ -233,10 +233,11 @@ def expansion_candidate(snapshot: Mapping[str, Any], *, mode: str = "default") -
     if mode in {"default", "final_failure"} and policy.get("allow_after_final_verification_failure"):
         final_report = _latest_final_verifier_failure(paths)
         if final_report is not None:
+            freshness = final_report.pop("_input_freshness", None)
             blockers = [dict(item) for item in final_report.get("blockers", []) if isinstance(item, Mapping)]
             expandable = [item for item in blockers if _final_verifier_blocker_allows_expansion(item)]
             if expandable or not blockers:
-                return {
+                candidate = {
                     "trigger": "final_verification_failed",
                     "run_kind": "self_expansion",
                     "policy": policy,
@@ -244,6 +245,9 @@ def expansion_candidate(snapshot: Mapping[str, Any], *, mode: str = "default") -
                     "final_verifier_report": _path_for_record(paths.project_root, paths.runtime_dir / "final_verification_report.json"),
                     "blockers": expandable or blockers,
                 }
+                if isinstance(freshness, Mapping):
+                    candidate["final_verifier_report_freshness"] = dict(freshness)
+                return candidate
 
     if mode in {"default", "objective_gap"} and policy.get("allow_after_objective_gap"):
         objective_gap = _objective_gap_from_snapshot(snapshot)
@@ -1598,7 +1602,14 @@ def _latest_final_verifier_failure(paths: WorkflowPaths) -> dict[str, Any] | Non
         return None
     if report.get("pass") is True or report.get("status") == "pass" or report.get("ok") is True:
         return None
-    return dict(report)
+    from runtime.final_verifier import final_verification_report_freshness
+
+    freshness = final_verification_report_freshness(paths, report)
+    if freshness.get("fresh") is not True:
+        return None
+    result = dict(report)
+    result["_input_freshness"] = freshness
+    return result
 
 
 def _final_verifier_blocker_allows_expansion(blocker: Mapping[str, Any]) -> bool:

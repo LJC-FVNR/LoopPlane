@@ -71,7 +71,16 @@ Deterministic status summary:
    too narrow, overly brittle, or missing the important semantic point.
 3. Identify material gaps, weak evidence, unresolved ambiguity, or work that
    should trigger recovery/self-expansion.
-4. Do not mutate `{{plan_file}}`, latest pointers, runtime state, read models,
+4. Cross-check the evidence properties required by the target task instead of
+   trusting declared statuses. Reconcile stated cardinalities, identities,
+   hashes, conservation rules, transformations, units, and acceptance
+   predicates when they are material. Independently reconstruct a sample or
+   aggregate when feasible, and reject unexplained duplication, reweighting,
+   incompatible pooling, or contradictions. Producer-authored `pass`,
+   `covered`, and `complete` strings are claims to audit, not facts. Apply the
+   domain-specific criteria declared by the brief, plan, task, and referenced
+   skill or protocol; do not invent a domain policy in this generic validator.
+5. Do not mutate `{{plan_file}}`, latest pointers, runtime state, read models,
    or completion markers.
 
 ## Output Requirements

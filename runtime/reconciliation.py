@@ -295,6 +295,9 @@ def apply_approved_plan_patch(
     before_checkpoint_id: str | None = None,
     plan_patch_operation: str = PLAN_PATCH_OPERATION_APPEND,
     target_phase_id: str | None = None,
+    supersede_task_ids: Sequence[str] = (),
+    supersede_reason: str = "",
+    supersede_authorization: str = "",
     write: bool = True,
 ) -> dict[str, Any]:
     project = Path(project_root).expanduser().resolve()
@@ -394,6 +397,17 @@ def apply_approved_plan_patch(
 
     structural_errors: list[str] = []
     added_phase_ids: list[str] = []
+    normalized_supersede_ids = list(dict.fromkeys(str(item).strip() for item in supersede_task_ids if str(item).strip()))
+    unknown_supersede_ids = sorted(set(normalized_supersede_ids) - set(existing_tasks))
+    if unknown_supersede_ids:
+        structural_errors.append(
+            "supersede_task_ids references task IDs not present in the active plan: " + ", ".join(unknown_supersede_ids)
+        )
+    patch_supersede_overlap = sorted(set(normalized_supersede_ids).intersection(patch_tasks))
+    if patch_supersede_overlap:
+        structural_errors.append(
+            "PLAN_PATCH.md cannot add and supersede the same task IDs: " + ", ".join(patch_supersede_overlap)
+        )
     normalized_target_phase_id = str(target_phase_id or "").strip()
     patch_phase_headings = _phase_headings(append_block)
     existing_phase_ids = {phase_id for _line_index, phase_id, _phase_title in _phase_headings(plan_text) if phase_id}
@@ -444,6 +458,9 @@ def apply_approved_plan_patch(
 
     added_tasks = list(patch_tasks)
     event: dict[str, Any] | None = None
+    superseded_tasks: list[str] = []
+    already_completed_superseded_tasks: list[str] = []
+    recovered_superseded_failure_ids: list[str] = []
     if write:
         if operation == PLAN_PATCH_OPERATION_INSERT_TASK_INTO_PHASE:
             updated_plan = _insert_plan_patch_tasks_into_phase(plan_text, append_block, phase_id=normalized_target_phase_id)
@@ -451,7 +468,21 @@ def apply_approved_plan_patch(
             updated_plan = _insert_plan_patch_phase_before_final_objectives(plan_text, append_block)
         else:
             updated_plan = _append_plan_patch_block(plan_text, append_block)
+        if normalized_supersede_ids:
+            updated_plan, superseded_tasks, already_completed_superseded_tasks = _mark_plan_tasks_superseded(
+                updated_plan,
+                task_ids=normalized_supersede_ids,
+                reason=supersede_reason or f"Superseded by approved change request {change_request_id}.",
+                authorization=supersede_authorization or f"change_request:{change_request_id}",
+            )
         _atomic_write_text(paths.plan_file, updated_plan)
+        if normalized_supersede_ids:
+            recovered_superseded_failure_ids = _mark_superseded_failures_recovered(
+                paths,
+                workflow_id=workflow_id,
+                task_ids=normalized_supersede_ids,
+                change_request_id=change_request_id,
+            )
         event = append_event(
             paths,
             workflow_id=workflow_id,
@@ -468,6 +499,9 @@ def apply_approved_plan_patch(
                 "added_phase_ids": added_phase_ids,
                 "plan_patch_operation": operation,
                 "target_phase_id": normalized_target_phase_id or None,
+                "superseded_tasks": superseded_tasks,
+                "already_completed_superseded_tasks": already_completed_superseded_tasks,
+                "recovered_superseded_failure_ids": recovered_superseded_failure_ids,
                 "updated_by": RECONCILER_NAME,
             },
         )
@@ -483,6 +517,8 @@ def apply_approved_plan_patch(
                 "last_added_phase_ids": added_phase_ids,
                 "last_plan_patch_operation": operation,
                 "last_plan_update_event_id": event.get("event_id"),
+                "last_superseded_task_ids": superseded_tasks,
+                "last_recovered_failure_ids": recovered_superseded_failure_ids,
             },
             clear_manual_plan_change=True,
         )
@@ -505,6 +541,9 @@ def apply_approved_plan_patch(
         "ended_at": utc_timestamp(),
         "added_tasks": added_tasks,
         "added_phase_ids": added_phase_ids,
+        "superseded_tasks": superseded_tasks,
+        "already_completed_superseded_tasks": already_completed_superseded_tasks,
+        "recovered_superseded_failure_ids": recovered_superseded_failure_ids,
         "plan_patch_operation": operation,
         "target_phase_id": normalized_target_phase_id or None,
         "event_id": event.get("event_id") if event is not None else None,
@@ -543,6 +582,78 @@ def parse_plan_tasks(plan_text: str) -> dict[str, PlanTask]:
             fields=fields,
         )
     return tasks
+
+
+def _mark_plan_tasks_superseded(
+    plan_text: str,
+    *,
+    task_ids: Sequence[str],
+    reason: str,
+    authorization: str,
+) -> tuple[str, list[str], list[str]]:
+    lines = plan_text.splitlines()
+    tasks = parse_plan_tasks(plan_text)
+    superseded: list[str] = []
+    already_completed: list[str] = []
+    reason_text = " ".join(str(reason).split())
+    authorization_text = " ".join(str(authorization).split())
+    selected = sorted(
+        (tasks[task_id] for task_id in task_ids if task_id in tasks),
+        key=lambda task: task.line_index,
+        reverse=True,
+    )
+    for task in selected:
+        if task.status == "x":
+            already_completed.append(task.task_id)
+            continue
+        start = task.line_index
+        end = start + 1
+        while end < len(lines):
+            if TASK_LINE_RE.match(lines[end]) or lines[end].startswith("## Phase ") or is_task_block_terminator(lines[end]):
+                break
+            end += 1
+        lines[start] = re.sub(r"^- \[[ x~!\-]\]", "- [-]", lines[start], count=1)
+        fields = _task_fields(lines[start:end])
+        additions: list[str] = []
+        if not fields.get("skip_reason"):
+            additions.append(f"  - skip_reason: {reason_text}")
+        if not (fields.get("skip_authorization") or fields.get("approval_id")):
+            additions.append(f"  - skip_authorization: {authorization_text}")
+        if additions:
+            lines[end:end] = additions
+        superseded.append(task.task_id)
+    suffix = "\n" if plan_text.endswith("\n") else ""
+    return "\n".join(lines) + suffix, sorted(superseded), sorted(already_completed)
+
+
+def _mark_superseded_failures_recovered(
+    paths: WorkflowPaths,
+    *,
+    workflow_id: str,
+    task_ids: Sequence[str],
+    change_request_id: str,
+) -> list[str]:
+    target_ids = {str(task_id) for task_id in task_ids if str(task_id)}
+
+    def update(registry: dict[str, Any]) -> list[str]:
+        recovered: list[str] = []
+        resolved_at = utc_timestamp()
+        for failure in registry.get("failures", []):
+            if not isinstance(failure, dict) or str(failure.get("task_id") or "") not in target_ids:
+                continue
+            if str(failure.get("status") or "").lower() in {"recovered", "waived"}:
+                continue
+            failure["status"] = "recovered"
+            failure["recoverable"] = False
+            failure["recovered_at"] = resolved_at
+            failure["resolution"] = "superseded_by_approved_change_request"
+            failure["resolution_change_request_id"] = change_request_id
+            failure_id = str(failure.get("failure_id") or "")
+            if failure_id:
+                recovered.append(failure_id)
+        return sorted(recovered)
+
+    return _update_failure_registry_locked(paths, workflow_id=workflow_id, update=update)
 
 
 def _reconcile_pass(

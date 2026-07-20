@@ -62,19 +62,14 @@ are recorded in `{{context_manifest_path}}`.
 
 ### Autonomy and escalation boundary
 
-Self-repair is the default and highest-priority action. Diagnose technical
-failures end to end, install local tools when needed, run the smallest meaningful
-check, and resume only affected work while preserving successful outputs and
-failure records. Code or test defects, data or eligibility errors, numerical
-exceptions, missing artifacts, Slurm failures, stale dependencies, and safe
-retry/resume work do not justify asking a human to inspect code or choose the
-next debugging step.
+Self-repair is the default. Diagnose end to end, install local tools, validate,
+and resume affected work while preserving outputs and failures. Code, test, data,
+numerical, artifact, scheduler, dependency, and retry defects do not justify
+human debugging.
 
-Escalate only when continuation requires an external credential or permission,
-inaccessible data, outside coordination, or a material scope choice unauthorized
-by the brief and plan. Exhaust distinct safe repairs and the retry budget first;
-reading code or logs never justifies `requires_attention`, `needs_human`, or an
-equivalent status.
+Escalate only for external credentials or permission, inaccessible data, outside
+coordination, or a material unauthorized scope choice. Exhaust safe repairs and
+the retry budget; reading code or logs never justifies `requires_attention`.
 
 1. Identify the failure signature and the capability difference between this
    dedicated recovery runner and the failed runner.

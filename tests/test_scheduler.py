@@ -3755,7 +3755,7 @@ class SchedulerMainLoopTest(unittest.TestCase):
             projection = load_event_log_projection(context.paths)
             self.assertEqual(projection["state"]["event_count"], 3)
 
-    def test_event_append_requires_event_append_lock(self) -> None:
+    def test_event_append_waits_through_transient_lock_contention(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             project = Path(tmp) / "project"
             init_project(project, "Event lock smoke.")
@@ -3764,19 +3764,43 @@ class SchedulerMainLoopTest(unittest.TestCase):
             context = context_result["context"]
             lock = AtomicOwnerLock(context.paths.runtime_dir / "lock" / "event_append_lock", "test-lock-holder")
             held = lock.acquire()
+            release_thread = threading.Thread(target=lambda: (time.sleep(0.1), held.release()))
+            release_thread.start()
             try:
-                with self.assertRaises(SchedulerLockError):
-                    append_event(
-                        context.paths,
-                        workflow_id=context.workflow_id,
-                        event_type="blocked_event",
-                        data={},
-                    )
+                appended = append_event(
+                    context.paths,
+                    workflow_id=context.workflow_id,
+                    event_type="delayed_event",
+                    data={},
+                )
             finally:
+                release_thread.join(timeout=1.0)
                 held.release()
 
             events = read_jsonl(project / ".loopplane" / "runtime" / "events" / "events_000001.jsonl")
-            self.assertEqual(events, [])
+            self.assertEqual(events[-1]["event_id"], appended["event_id"])
+
+    def test_event_append_rejects_contention_beyond_wait_budget(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "Event lock timeout smoke.")
+            context_result = load_scheduler_context(project)
+            self.assertTrue(context_result["ok"], context_result)
+            context = context_result["context"]
+            held = AtomicOwnerLock(
+                context.paths.runtime_dir / "lock" / "event_append_lock", "test-long-lock-holder"
+            ).acquire()
+            try:
+                with patch.object(scheduler_module, "EVENT_APPEND_LOCK_WAIT_SECONDS", 0.01):
+                    with self.assertRaises(SchedulerLockError):
+                        append_event(
+                            context.paths,
+                            workflow_id=context.workflow_id,
+                            event_type="blocked_event",
+                            data={},
+                        )
+            finally:
+                held.release()
 
     def test_event_snapshot_replay_uses_latest_snapshot_and_subsequent_events(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

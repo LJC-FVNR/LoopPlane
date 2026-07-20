@@ -558,6 +558,17 @@ class CliAdapterFixtureIntegrationTest(unittest.TestCase):
 
         self.assertEqual(cooldown, 60)
 
+    def test_usage_limit_absolute_retry_datetime_preserves_future_date(self) -> None:
+        now = datetime(2026, 7, 19, 0, 0, 0, tzinfo=UTC)
+
+        cooldown = _cooldown_seconds_from_retry_at(
+            "ERROR: You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage "
+            "to purchase more credits or try again at Jul 25th, 2026 3:25 AM.",
+            now=now,
+        )
+
+        self.assertEqual(cooldown, 530_760)
+
     def test_bare_prompt_line_number_402_is_not_billing_evidence(self) -> None:
         match = _match_builtin_classifier(
             {

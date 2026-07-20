@@ -707,6 +707,8 @@ def _should_continue_after_tick(
         execution = selected.get("execution_result")
         if isinstance(execution, Mapping) and (execution.get("pass") is True or execution.get("status") == "pass"):
             return True, "final_verification_passed", EXIT_SUCCESS
+        if isinstance(execution, Mapping) and isinstance(execution.get("runner_availability"), Mapping):
+            return True, "runner_availability_wait", EXIT_SUCCESS
         if _final_verification_has_expandable_blocker(execution):
             return True, "final_verification_expandable", EXIT_SUCCESS
         return False, "final_verification_failed", exit_code
@@ -759,6 +761,8 @@ def _final_verification_has_expandable_blocker(execution: Any) -> bool:
 def _supervisor_status_after_tick(action: str, *, should_continue: bool, reason: str) -> str:
     if not should_continue:
         return _exit_status_for_reason(reason)
+    if reason == "runner_availability_wait":
+        return "waiting_runner_availability"
     return {
         "wait_background_job": "waiting_background",
         "wait_paused": "paused",

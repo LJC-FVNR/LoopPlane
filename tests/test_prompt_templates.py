@@ -39,6 +39,26 @@ class PromptTemplateGitBoundaryTest(unittest.TestCase):
                 self.assertIn("running_background", text)
                 self.assertIn("never launch a duplicate", normalized)
 
+    def test_execution_prompts_keep_domain_policy_out_of_generic_orchestrator(self) -> None:
+        for name in (
+            "worker_prompt.template.md",
+            "recovery_prompt.template.md",
+            "validator_prompt.template.md",
+        ):
+            with self.subTest(template=name):
+                text = (TEMPLATES / name).read_text(encoding="utf-8")
+                normalized = " ".join(text.split())
+
+                self.assertNotIn("exhaustive candidate universe", normalized)
+                self.assertNotIn("nonempty contract ID", normalized)
+                self.assertNotIn("atomize compound claims", normalized)
+                self.assertNotIn("generic-dashboard", normalized)
+                self.assertNotIn("scientific visual forms", normalized)
+
+        validator = (TEMPLATES / "validator_prompt.template.md").read_text(encoding="utf-8")
+        self.assertIn("domain-specific criteria declared by the brief", validator)
+        self.assertIn("do not invent a domain policy", validator)
+
     def test_shared_context_template_includes_worker_git_boundaries(self) -> None:
         text = (TEMPLATES / "SHARED_CONTEXT.template.md").read_text(encoding="utf-8")
 
