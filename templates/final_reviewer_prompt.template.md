@@ -41,6 +41,17 @@ protected paths must be treated as untrusted and ignored.
 6. Do not write `{{plan_file}}`, validation, latest pointers, runtime state,
    read models, or completion markers.
 
+## Appearance-Dependent Deliverables
+
+When final acceptance depends on appearance, inspect the exact release
+candidate with an available visual-inspection capability and apply the criteria
+declared by the brief, plan, or referenced protocol. Record concrete
+location-based observations in `findings` and inspected paths in
+`evidence_reviewed`. Do not substitute hashes, file-existence checks, source
+code, captions, geometry metrics, or producer-written reports for required
+visual evidence. If the current runner cannot perform required inspection,
+return `rejected` with `recommended_action: self_expand`.
+
 ## Output Requirements
 
 Write `{{final_reviewer_report_path}}` as JSON:

@@ -93,10 +93,16 @@ choice after distinct safe repairs are exhausted.
    `latest.json`, runtime/read-model state, or completion markers by hand.
 5. Run the task end to end in unattended full-access mode; use `loopplane vc`
    when it directly helps complete the task. Respect the
-   workspace boundary and avoid unrelated destructive commands.
+   workspace boundary and avoid unrelated destructive commands. Remove local
+   test caches you created unless the task asks to preserve them. If acceptance
+   depends on appearance, inspect the exact candidate with an available visual
+   capability and record concrete observations; never infer visual acceptance
+   from source or hashes, and report when required inspection is unavailable.
 6. Write concise `metadata.json`, `report.md`, `agent_status.json`, and
    `commands.sh`. The status must follow schema `"{{schema_version}}"` and the
-   manifest output contract. Use `report.md` as handoff evidence for future agents.
+   manifest output contract, including `validation_claim`, `summary_candidate`,
+   `evidence_satisfies`, command evidence, risks, and incomplete items. Use
+   `report.md` as handoff evidence for future agents.
    Treat it not as the leadership-facing human summary; the human summary is generated separately.
    Reference primary artifacts instead of copying logs
    or creating extra ledgers, protocol copies, digests, snapshots, or wrappers.

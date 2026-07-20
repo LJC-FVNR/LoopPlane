@@ -5,10 +5,11 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from pathlib import Path
 
-from runtime.final_verifier import run_final_verifier
+from runtime.final_verifier import final_verification_report_freshness, run_final_verifier
 from runtime.init_workflow import init_project
 from runtime.plan_objectives import objective_structure_fingerprint, parse_plan_objectives
 from runtime.scheduler import append_event, completion_marker_status, load_scheduler_context, run_scheduler
@@ -243,6 +244,38 @@ print("fake final reviewer wrote final_reviewer_report.json")
     config_path.write_text(json.dumps(config, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
+def configure_usage_limited_final_reviewer(project: Path) -> None:
+    script = project / ".loopplane" / "config" / "usage_limited_final_reviewer.py"
+    retry_at = datetime.now(UTC) + timedelta(days=6)
+    retry_text = retry_at.strftime("%b %d, %Y %I:%M %p")
+    script.write_text(
+        "import sys\n"
+        f"print(\"ERROR: You've hit your usage limit. Try again at {retry_text}.\", file=sys.stderr)\n"
+        "raise SystemExit(1)\n",
+        encoding="utf-8",
+    )
+    config_path = project / ".loopplane" / "config" / "agent_runners.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config["runners"]["final_reviewer"].update(
+        {
+            "adapter": "shell",
+            "command": sys.executable,
+            "args": [script.as_posix()],
+            "cwd": "{{project_root}}",
+            "prompt_delivery": {"mode": "stdin"},
+            "adapter_options": {"runner_availability": {"builtin_classifiers": True}},
+            "permission_policy": {
+                "allow_project_file_edit": True,
+                "allow_command_execution": True,
+                "require_approval_for_risky_commands": False,
+                "read_only": False,
+            },
+            "enabled": True,
+        }
+    )
+    config_path.write_text(json.dumps(config, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
 def jsonl_line_count(path: Path) -> int:
     if not path.is_file():
         return 0
@@ -250,6 +283,36 @@ def jsonl_line_count(path: Path) -> int:
 
 
 class FinalVerifierTest(unittest.TestCase):
+    def test_report_records_deterministic_plan_and_authoritative_evidence_input_fingerprint(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "Final verification input fingerprint fixture.")
+            write_final_plan(project)
+            configure_fake_final_reviewer(project, status="rejected")
+            write_completed_task_evidence(project)
+
+            result = run_final_verifier(project, owner="test")
+
+            self.assertEqual(result["status"], "fail")
+            report = json.loads(
+                (project / ".loopplane" / "runtime" / "final_verification_report.json").read_text(encoding="utf-8")
+            )
+            self.assertRegex(report["input_fingerprint"], r"^sha256:[0-9a-f]{64}$")
+            components = report["input_fingerprint_components"]
+            self.assertEqual(
+                components["active_plan_sha256"],
+                "sha256:" + sha256((project / "PLAN.md").read_bytes()).hexdigest(),
+            )
+            self.assertRegex(components["task_validation_evidence_sha256"], r"^sha256:[0-9a-f]{64}$")
+            paths = load_scheduler_context(project)["context"].paths
+            self.assertTrue(final_verification_report_freshness(paths, report)["fresh"])
+
+            evidence_report = project / ".loopplane" / "results" / "T001" / "runs" / "run_T001" / "report.md"
+            evidence_report.write_text("final deliverable evidence changed\n", encoding="utf-8")
+            freshness = final_verification_report_freshness(paths, report)
+            self.assertFalse(freshness["fresh"])
+            self.assertIn("task_validation_evidence_sha256_mismatch", freshness["stale_reasons"])
+
     def test_missing_objective_checklist_blocks_completion_marker(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             project = Path(tmp) / "project"
@@ -331,6 +394,33 @@ class FinalVerifierTest(unittest.TestCase):
             self.assertTrue(blocker["expandable"])
             self.assertEqual(blocker["kind"], "semantic_final_review")
             self.assertEqual(blocker["suggested_expansion_type"], "final_verifier_retry")
+
+    def test_final_reviewer_usage_limit_creates_runner_hold_and_waits(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "Usage-limited final reviewer fixture.")
+            write_final_plan(project)
+            configure_usage_limited_final_reviewer(project)
+            write_completed_task_evidence(project)
+
+            first = run_scheduler(project, max_ticks=1)
+
+            self.assertEqual(first["selected_action"]["action"], "run_final_verification")
+            execution = first["selected_action"]["execution_result"]
+            self.assertEqual(execution["status"], "waiting_runner_availability")
+            self.assertEqual(execution["runner_availability"]["reason_class"], "usage_limit_exhausted")
+            self.assertFalse((project / ".loopplane" / "runtime" / "plan_loop_complete.json").exists())
+            paths = load_scheduler_context(project)["context"].paths
+            runner_health = json.loads((paths.runtime_dir / "runner_health.json").read_text(encoding="utf-8"))
+            hold = runner_health["runners"]["final_reviewer"]["availability_hold"]
+            self.assertEqual(hold["status"], "active")
+            self.assertEqual(hold["reason_class"], "usage_limit_exhausted")
+            self.assertGreater(hold["retry_after_seconds"], 5 * 24 * 60 * 60)
+
+            second = run_scheduler(project, max_ticks=1)
+
+            self.assertEqual(second["selected_action"]["action"], "wait_runner_availability")
+            self.assertEqual(second["selected_action"]["selected"]["roles"], ["final_reviewer"])
 
     def test_enabled_final_reviewer_agent_can_accept_over_narrow_validation_failure(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

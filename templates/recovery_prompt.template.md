@@ -66,10 +66,10 @@ Self-repair technical failures. Escalate only after safe
 repairs are exhausted and continuation needs external access, coordination, or
 an unauthorized scope choice.
 
-1. Start from the selected signature, last failing command, and smallest useful
-   log excerpt. Identify the capability difference between this dedicated
-   recovery runner and the failed runner. Do not reread unrelated workflow history,
-   and never repeat a failed action without new information.
+1. Start from the failure signature, command, and a short log. Identify the
+   failed runner's capability gap; use added host/control-plane authority
+   without weakening source/evidence protections. Do not reread unrelated
+   history or repeat an unchanged failed action.
    Verify an existing hash-indexed source digest instead of reopening every
    unchanged historical source. Read an original only for a named discrepancy
    that bears on this recovery.
@@ -82,8 +82,8 @@ an unauthorized scope choice.
    When merely restoring supervision for an unchanged live job, verify its
    execution state and source hashes; reread environment runbooks only if a new
    resource or launch decision is required.
-3. Make a targeted repair and validate only the affected work. Preserve prior
-   successes. For experiment tasks, reuse the harness and retained artifacts,
+3. Install needed local tools, make a targeted repair, and validate only the
+   affected work. Preserve prior successes. For experiment tasks, reuse the harness and retained artifacts,
    and follow the execution backend, launcher, resource policy, and any
    launch-latency target declared in the shared context or referenced project
    skill. Never infer a backend from LoopPlane itself. Surface narrow blockers

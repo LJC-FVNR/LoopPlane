@@ -7,9 +7,12 @@ from hashlib import sha256
 from pathlib import Path
 from unittest.mock import patch
 
+from runtime.adapters.base import utc_timestamp
 from runtime.approval import record_approval_response
+from runtime.final_verifier import final_verification_input_fingerprint
 from runtime.init_workflow import init_project
-from runtime.plan_objectives import parse_plan_objectives
+from runtime.objective_verification import objective_report_path
+from runtime.plan_objectives import objective_structure_fingerprint, parse_plan_objectives
 from runtime.prompt_builder import build_prompt_for_prepared_run
 from runtime.read_models import rebuild_read_models
 from runtime.scheduler import load_scheduler_snapshot, prepare_run, select_next_action
@@ -101,6 +104,107 @@ def write_failure(
             ],
         },
     )
+
+
+def write_completed_task_evidence(
+    project: Path,
+    task_id: str,
+    *,
+    updated_at: str = "2026-06-10T00:00:00Z",
+) -> None:
+    run_id = f"run_{task_id}"
+    run_dir = project / ".loopplane" / "results" / task_id / "runs" / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "report.md").write_text(f"evidence for {task_id}\n", encoding="utf-8")
+    validation_path = run_dir / "validation.json"
+    write_json(
+        validation_path,
+        {
+            "schema_version": "1.5",
+            "run_id": run_id,
+            "primary_task_id": task_id,
+            "status": "pass",
+            "accepted_task_ids": [task_id],
+            "rejected_task_ids": [],
+            "validated_at": updated_at,
+        },
+    )
+    write_json(
+        project / ".loopplane" / "results" / task_id / "latest.json",
+        {
+            "schema_version": "1.5",
+            "task_id": task_id,
+            "latest_run_id": run_id,
+            "latest_run_dir": f".loopplane/results/{task_id}/runs/{run_id}",
+            "validation_path": f".loopplane/results/{task_id}/runs/{run_id}/validation.json",
+            "validation_status": "pass",
+            "updated_at": updated_at,
+            "updated_by": "test",
+        },
+    )
+
+
+def write_final_failure(
+    project: Path,
+    *,
+    fingerprinted: bool = True,
+    checked_at: str | None = None,
+    semantic: bool = False,
+) -> None:
+    workflow = json.loads((project / ".loopplane" / "config" / "workflow.json").read_text(encoding="utf-8"))
+    if semantic:
+        blocker = {
+            "check": "semantic_final_review",
+            "message": "Final reviewer rejected completion semantics.",
+            "kind": "non_expandable",
+            "expandable": False,
+            "details": {
+                "status": "rejected",
+                "recommended_action": "self_expand",
+                "rationale": "Research bar is unmet and expansion budget remains.",
+            },
+        }
+    else:
+        blocker = {
+            "check": "required_final_deliverables_exist",
+            "message": "Required final deliverables are missing.",
+            "expandable": True,
+            "suggested_expansion_type": "missing_deliverable",
+            "target_task_ids": ["T001"],
+        }
+    report: dict[str, object] = {
+        "schema_version": "1.5",
+        "workflow_id": workflow["workflow_id"],
+        "status": "fail",
+        "pass": False,
+        "ok": False,
+        "checked_at": checked_at or utc_timestamp(),
+        "checks": [
+            {
+                "check": "plan_parseable",
+                "status": "pass",
+                "details": {
+                    "task_count": sum(
+                        1
+                        for line in (project / "PLAN.md").read_text(encoding="utf-8").splitlines()
+                        if line.startswith("- [") and ":" in line
+                    )
+                },
+            }
+        ],
+        "blockers": [blocker],
+    }
+    if fingerprinted:
+        paths = load_scheduler_snapshot(project)["paths"]
+        fingerprint = final_verification_input_fingerprint(paths)
+        report["input_fingerprint"] = fingerprint["fingerprint"]
+        report["input_fingerprint_schema_version"] = fingerprint["schema_version"]
+        report["input_fingerprint_components"] = {
+            key: value
+            for key, value in fingerprint.items()
+            if key not in {"fingerprint", "algorithm", "schema_version"}
+        }
+    write_json(project / ".loopplane" / "runtime" / "final_verification_report.json", report)
 
 
 def write_patch_and_proposal(
@@ -975,28 +1079,13 @@ class SelfExpansionTest(unittest.TestCase):
             init_project(project, "Final verifier expansion.")
             write_plan(project, first_status="x", second_status="x")
             record_active_plan(project)
-            write_json(
-                project / ".loopplane" / "runtime" / "final_verification_report.json",
-                {
-                    "schema_version": "1.5",
-                    "workflow_id": json.loads((project / ".loopplane" / "config" / "workflow.json").read_text(encoding="utf-8"))["workflow_id"],
-                    "status": "fail",
-                    "blockers": [
-                        {
-                            "check": "required_final_deliverables_exist",
-                            "message": "Required final deliverables are missing.",
-                            "expandable": True,
-                            "suggested_expansion_type": "missing_deliverable",
-                            "target_task_ids": ["T001"],
-                        }
-                    ],
-                },
-            )
+            write_final_failure(project)
 
             action = select_next_action(load_scheduler_snapshot(project))
 
             self.assertEqual(action["action"], "run_expansion_planner")
             self.assertEqual(action["selected"]["role"], "expansion_planner")
+            self.assertTrue(action["selected"]["candidate"]["final_verifier_report_freshness"]["fresh"])
 
     def test_scheduler_selects_expansion_for_semantic_final_review_self_expand(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1004,29 +1093,7 @@ class SelfExpansionTest(unittest.TestCase):
             init_project(project, "Semantic final review expansion.")
             write_plan(project, first_status="x", second_status="x")
             record_active_plan(project)
-            write_json(
-                project / ".loopplane" / "runtime" / "final_verification_report.json",
-                {
-                    "schema_version": "1.5",
-                    "workflow_id": json.loads((project / ".loopplane" / "config" / "workflow.json").read_text(encoding="utf-8"))["workflow_id"],
-                    "status": "fail",
-                    "pass": False,
-                    "ok": False,
-                    "blockers": [
-                        {
-                            "check": "semantic_final_review",
-                            "message": "Final reviewer rejected completion semantics.",
-                            "kind": "non_expandable",
-                            "expandable": False,
-                            "details": {
-                                "status": "rejected",
-                                "recommended_action": "self_expand",
-                                "rationale": "Research bar is unmet and expansion budget remains.",
-                            },
-                        }
-                    ],
-                },
-            )
+            write_final_failure(project, semantic=True)
 
             action = select_next_action(load_scheduler_snapshot(project))
 
@@ -1034,6 +1101,166 @@ class SelfExpansionTest(unittest.TestCase):
             self.assertEqual(action["selected"]["role"], "expansion_planner")
             self.assertEqual(action["selected"]["candidate"]["trigger"], "final_verification_failed")
             self.assertEqual(action["selected"]["candidate"]["blockers"][0]["check"], "semantic_final_review")
+
+    def test_stale_final_failure_after_applied_terminal_evidence_task_selects_fresh_final_verification(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "Stale final failure after terminal evidence.")
+            write_plan(project, first_status="x", second_status="x")
+            record_active_plan(project)
+            write_completed_task_evidence(project, "T001")
+            write_completed_task_evidence(project, "T002")
+            write_final_failure(project)
+
+            plan_path = project / "PLAN.md"
+            plan_path.write_text(
+                plan_path.read_text(encoding="utf-8")
+                + """
+- [x] T003: Applied terminal evidence follow-up
+  - acceptance: New evidence exists.
+  - evidence: .loopplane/results/T003/
+  - latest: .loopplane/results/T003/latest.json
+  - depends_on: [T002]
+  - risk: low
+  - validation: file_exists: report.md
+  - max_attempts: 1
+  - approval: not_required
+  - deliverables: report.md
+""",
+                encoding="utf-8",
+            )
+            write_completed_task_evidence(project, "T003", updated_at="2026-06-11T00:00:00Z")
+            record_active_plan(project)
+
+            action = select_next_action(load_scheduler_snapshot(project))
+
+            self.assertEqual(action["action"], "run_final_verification")
+            self.assertIn(
+                {"candidate": "self_expansion_final_failure", "result": "none"},
+                action["considered"],
+            )
+
+    def test_stale_final_failure_after_multiple_completed_followups_does_not_repeat_expansion(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "Multiple completed final follow-ups.")
+            write_plan(project, first_status="x", second_status="x")
+            record_active_plan(project)
+            write_final_failure(project)
+
+            plan_path = project / "PLAN.md"
+            plan_path.write_text(
+                plan_path.read_text(encoding="utf-8")
+                + """
+- [x] T003: First completed final follow-up
+  - acceptance: First new evidence exists.
+  - evidence: .loopplane/results/T003/
+  - latest: .loopplane/results/T003/latest.json
+  - depends_on: [T002]
+  - risk: low
+  - validation: file_exists: report.md
+  - max_attempts: 1
+  - approval: not_required
+  - deliverables: report.md
+
+- [x] T004: Second completed final follow-up
+  - acceptance: Second new evidence exists.
+  - evidence: .loopplane/results/T004/
+  - latest: .loopplane/results/T004/latest.json
+  - depends_on: [T003]
+  - risk: low
+  - validation: file_exists: report.md
+  - max_attempts: 1
+  - approval: not_required
+  - deliverables: report.md
+""",
+                encoding="utf-8",
+            )
+            write_completed_task_evidence(project, "T003", updated_at="2026-06-11T00:00:00Z")
+            write_completed_task_evidence(project, "T004", updated_at="2026-06-12T00:00:00Z")
+            record_active_plan(project)
+
+            action = select_next_action(load_scheduler_snapshot(project))
+
+            self.assertEqual(action["action"], "run_final_verification")
+
+    def test_legacy_final_failure_uses_conservative_authoritative_timestamp_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "Legacy final failure freshness.")
+            write_plan(project, first_status="x", second_status="x")
+            write_completed_task_evidence(project, "T001", updated_at="2026-06-10T00:00:00Z")
+            write_completed_task_evidence(project, "T002", updated_at="2026-06-10T00:00:00Z")
+            record_active_plan(project)
+
+            write_final_failure(project, fingerprinted=False, checked_at="2026-06-11T00:00:00Z")
+            fresh_action = select_next_action(load_scheduler_snapshot(project))
+            self.assertEqual(fresh_action["action"], "run_expansion_planner")
+            self.assertEqual(
+                fresh_action["selected"]["candidate"]["final_verifier_report_freshness"]["mode"],
+                "legacy_timestamp_fallback",
+            )
+
+            write_completed_task_evidence(project, "T002", updated_at="2026-06-12T00:00:00Z")
+            stale_action = select_next_action(load_scheduler_snapshot(project))
+            self.assertEqual(stale_action["action"], "run_final_verification")
+
+    def test_stale_final_failure_preserves_objective_gate_order_then_transitions_to_final_verification(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "Stale final report objective ordering.")
+            write_workflow_objective_plan(project)
+            record_active_plan(project)
+            write_final_failure(project)
+            write_completed_task_evidence(project, "T001", updated_at="2026-06-12T00:00:00Z")
+
+            objective_action = select_next_action(load_scheduler_snapshot(project))
+
+            self.assertEqual(objective_action["action"], "run_final_objective_verifier")
+            self.assertIn(
+                {"candidate": "self_expansion_final_failure", "result": "none"},
+                objective_action["considered"],
+            )
+
+            snapshot = load_scheduler_snapshot(project)
+            paths = snapshot["paths"]
+            plan_text = (project / "PLAN.md").read_text(encoding="utf-8")
+            objectives, errors = parse_plan_objectives(plan_text)
+            self.assertEqual(errors, [])
+            workflow_objectives = [objective for objective in objectives if objective.scope == "workflow"]
+            report_path = objective_report_path(paths, scope="workflow", phase_id=None)
+            write_json(
+                report_path,
+                {
+                    "schema_version": "1.5",
+                    "workflow_id": snapshot["workflow_id"],
+                    "scope": "workflow",
+                    "phase_id": None,
+                    "status": "satisfied",
+                    "verified_at": "2026-06-12T01:00:00Z",
+                    "plan_sha256": "sha256:" + sha256(plan_text.encode("utf-8")).hexdigest(),
+                    "objective_structure_fingerprint": objective_structure_fingerprint(
+                        plan_text,
+                        objectives=workflow_objectives,
+                    ),
+                    "objective_results": [
+                        {
+                            "objective_id": "WO1",
+                            "status": "satisfied",
+                            "verdict": "satisfied",
+                            "confidence": "high",
+                            "evidence_reviewed": [".loopplane/results/T001/latest.json"],
+                            "agent_rationale": "Current terminal evidence satisfies the fixture objective.",
+                            "expandable": False,
+                        }
+                    ],
+                    "summary": {"total": 1, "passed": 1, "unmet": 0, "blocked": 0, "waived": 0},
+                },
+            )
+
+            final_action = select_next_action(load_scheduler_snapshot(project))
+
+            self.assertEqual(final_action["action"], "run_final_verification")
 
     def test_background_failure_does_not_suppress_no_executable_expansion(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

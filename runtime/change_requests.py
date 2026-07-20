@@ -554,12 +554,13 @@ def apply_change_request(
             extra={"before_checkpoint": before_checkpoint},
         )
 
-    plan_patch_operation = _change_request_plan_patch_operation(
+    patch_contract = _plan_patch_apply_contract(response)
+    detected_plan_patch_operation = _change_request_plan_patch_operation(
         plan_text=_safe_read(paths.plan_file),
         patch_text=_safe_read(patch_path),
         declared_type=str(_mapping(response.get("plan_patch")).get("type") or ""),
     )
-    if plan_patch_operation is None:
+    if detected_plan_patch_operation is None:
         return _failure(
             project=project,
             workflow_id=workflow_id,
@@ -567,6 +568,12 @@ def apply_change_request(
             message="Change request PLAN_PATCH.md mixes added and modified tasks or declares an unsupported operation.",
             extra={"change_request_status": status_record},
         )
+    declared_plan_patch_operation = str(patch_contract["operation"] or PLAN_PATCH_OPERATION_APPEND)
+    plan_patch_operation = (
+        declared_plan_patch_operation
+        if declared_plan_patch_operation != PLAN_PATCH_OPERATION_APPEND
+        else detected_plan_patch_operation
+    )
     apply_result = apply_approved_plan_patch(
         project,
         change_request_id=change_request_id,
@@ -575,6 +582,10 @@ def apply_change_request(
         approval_request_id=str(response.get("approval_request_id") or ""),
         before_checkpoint_id=_checkpoint_id(before_checkpoint),
         plan_patch_operation=plan_patch_operation,
+        target_phase_id=patch_contract["target_phase_id"],
+        supersede_task_ids=patch_contract["supersede_task_ids"],
+        supersede_reason=f"Superseded by approved change request {change_request_id}.",
+        supersede_authorization=f"change_request:{change_request_id}",
         expected_plan_patch_sha256=expected_plan_patch_sha256,
     )
     if apply_result.get("ok") is not True:
@@ -628,7 +639,11 @@ def apply_change_request(
         "after_checkpoint_id": _checkpoint_id(after_checkpoint),
         "added_tasks": list(apply_result.get("added_tasks") or []),
         "modified_tasks": list(apply_result.get("modified_tasks") or []),
-        "plan_patch_operation": plan_patch_operation,
+        "superseded_tasks": list(apply_result.get("superseded_tasks") or []),
+        "already_completed_superseded_tasks": list(apply_result.get("already_completed_superseded_tasks") or []),
+        "recovered_superseded_failure_ids": list(apply_result.get("recovered_superseded_failure_ids") or []),
+        "plan_patch_operation": apply_result.get("plan_patch_operation"),
+        "target_phase_id": apply_result.get("target_phase_id"),
     }
     _append_jsonl_locked(paths, paths.requests_dir / CHANGE_REQUEST_RESPONSES_FILENAME, apply_response)
     append_event(
@@ -644,6 +659,9 @@ def apply_change_request(
             "applied_plan_update_event_id": apply_result.get("event_id"),
             "before_checkpoint_id": apply_response["before_checkpoint_id"],
             "after_checkpoint_id": apply_response["after_checkpoint_id"],
+            "modified_tasks": apply_response["modified_tasks"],
+            "superseded_tasks": apply_response["superseded_tasks"],
+            "recovered_superseded_failure_ids": apply_response["recovered_superseded_failure_ids"],
         },
         run_id=str(response.get("run_id") or change_request_id),
     )
@@ -1046,6 +1064,38 @@ def _text_list(value: Any) -> list[str]:
     if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
         return []
     return _dedupe_text([str(item) for item in value if str(item).strip()])
+
+
+def _plan_patch_apply_contract(response: Mapping[str, Any]) -> dict[str, Any]:
+    response_patch = _mapping(response.get("plan_patch"))
+    agent_response = _mapping(response.get("agent_response"))
+    agent_patch = _mapping(agent_response.get("plan_patch"))
+    response_impact = _mapping(response.get("impact"))
+    agent_impact = _mapping(agent_response.get("impact"))
+    operation = str(
+        agent_patch.get("operation")
+        or agent_patch.get("plan_patch_operation")
+        or response_patch.get("operation")
+        or response_patch.get("plan_patch_operation")
+        or PLAN_PATCH_OPERATION_APPEND
+    ).strip()
+    target_phase_id = str(
+        agent_patch.get("target_phase_id")
+        or agent_patch.get("phase_id")
+        or response_patch.get("target_phase_id")
+        or response_patch.get("phase_id")
+        or ""
+    ).strip()
+    supersede_task_ids = _text_list(
+        response_impact.get("supersedes_tasks")
+        if response_impact.get("supersedes_tasks") is not None
+        else agent_impact.get("supersedes_tasks")
+    )
+    return {
+        "operation": operation or PLAN_PATCH_OPERATION_APPEND,
+        "target_phase_id": target_phase_id or None,
+        "supersede_task_ids": list(dict.fromkeys(supersede_task_ids)),
+    }
 
 
 def _dedupe_text(values: Sequence[str]) -> list[str]:

@@ -114,6 +114,15 @@ Use agent judgment. Deterministic facts are evidence, not the final authority.
 If task validations passed but a high-level objective is still not reviewable or
 not decision-useful, mark the objective unmet and explain the gap.
 
+When an objective's acceptance depends on appearance, inspect the exact release
+candidate with an available visual-inspection capability and apply the criteria
+declared by the brief, plan, or referenced protocol. Record inspected paths and
+concrete location-based observations in `evidence_reviewed` and
+`agent_rationale`. Filenames, hashes, geometry reports, source code, and producer
+assertions cannot substitute for required visual evidence. If the required
+inspection capability is unavailable, return an expandable unmet result so the
+workflow can route review to a capable runner.
+
 Do not close an objective merely because the evidence supports a conservative
 negative result, claim demotion, or "decision-useful" non-result. When the
 objective declares `unmet_action: self_expand` and expansion budget remains,
