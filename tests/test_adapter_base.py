@@ -13,6 +13,7 @@ from runtime.adapters.base import (
     AdapterInput,
     AdapterOutput,
     AgentAdapter,
+    _iter_adapter_files,
     utc_timestamp,
     write_adapter_result,
 )
@@ -50,6 +51,35 @@ class UnimplementedDoctorAdapter(AgentAdapter):
 
 
 class AdapterBaseContractTest(unittest.TestCase):
+    def test_run_file_discovery_prunes_generated_cache_subtrees(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            prompt_path = root / "prompt.md"
+            prompt_path.write_text("Run.\n", encoding="utf-8")
+            adapter_input = AdapterInput.from_runner_config(
+                run_id="run_bounded_files",
+                workflow_id="wf",
+                runner_config=runner_config(),
+                prompt_path=prompt_path,
+                scheduler_run_dir=root / "runtime" / "run_bounded_files",
+                role_output_dir=root / "results" / "run_bounded_files",
+                task_id="T001",
+                task_evidence_run_dir=root / "results" / "run_bounded_files",
+            )
+            adapter_input.ensure_run_dirs()
+            report = adapter_input.role_output_dir / "artifacts" / "report.json"
+            report.parent.mkdir()
+            report.write_text("{}\n", encoding="utf-8")
+            cache = report.parent / "cache"
+            cache.mkdir()
+            for index in range(100):
+                (cache / f"shard_{index}.bin").write_bytes(b"cache")
+
+            discovered = _iter_adapter_files(adapter_input)
+
+            self.assertIn(report, discovered)
+            self.assertFalse(any(cache in path.parents for path in discovered))
+
     def test_input_from_runner_config_contains_prompt_runner_dirs_timeout_and_env(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

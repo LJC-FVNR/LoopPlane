@@ -13,6 +13,7 @@ from runtime.adapters.base import ADAPTER_INPUT_FILENAME, AdapterContractError, 
 from runtime.adapters.registry import AdapterLookupError, get_adapter
 from runtime.agent_runners import AgentRunnerConfigError, RunnerConfig, load_agent_runners
 from runtime.exit_codes import EXIT_INVALID_CONFIG, EXIT_NEEDS_HUMAN, EXIT_SUCCESS, EXIT_VALIDATION_FAILED, has_text
+from runtime.file_discovery import discover_files_bounded
 from runtime.path_resolution import WorkflowPathError, WorkflowPaths, load_workflow_config
 from runtime.plan_objectives import is_task_block_terminator
 from runtime.prompt_context import file_reference, prompt_reference_index
@@ -793,7 +794,13 @@ def collect_run_inputs(project: Path, run_dir: Path) -> tuple[Path, ...]:
     for child_name in ("logs", "artifacts", "raw", "git"):
         child = run_dir / child_name
         if child.is_dir():
-            candidates.extend(sorted(path for path in child.rglob("*") if path.is_file()))
+            discovery = discover_files_bounded(
+                (child,),
+                max_entries=4_096,
+                max_matches=1_024,
+                max_depth=8,
+            )
+            candidates.extend(discovery.paths)
     existing = []
     seen: set[Path] = set()
     for path in candidates:

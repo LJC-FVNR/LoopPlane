@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from runtime.adapters.base import utc_timestamp
+from runtime.file_discovery import discover_files_bounded
 from runtime.path_resolution import WORKFLOW_PATH_FIELDS, WorkflowPathError, WorkflowPaths, load_workflow_config
 from runtime.plan_objectives import (
     DEFAULT_OBJECTIVE_MAX_EXPANSIONS,
@@ -1112,10 +1113,34 @@ def _artifact_inventory(project: Path, paths: WorkflowPaths, *, task_ids: set[st
     for root in roots:
         if not root.exists():
             continue
-        for path in sorted(root.rglob("*")):
-            if not path.is_file() or _skip_objective_artifact(path):
+        discovery = discover_files_bounded(
+            (root,),
+            prune_directory_names={
+                ".git",
+                ".cache",
+                ".pytest_cache",
+                "__pycache__",
+                "cache",
+                "caches",
+                "checkpoints",
+                "models",
+                "node_modules",
+                "qualification_caches",
+                "tmp",
+                "wandb",
+            },
+            max_entries=4_096,
+            max_matches=512,
+            max_depth=10,
+        )
+        for path in discovery.paths:
+            if _skip_objective_artifact(path):
                 continue
-            inventory.append({"path": _project_relative(project, path), "size": path.stat().st_size})
+            try:
+                size = path.stat().st_size
+            except OSError:
+                continue
+            inventory.append({"path": _project_relative(project, path), "size": size})
             if len(inventory) >= 80:
                 return inventory
     return inventory

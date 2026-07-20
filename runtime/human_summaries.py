@@ -11,6 +11,7 @@ from typing import Any, Callable, Mapping, Sequence
 from runtime.adapters.base import ADAPTER_INPUT_FILENAME, AdapterContractError, AdapterInput, utc_timestamp
 from runtime.adapters.registry import AdapterLookupError, get_adapter
 from runtime.agent_runners import AgentRunnerConfigError, load_agent_runners
+from runtime.file_discovery import discover_files_bounded
 from runtime.path_resolution import WorkflowPathError, WorkflowPaths, load_workflow_config
 from runtime.plan_objectives import parse_plan_objectives
 from runtime.prompt_context import data_reference, file_reference, json_summary, prompt_reference_index, write_json_file
@@ -33,6 +34,8 @@ SUMMARY_READY_STATUS = "ready"
 SUMMARY_SCHEDULED_STATUS = "scheduled"
 SUMMARY_AGENT_INLINE_WAIT_SECONDS = 1.0
 SUMMARY_AGENT_NONBLOCKING_LIMIT = 2
+SUMMARY_ARTIFACT_SCAN_LIMIT = 256
+SUMMARY_ARTIFACT_SCAN_ENTRY_LIMIT = 2_048
 TEXT_SECTION_LIMIT = 420
 VISUAL_ARTIFACT_SUFFIXES = frozenset({".svg", ".png", ".jpg", ".jpeg", ".gif", ".webp"})
 GENERIC_SUMMARY_PHRASES = (
@@ -2242,7 +2245,13 @@ def _artifact_paths(run_dir: Path | None) -> list[Path]:
     artifacts_dir = run_dir / "artifacts"
     if not artifacts_dir.exists():
         return []
-    return sorted(item for item in artifacts_dir.rglob("*") if item.is_file())
+    discovery = discover_files_bounded(
+        (artifacts_dir,),
+        max_entries=SUMMARY_ARTIFACT_SCAN_ENTRY_LIMIT,
+        max_matches=SUMMARY_ARTIFACT_SCAN_LIMIT,
+        max_depth=8,
+    )
+    return list(discovery.paths)
 
 
 def _visual_evidence_markdown(project: Path, run_dir: Path | None) -> str:
@@ -2271,18 +2280,50 @@ def _visual_evidence_markdown(project: Path, run_dir: Path | None) -> str:
 
 
 def _artifact_tree_hash(run_dir: Path | None) -> str | None:
-    artifacts = _artifact_paths(run_dir)
-    if not artifacts:
+    if run_dir is None:
         return None
+    artifacts_dir = run_dir / "artifacts"
+    if not artifacts_dir.is_dir():
+        return None
+    # Prefer an artifact producer's manifest.  Hashing one manifest preserves
+    # content-addressed freshness without rereading every model/cache shard.
+    for manifest_path in (run_dir / "artifact_manifest.json", artifacts_dir / "manifest.json"):
+        if manifest_path.is_file():
+            return _sha256_file(manifest_path)
+    discovery = discover_files_bounded(
+        (artifacts_dir,),
+        max_entries=SUMMARY_ARTIFACT_SCAN_ENTRY_LIMIT,
+        max_matches=SUMMARY_ARTIFACT_SCAN_LIMIT,
+        max_depth=8,
+    )
     entries: list[dict[str, Any]] = []
-    artifacts_dir = run_dir / "artifacts" if run_dir is not None else None
-    for path in artifacts:
+    for path in discovery.paths:
         try:
-            relative = path.relative_to(artifacts_dir).as_posix() if artifacts_dir is not None else path.name
-        except ValueError:
-            relative = path.name
-        entries.append({"path": relative, "sha256": _sha256_file(path)})
-    return "sha256:" + sha256(json.dumps(entries, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+            stat_result = path.stat()
+            relative = path.relative_to(artifacts_dir).as_posix()
+        except (OSError, ValueError):
+            continue
+        entries.append(
+            {
+                "path": relative,
+                "size_bytes": int(stat_result.st_size),
+                "mtime_ns": int(stat_result.st_mtime_ns),
+            }
+        )
+    try:
+        root_mtime_ns = int(artifacts_dir.stat().st_mtime_ns)
+    except OSError:
+        root_mtime_ns = 0
+    if not entries and not discovery.truncated:
+        return None
+    payload = {
+        "entries": entries,
+        "root_mtime_ns": root_mtime_ns,
+        "scanned_entries": discovery.scanned_entries,
+        "truncated": discovery.truncated,
+        "limit_reason": discovery.limit_reason,
+    }
+    return "sha256:" + sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
 
 
 def _line_delta(item: Mapping[str, Any]) -> str:

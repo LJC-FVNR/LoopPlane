@@ -1479,9 +1479,12 @@ def _auto_human_summaries_after_reconcile_enabled(workflow_config: Mapping[str, 
         if isinstance(config, Mapping):
             for option in ("auto_after_reconcile", "auto_generate_after_reconcile", "generate_after_reconcile"):
                 if option in config:
-                    return config.get(option) is not False
+                    return config.get(option) is True
     if "auto_human_summaries_after_reconcile" in workflow_config:
-        return workflow_config.get("auto_human_summaries_after_reconcile") is not False
+        return workflow_config.get("auto_human_summaries_after_reconcile") is True
+    # Human summaries are presentation artifacts.  Keeping them opt-in avoids
+    # spending runner quota and traversing result trees on every successful
+    # reconciliation while preserving the explicit `summarize` workflow.
     return False
 
 

@@ -1,7 +1,7 @@
 {
   "schema_version": "loopplane-skill-package-1",
   "name": "loopplane",
-  "version": "1.6.0",
+  "version": "1.7.0",
   "description": "Initialize and run durable, plan-driven agent workflows inside local projects.",
   "entrypoint": "SKILL.md",
   "package_roots": [

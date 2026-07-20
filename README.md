@@ -13,7 +13,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-1.6.0-blue.svg" alt="Version 1.6.0" />
+  <img src="https://img.shields.io/badge/version-1.7.0-blue.svg" alt="Version 1.7.0" />
   <img src="https://img.shields.io/badge/license-Apache--2.0-green.svg" alt="Apache 2.0 license" />
   <img src="https://img.shields.io/badge/core-Python%20stdlib-lightgrey.svg" alt="Python stdlib core" />
 </p>
@@ -277,13 +277,14 @@ chat transcript.
 
 ## Project Status
 
-The current package version is `1.6.0`. The standalone runtime implements the
+The current package version is `1.7.0`. The standalone runtime implements the
 local MVP surface: real Codex CLI and Claude Code adapters, detached execution,
 validation and reconciliation, objective gates, final verification, dashboard
 views, workflow history, migration export/import, and Git checkpoint helpers.
 
-See [`STATUS.md`](STATUS.md) for implemented v1.6 support, intentionally
-deferred scope, smoke-fixture boundaries, and release validation commands.
+See [`STATUS.md`](STATUS.md) for the v1.7 lightweight-runtime changes, retained
+v1.6 compatibility support, intentionally deferred scope, smoke-fixture
+boundaries, and release validation commands.
 
 ### Release Gate Status
 
@@ -295,6 +296,15 @@ token-protected server dashboard modes, request-record dashboard controls,
 inspector chat/change requests, workspace-scoped `dashboard list` inspection,
 validation, reconciliation, final verification, and release gates that block
 unfinished required command and adapter surfaces.
+
+### v1.7 Lightweight Runtime
+
+Version 1.7 makes routine workflow operation bounded and agent-focused. Git
+checkpoints use scoped probes, generated result trees are excluded, automatic
+high-frequency checkpoints and summaries are opt-in, scheduler waits are
+coalesced, control-plane file discovery is bounded, and normal health probes
+inspect recent operational history while `health --strict` retains the complete
+integrity audit.
 
 ### v1.6 Support Status
 

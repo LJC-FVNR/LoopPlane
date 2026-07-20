@@ -188,7 +188,11 @@ def init_project(
         )
     workspace_created_at = _existing_timestamp(existing_workspace, "created_at", created_at)
 
-    planned_version_control = plan_local_repository_initialization(project, runner=git_runner)
+    planned_version_control = plan_local_repository_initialization(
+        project,
+        runner=git_runner,
+        inspect_status=False,
+    )
     files, paths = _desired_files(
         project,
         brief,
@@ -212,7 +216,11 @@ def init_project(
     if conflicts:
         raise InitConflictError(conflicts)
 
-    version_control = initialize_local_repository_if_missing(project, runner=git_runner)
+    version_control = initialize_local_repository_if_missing(
+        project,
+        runner=git_runner,
+        inspect_status=False,
+    )
     files, paths = _desired_files(
         project,
         brief,
@@ -1232,6 +1240,7 @@ def _workflow_config(
         },
         "human_summaries": {
             "auto_after_reconcile": False,
+            "generation_mode": "on_demand",
         },
         "self_expansion": {
             "enabled": True,
@@ -1664,7 +1673,7 @@ def _agent_runners_config() -> dict[str, Any]:
             "summary": {
                 "role": "summary",
                 "inherits": "worker",
-                "enabled": True,
+                "enabled": False,
                 "timeout_seconds": DEFAULT_GATE_AGENT_TIMEOUT_SECONDS,
             },
             "final_reviewer": {
@@ -1714,11 +1723,16 @@ def _version_control_config(paths: WorkflowPaths) -> dict[str, Any]:
             "before_plan_activation": True,
             "after_plan_activation": True,
             "before_worker_run": False,
-            "after_validation_pass": True,
+            "after_validation_pass": False,
             "before_change_request_apply": True,
             "after_change_request_apply": True,
             "before_final_completion": True,
             "after_final_completion": True,
+        },
+        "checkpoint_limits": {
+            "timeout_seconds": 15,
+            "max_paths": 10000,
+            "max_bytes": 104857600,
         },
         "run_metadata": {
             "enabled": False,
@@ -1739,12 +1753,12 @@ def _version_control_config(paths: WorkflowPaths) -> dict[str, Any]:
                 _dir_prefix(paths.workflow_config_dir_value),
                 _dir_prefix(paths.value("planning_dir")),
                 _dir_prefix(paths.value("requests_dir")),
-                _dir_prefix(paths.value("results_dir")),
                 "src/",
                 "tests/",
                 "docs/",
             ],
             "exclude": [
+                _dir_prefix(paths.value("results_dir")),
                 f"{paths.value('runtime_dir')}/lock/",
                 f"{paths.value('runtime_dir')}/active_run_leases/",
                 f"{paths.value('runtime_dir')}/dashboard_token",

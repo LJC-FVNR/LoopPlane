@@ -23,6 +23,7 @@ from runtime.control import (
     CONTROL_RESPONSES_FILENAME,
     control_request_statuses,
 )
+from runtime.file_discovery import FileDiscoveryResult, discover_files_bounded
 from runtime.human_summaries import (
     load_phase_human_summary,
     load_task_human_summary,
@@ -116,6 +117,12 @@ OBJECTIVE_VERIFIER_GRAPH_DETAIL_LIMIT = _read_model_limit_from_env("LOOPPLANE_OB
 OBJECTIVE_VERIFIER_GRAPH_SAMPLE_LIMIT = _read_model_limit_from_env("LOOPPLANE_OBJECTIVE_VERIFIER_GRAPH_SAMPLE_LIMIT", 8)
 IMAGE_PREVIEW_SUFFIXES = frozenset({".svg", ".png", ".jpg", ".jpeg", ".gif", ".webp"})
 DEFAULT_DASHBOARD_MAX_EVENTS = _read_model_limit_from_env("LOOPPLANE_MAX_DASHBOARD_EVENTS", 200)
+GRAPH_CONTEXT_EVENT_LIMIT = _read_model_limit_from_env("LOOPPLANE_GRAPH_CONTEXT_EVENT_LIMIT", 1000)
+RUN_METADATA_SCAN_ENTRY_LIMIT = _read_model_limit_from_env("LOOPPLANE_RUN_METADATA_SCAN_ENTRY_LIMIT", 50_000)
+RUN_METADATA_SCAN_MATCH_LIMIT = _read_model_limit_from_env("LOOPPLANE_RUN_METADATA_SCAN_MATCH_LIMIT", 10_000)
+RUN_DETAIL_ARTIFACT_DISCOVERY_LIMIT = _read_model_limit_from_env(
+    "LOOPPLANE_RUN_DETAIL_ARTIFACT_DISCOVERY_LIMIT", 256
+)
 DASHBOARD_EVENT_NODE_LIMIT = _read_model_limit_from_env("LOOPPLANE_DASHBOARD_EVENT_NODE_LIMIT", DEFAULT_DASHBOARD_MAX_EVENTS)
 DASHBOARD_FEED_RECORD_LIMIT = _read_model_limit_from_env("LOOPPLANE_DASHBOARD_FEED_RECORD_LIMIT", DEFAULT_DASHBOARD_MAX_EVENTS)
 NODE_DETAIL_SENSITIVE_KEYS = frozenset(
@@ -245,7 +252,13 @@ def rebuild_read_models(
         objective_model = _objective_model(paths, objectives=objectives, parse_errors=objective_parse_errors)
     with telemetry.span("validation_collection"):
         latest_contexts = _task_contexts(project, paths, tasks)
-        validation_records = _collect_validation_records(paths)
+        run_metadata_discovery = _discover_run_metadata_files(paths)
+        run_metadata_paths = _run_metadata_paths_by_name(run_metadata_discovery)
+        validation_records = _collect_validation_records(
+            paths,
+            contexts=latest_contexts,
+            metadata_paths=run_metadata_paths,
+        )
         validation_manifest = _validation_manifest(project, latest_contexts, validation_records)
     with telemetry.span("event_read"):
         events = _read_event_records(paths, limit=dashboard_event_limit)
@@ -263,7 +276,10 @@ def rebuild_read_models(
     graph_context_events = events
     with telemetry.span("graph_context_event_read"):
         if event_total_count is None or event_total_count > len(events) or len(events) >= dashboard_event_limit:
-            graph_context_events = _read_event_records(paths, limit=None)
+            graph_context_events = _read_event_records(
+                paths,
+                limit=max(dashboard_event_limit, GRAPH_CONTEXT_EVENT_LIMIT),
+            )
         graph_context_events = _hydrate_graph_context_event_payloads(paths, graph_context_events)
     with telemetry.span("active_lease_read"):
         active_leases = _read_active_leases(paths)
@@ -302,8 +318,8 @@ def rebuild_read_models(
         change_requests = _read_jsonl(paths.requests_dir / CHANGE_REQUESTS_FILENAME)
         change_request_responses = _read_jsonl(paths.requests_dir / CHANGE_REQUEST_RESPONSES_FILENAME)
     with telemetry.span("node_summary_collection"):
-        node_summaries = _collect_node_summaries(paths)
-        agent_statuses = _collect_agent_statuses(paths)
+        node_summaries = _collect_node_summaries(paths, metadata_paths=run_metadata_paths)
+        agent_statuses = _collect_agent_statuses(paths, metadata_paths=run_metadata_paths)
     with telemetry.span("task_summary_construction"):
         detail_run_ids = _run_detail_build_run_ids(
             node_summaries=node_summaries,
@@ -435,6 +451,18 @@ def rebuild_read_models(
         graph_context_events=graph_context_events,
         event_total_count=event_total_count,
         run_summaries=run_summaries,
+    )
+    diagnostics_counts.update(
+        {
+            "run_metadata_entries_scanned": run_metadata_discovery.scanned_entries,
+            "run_metadata_directories_scanned": run_metadata_discovery.scanned_directories,
+            "run_metadata_matches": len(run_metadata_discovery.paths),
+            "run_metadata_scan_truncated": run_metadata_discovery.truncated,
+            "graph_context_event_limit": max(dashboard_event_limit, GRAPH_CONTEXT_EVENT_LIMIT),
+            "graph_context_events_truncated": bool(
+                event_total_count is not None and event_total_count > len(graph_context_events)
+            ),
+        }
     )
     diagnostics_counts["run_detail_records_reused"] = sum(1 for record in run_summaries if record.get("detail_reused") is True)
     if validation["status"] != "pass":
@@ -3519,11 +3547,15 @@ def _run_detail_source_metadata(
             add(path)
         artifacts_dir = run_dir / "artifacts"
         if artifacts_dir.is_dir():
-            try:
-                for path in sorted(artifacts_dir.rglob("*")):
-                    add(path)
-            except OSError:
-                pass
+            add(artifacts_dir)
+            discovery = discover_files_bounded(
+                (artifacts_dir,),
+                max_entries=max(1_000, RUN_DETAIL_ARTIFACT_DISCOVERY_LIMIT * 4),
+                max_matches=RUN_DETAIL_ARTIFACT_DISCOVERY_LIMIT,
+                max_depth=8,
+            )
+            for path in discovery.paths:
+                add(path)
     if task_id:
         add(paths.results_dir / task_id / "human_summary.md")
     for key in ("stdout_path", "stderr_path", "scheduler_run_dir", "role_output_dir", "task_evidence_run_dir"):
@@ -3994,8 +4026,14 @@ def _artifacts_section(paths: WorkflowPaths, run_dirs: Sequence[Path]) -> dict[s
         artifacts_dir = run_dir / "artifacts"
         if not artifacts_dir.is_dir():
             continue
-        for path in sorted(artifacts_dir.rglob("*")):
-            if path.is_file() and path not in seen and _is_dashboard_safe_path(paths, path):
+        discovery = discover_files_bounded(
+            (artifacts_dir,),
+            max_entries=max(1_000, NODE_DETAIL_ITEM_LIMIT * 16),
+            max_matches=NODE_DETAIL_ITEM_LIMIT + 1,
+            max_depth=8,
+        )
+        for path in discovery.paths:
+            if path not in seen and _is_dashboard_safe_path(paths, path):
                 seen.add(path)
                 artifacts.append(path)
     items = [_artifact_record(paths, path) for path in artifacts[:NODE_DETAIL_ITEM_LIMIT]]
@@ -4486,11 +4524,45 @@ def _validation_path_from_latest(project: Path, latest: Any) -> Path | None:
     return path if path.is_absolute() else project / value
 
 
-def _collect_validation_records(paths: WorkflowPaths) -> list[dict[str, Any]]:
+def _discover_run_metadata_files(paths: WorkflowPaths) -> FileDiscoveryResult:
+    return discover_files_bounded(
+        (
+            paths.results_dir,
+            paths.runtime_dir / "runs",
+            paths.planning_dir / "runs",
+        ),
+        names={"validation.json", "agent_status.json", "node_summary.json"},
+        max_entries=RUN_METADATA_SCAN_ENTRY_LIMIT,
+        max_matches=RUN_METADATA_SCAN_MATCH_LIMIT,
+    )
+
+
+def _run_metadata_paths_by_name(discovery: FileDiscoveryResult) -> dict[str, tuple[Path, ...]]:
+    grouped: dict[str, list[Path]] = {}
+    for path in discovery.paths:
+        grouped.setdefault(path.name, []).append(path)
+    return {
+        name: tuple(sorted(items, key=lambda item: item.as_posix()))
+        for name, items in grouped.items()
+    }
+
+
+def _collect_validation_records(
+    paths: WorkflowPaths,
+    *,
+    contexts: Sequence[TaskContext] = (),
+    metadata_paths: Mapping[str, Sequence[Path]] | None = None,
+) -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
     if not paths.results_dir.exists():
         return records
-    for path in sorted(paths.results_dir.glob("**/validation.json")):
+    candidates = set(metadata_paths.get("validation.json", ())) if isinstance(metadata_paths, Mapping) else set()
+    candidates.update(
+        context.validation_path
+        for context in contexts
+        if context.validation_path is not None
+    )
+    for path in sorted(candidates, key=lambda item: item.as_posix()):
         data = _read_json_object(path, default=None)
         if not isinstance(data, Mapping):
             continue
@@ -5501,30 +5573,34 @@ def _phase_id_from_task_id(task_id: str) -> str:
     return phase_id.strip()
 
 
-def _collect_agent_statuses(paths: WorkflowPaths) -> list[dict[str, Any]]:
+def _collect_agent_statuses(
+    paths: WorkflowPaths,
+    *,
+    metadata_paths: Mapping[str, Sequence[Path]] | None = None,
+) -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
-    for root in (paths.results_dir, paths.runtime_dir / "runs"):
-        if not root.exists():
-            continue
-        for path in sorted(root.glob("**/agent_status.json")):
-            record = _node_from_agent_status_path(path, paths)
-            if record is not None:
-                records.append(record)
+    candidates = metadata_paths.get("agent_status.json", ()) if isinstance(metadata_paths, Mapping) else ()
+    for path in candidates:
+        record = _node_from_agent_status_path(path, paths)
+        if record is not None:
+            records.append(record)
     return records
 
 
-def _collect_node_summaries(paths: WorkflowPaths) -> list[dict[str, Any]]:
+def _collect_node_summaries(
+    paths: WorkflowPaths,
+    *,
+    metadata_paths: Mapping[str, Sequence[Path]] | None = None,
+) -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
-    for root in (paths.results_dir, paths.runtime_dir / "runs", paths.planning_dir / "runs"):
-        if not root.exists():
+    candidates = metadata_paths.get("node_summary.json", ()) if isinstance(metadata_paths, Mapping) else ()
+    for path in candidates:
+        data = _read_json_object(path, default=None)
+        if not isinstance(data, Mapping):
             continue
-        for path in sorted(root.glob("**/node_summary.json")):
-            data = _read_json_object(path, default=None)
-            if not isinstance(data, Mapping):
-                continue
-            record = dict(data)
-            record["_path"] = _path_for_record(paths.project_root, path)
-            records.append(record)
+        record = dict(data)
+        record["_path"] = _path_for_record(paths.project_root, path)
+        records.append(record)
     return records
 
 
@@ -6769,6 +6845,10 @@ def _sanitized_version_control_configuration(configuration: Any, *, project: Pat
         "no_remote_push",
         "do_not_switch_user_branch",
         "do_not_modify_user_index",
+        "checkpoint_policy",
+        "checkpoint_limits",
+        "run_metadata",
+        "effective_worker_checkpointing",
     )
     result = {key: configuration.get(key) for key in allowed if key in configuration}
     if result.get("config_path"):
