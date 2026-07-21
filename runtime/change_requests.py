@@ -33,6 +33,7 @@ from runtime.reconciliation import (
     parse_plan_tasks,
 )
 from runtime.scheduler import AtomicOwnerLock, SCHEMA_VERSION, append_event
+from runtime.source_guard import read_process_template
 from runtime.version_control import create_git_checkpoint
 
 
@@ -814,7 +815,7 @@ def build_change_request_planner_prompt(
     role_output_dir: Path,
     patch_path: Path,
 ) -> str:
-    template = _safe_read(CHANGE_REQUEST_PLANNER_TEMPLATE_PATH)
+    template = read_process_template(CHANGE_REQUEST_PLANNER_TEMPLATE_PATH)
     context_manifest = _write_change_request_context_manifest(
         project=project,
         paths=paths,

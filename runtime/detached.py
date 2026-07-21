@@ -17,10 +17,20 @@ from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
+from runtime.source_guard import (
+    PROCESS_RUNTIME_SOURCE_SNAPSHOT,
+    RuntimeSourceDriftError,
+    RuntimeSourceGuard,
+)
 from runtime.adapters.base import utc_timestamp
 from runtime.control import record_control_request
 from runtime.exit_codes import EXIT_GENERIC_FAILURE, EXIT_INVALID_CONFIG, EXIT_SUCCESS
 from runtime.path_resolution import WorkflowPathError, WorkflowPaths, load_workflow_config
+from runtime.process_identity import (
+    host_is_local as process_host_is_local,
+    pid_exists as process_pid_exists,
+    process_start_time as read_process_start_time,
+)
 from runtime.reconciliation import reconciliation_exit_code, run_reconciler
 from runtime.scheduler import EXIT_DUPLICATE_SCHEDULER, SchedulerLockError, run_scheduler, scheduler_exit_code
 from runtime.validation import run_validator, validation_exit_code
@@ -33,6 +43,7 @@ SUPERVISOR_STDOUT_FILENAME = "supervisor_stdout.log"
 SUPERVISOR_STDERR_FILENAME = "supervisor_stderr.log"
 SUPERVISOR_SOURCE_SNAPSHOTS_DIRNAME = "supervisor_sources"
 SUPERVISOR_SOURCE_MANIFEST_FILENAME = "source_manifest.json"
+SUPERVISOR_MUTABLE_SOURCE_ROOT_ENV = "LOOPPLANE_SUPERVISOR_SOURCE_ROOT"
 SUPERVISOR_SOURCE_ROOTS = ("runtime", "templates")
 SUPERVISOR_SOURCE_READ_ATTEMPTS = 3
 SUPERVISOR_HEARTBEAT_TTL_SECONDS = 120
@@ -78,6 +89,7 @@ ACTIVE_SUPERVISOR_STATUSES = frozenset(
         "waiting_approval",
         "waiting_background",
         "waiting_runner_availability",
+        "restarting_source_update",
     }
 )
 RECOVERABLE_WAIT_ACTIONS = frozenset(
@@ -98,6 +110,9 @@ ACTION_FAILURE_BACKOFF_MAX_SECONDS = _positive_float_from_env(
 ACTION_FAILURE_MAX_REPEATS = max(
     1,
     int(_positive_float_from_env("LOOPPLANE_ACTION_FAILURE_MAX_REPEATS", 3.0)),
+)
+RUNTIME_SOURCE_CHECK_INTERVAL_SECONDS = _positive_float_from_env(
+    "LOOPPLANE_RUNTIME_SOURCE_CHECK_INTERVAL_SECONDS", 2.0
 )
 SUPERVISOR_CIRCUIT_BREAKER_ACTIONS = frozenset(
     {"run_expansion_planner", "run_phase_objective_verifier", "run_final_objective_verifier"}
@@ -253,6 +268,7 @@ def run_supervisor(project_root: Path | str, *, poll_interval_seconds: float = D
         return EXIT_INVALID_CONFIG
 
     paths = context["paths"]
+    supervisor_process_start_time = _process_start_time(os.getpid())
     _merge_supervisor_metadata(
         paths,
         {
@@ -262,7 +278,11 @@ def run_supervisor(project_root: Path | str, *, poll_interval_seconds: float = D
             "status": "running",
             "pid": os.getpid(),
             "host": socket.gethostname(),
-            "process_handle": {"pid": os.getpid()},
+            "process_start_time": supervisor_process_start_time,
+            "process_handle": {
+                "pid": os.getpid(),
+                "process_start_time": supervisor_process_start_time,
+            },
             "owner": owner,
             "started_at": _existing_started_at(paths) or utc_timestamp(),
             "updated_at": utc_timestamp(),
@@ -270,6 +290,7 @@ def run_supervisor(project_root: Path | str, *, poll_interval_seconds: float = D
             "exit_status": None,
             "exit_code": None,
             "ended_at": None,
+            "runtime_source_fingerprint": PROCESS_RUNTIME_SOURCE_SNAPSHOT.fingerprint,
         },
     )
 
@@ -295,8 +316,16 @@ def run_supervisor(project_root: Path | str, *, poll_interval_seconds: float = D
     action_failure_repeat_limit = _action_failure_repeat_limit(context["workflow"])
     startup_duplicate_first_seen: float | None = None
     successful_scheduler_tick = False
+    source_guard = RuntimeSourceGuard(
+        PROCESS_RUNTIME_SOURCE_SNAPSHOT,
+        observed_package_root=_supervisor_mutable_source_root(),
+        check_interval_seconds=RUNTIME_SOURCE_CHECK_INTERVAL_SECONDS,
+    )
     try:
         while True:
+            source_drift = source_guard.poll()
+            if source_drift is not None:
+                raise RuntimeSourceDriftError(source_drift)
             _heartbeat(paths, owner=owner, status="running")
             try:
                 result = run_scheduler(project, max_ticks=1)
@@ -408,6 +437,28 @@ def run_supervisor(project_root: Path | str, *, poll_interval_seconds: float = D
                 )
             else:
                 time.sleep(wait_seconds)
+    except RuntimeSourceDriftError as error:
+        try:
+            _reexec_supervisor_after_source_drift(project, paths=paths, drift=error.drift)
+        except BaseException as restart_error:
+            exit_code = EXIT_GENERIC_FAILURE
+            exit_status = "failed"
+            stop_reason = f"source_restart_failed:{restart_error.__class__.__name__}"
+            _merge_supervisor_metadata(
+                paths,
+                {
+                    "status": "failed",
+                    "updated_at": utc_timestamp(),
+                    "heartbeat_at": utc_timestamp(),
+                    "exit_status": exit_status,
+                    "exit_code": exit_code,
+                    "ended_at": utc_timestamp(),
+                    "stop_reason": stop_reason,
+                    "error": str(restart_error),
+                    "runtime_source_drift": dict(error.drift),
+                },
+            )
+            raise
     except BaseException as error:
         exit_code = EXIT_GENERIC_FAILURE
         exit_status = "failed"
@@ -442,6 +493,50 @@ def run_supervisor(project_root: Path | str, *, poll_interval_seconds: float = D
             },
         )
     return exit_code
+
+
+def _reexec_supervisor_after_source_drift(
+    project: Path,
+    *,
+    paths: WorkflowPaths,
+    drift: Mapping[str, Any],
+) -> None:
+    metadata = _read_json(_supervisor_metadata_path(paths), default={})
+    restart_count = _positive_int(metadata.get("runtime_source_restart_count")) if isinstance(metadata, Mapping) else None
+    source_root = _supervisor_mutable_source_root()
+    source_snapshot = _materialize_supervisor_source_snapshot(
+        source_root,
+        paths.runtime_dir / SUPERVISOR_SOURCE_SNAPSHOTS_DIRNAME,
+    )
+    repo_root = Path(str(source_snapshot["root"]))
+    argv = [sys.executable, "-m", "runtime.detached", "supervisor", "--project", project.as_posix()]
+    restart_env = dict(os.environ)
+    restart_env[SUPERVISOR_MUTABLE_SOURCE_ROOT_ENV] = source_root.as_posix()
+    restart_env["PYTHONPATH"] = _pythonpath_with_repo(repo_root, restart_env.get("PYTHONPATH"))
+    restart_env["PYTHONDONTWRITEBYTECODE"] = "1"
+    snapshot_metadata = _supervisor_source_snapshot_metadata(
+        project,
+        source_root=source_root,
+        source_snapshot=source_snapshot,
+    )
+    _merge_supervisor_metadata(
+        paths,
+        {
+            "status": "restarting_source_update",
+            "updated_at": utc_timestamp(),
+            "heartbeat_at": utc_timestamp(),
+            "last_action": "restart_for_runtime_source_update",
+            "last_loop_reason": "runtime_source_drift",
+            "runtime_source_drift": dict(drift),
+            "runtime_source_restart_count": (restart_count or 0) + 1,
+            "restart_command": argv,
+            "restart_command_cwd": repo_root.as_posix(),
+            "source_snapshot": snapshot_metadata,
+        },
+    )
+    os.chdir(repo_root)
+    os.execve(sys.executable, argv, restart_env)
+    raise OSError("os.execve returned without replacing the supervisor process")
 
 
 def load_supervisor_status(project_root: Path | str) -> dict[str, Any]:
@@ -495,14 +590,33 @@ def load_supervisor_status(project_root: Path | str) -> dict[str, Any]:
     if host_is_local is False:
         alive = True if active_or_unknown and not heartbeat_stale else None
         liveness_source = "heartbeat" if alive is True else None
+        raw_pid_alive = None
     else:
-        alive = _pid_exists(pid) if pid is not None else None
+        raw_pid_alive = _pid_exists(pid) if pid is not None else None
+        alive = raw_pid_alive
         liveness_source = "pid" if alive is not None else None
+    expected_process_start = str(metadata.get("process_start_time") or "").strip() or None
+    observed_process_start = (
+        _process_start_time(pid)
+        if pid is not None and host_is_local is not False and raw_pid_alive is True
+        else None
+    )
+    process_identity_matches: bool | None = None
+    if expected_process_start is not None and observed_process_start is not None:
+        process_identity_matches = expected_process_start == observed_process_start
+    if raw_pid_alive is True and process_identity_matches is False:
+        alive = False
     liveness = "alive" if alive is True else ("dead" if alive is False else "unknown")
     status = metadata_status
     warnings: list[str] = []
     status_problems: list[str] = []
     missing_fields = _missing_supervisor_metadata_fields(metadata)
+    metadata_workflow_id = str(metadata.get("workflow_id") or "").strip() or None
+    expected_workflow_id = str(context["workflow_id"])
+    metadata_source_fingerprint = str(
+        metadata.get("runtime_source_fingerprint") or ""
+    ).strip() or None
+    current_source_fingerprint = PROCESS_RUNTIME_SOURCE_SNAPSHOT.fingerprint
     if metadata_status not in TERMINAL_SUPERVISOR_STATUSES and alive is False:
         status = "stale"
         status_problems.append("dead_process")
@@ -515,6 +629,28 @@ def load_supervisor_status(project_root: Path | str) -> dict[str, Any]:
         status = "stale"
         status_problems.append("incomplete_metadata")
         warnings.append("Supervisor metadata is incomplete: missing " + ", ".join(missing_fields) + ".")
+    if metadata_status not in TERMINAL_SUPERVISOR_STATUSES and active_or_unknown:
+        if metadata_workflow_id != expected_workflow_id:
+            status = "stale"
+            status_problems.append("workflow_identity_mismatch")
+            warnings.append("Supervisor workflow_id does not match the active workflow.")
+        if metadata_source_fingerprint != current_source_fingerprint:
+            status = "stale"
+            status_problems.append("runtime_source_fingerprint_mismatch")
+            warnings.append("Supervisor is not running the current LoopPlane source fingerprint.")
+        if raw_pid_alive is True and process_identity_matches is False:
+            status = "stale"
+            status_problems.append("process_identity_mismatch")
+            warnings.append("Supervisor PID has been reused by a different process identity.")
+        elif (
+            host_is_local is not False
+            and raw_pid_alive is True
+            and observed_process_start is not None
+            and expected_process_start is None
+        ):
+            status = "stale"
+            status_problems.append("process_identity_missing")
+            warnings.append("Supervisor metadata is missing process_start_time.")
     return {
         "schema_version": SCHEMA_VERSION,
         "ok": True,
@@ -529,6 +665,13 @@ def load_supervisor_status(project_root: Path | str) -> dict[str, Any]:
         "pid_probe_scope": pid_probe_scope,
         "liveness": liveness,
         "liveness_source": liveness_source,
+        "expected_process_start_time": expected_process_start,
+        "observed_process_start_time": observed_process_start,
+        "process_identity_matches": process_identity_matches,
+        "expected_workflow_id": expected_workflow_id,
+        "metadata_workflow_id": metadata_workflow_id,
+        "current_runtime_source_fingerprint": current_source_fingerprint,
+        "metadata_runtime_source_fingerprint": metadata_source_fingerprint,
         "heartbeat_stale": heartbeat_stale,
         "metadata_heartbeat_stale": metadata_heartbeat_stale,
         "heartbeat_covered_by_active_run_lease": heartbeat_covered_by_active_run_lease,
@@ -1071,12 +1214,12 @@ def _launch_supervisor_process(project: Path, context: Mapping[str, Any], *, sta
     env = dict(os.environ)
     env["PYTHONPATH"] = _pythonpath_with_repo(repo_root, env.get("PYTHONPATH"))
     env["PYTHONDONTWRITEBYTECODE"] = "1"
-    snapshot_metadata = {
-        "fingerprint": source_snapshot["fingerprint"],
-        "path": _path_for_record(project, repo_root),
-        "manifest_path": _path_for_record(project, Path(str(source_snapshot["manifest_path"]))),
-        "file_count": source_snapshot["file_count"],
-    }
+    env[SUPERVISOR_MUTABLE_SOURCE_ROOT_ENV] = source_root.as_posix()
+    snapshot_metadata = _supervisor_source_snapshot_metadata(
+        project,
+        source_root=source_root,
+        source_snapshot=source_snapshot,
+    )
     _merge_supervisor_metadata(
         paths,
         {
@@ -1088,6 +1231,8 @@ def _launch_supervisor_process(project: Path, context: Mapping[str, Any], *, sta
             "updated_at": started_at,
             "heartbeat_at": started_at,
             "pid": None,
+            "host": socket.gethostname(),
+            "process_start_time": None,
             "command": command,
             "command_display": _display_command(command),
             "command_cwd": repo_root.as_posix(),
@@ -1096,6 +1241,7 @@ def _launch_supervisor_process(project: Path, context: Mapping[str, Any], *, sta
             "exit_status": None,
             "exit_code": None,
             "ended_at": None,
+            "runtime_source_fingerprint": PROCESS_RUNTIME_SOURCE_SNAPSHOT.fingerprint,
         },
     )
 
@@ -1111,17 +1257,60 @@ def _launch_supervisor_process(project: Path, context: Mapping[str, Any], *, sta
             start_new_session=(os.name != "nt"),
         )
 
+    launched_process_start_time = _process_start_time(process.pid)
     _merge_supervisor_metadata(
         paths,
         {
             "status": "running",
             "pid": process.pid,
-            "process_handle": {"pid": process.pid},
+            "host": socket.gethostname(),
+            "process_start_time": launched_process_start_time,
+            "process_handle": {
+                "pid": process.pid,
+                "process_start_time": launched_process_start_time,
+            },
             "updated_at": utc_timestamp(),
             "heartbeat_at": utc_timestamp(),
+            "runtime_source_fingerprint": PROCESS_RUNTIME_SOURCE_SNAPSHOT.fingerprint,
         },
     )
     return load_supervisor_status(project)
+
+
+def _supervisor_source_snapshot_metadata(
+    project: Path,
+    *,
+    source_root: Path,
+    source_snapshot: Mapping[str, Any],
+) -> dict[str, Any]:
+    snapshot_root = Path(str(source_snapshot["root"]))
+    return {
+        "fingerprint": source_snapshot["fingerprint"],
+        "path": _path_for_record(project, snapshot_root),
+        "manifest_path": _path_for_record(
+            project,
+            Path(str(source_snapshot["manifest_path"])),
+        ),
+        "source_root": source_root.as_posix(),
+        "file_count": source_snapshot["file_count"],
+    }
+
+
+def _supervisor_mutable_source_root() -> Path:
+    configured = str(os.environ.get(SUPERVISOR_MUTABLE_SOURCE_ROOT_ENV) or "").strip()
+    if configured:
+        return Path(configured).expanduser().resolve()
+
+    process_root = Path(__file__).resolve().parents[1]
+    manifest = _read_json(
+        process_root / SUPERVISOR_SOURCE_MANIFEST_FILENAME,
+        default={},
+    )
+    if isinstance(manifest, Mapping):
+        recorded = str(manifest.get("source_root") or "").strip()
+        if recorded:
+            return Path(recorded).expanduser().resolve()
+    return process_root
 
 
 def _materialize_supervisor_source_snapshot(
@@ -1201,6 +1390,11 @@ def _materialize_supervisor_source_snapshot(
         if temporary.exists():
             shutil.rmtree(temporary)
 
+    _validate_supervisor_source_snapshot(
+        target,
+        bundle=bundle,
+        fingerprint=fingerprint,
+    )
     return {
         "root": target.as_posix(),
         "manifest_path": manifest_path.as_posix(),
@@ -1244,9 +1438,54 @@ def _validate_supervisor_source_snapshot(
     bundle: Mapping[str, bytes],
     fingerprint: str,
 ) -> None:
+    if snapshot_root.is_symlink() or not snapshot_root.is_dir():
+        raise RuntimeError(
+            f"detached supervisor source snapshot root is not a real directory: {snapshot_root}"
+        )
     manifest_path = snapshot_root / SUPERVISOR_SOURCE_MANIFEST_FILENAME
     manifest = _read_json(manifest_path, default={})
     if not isinstance(manifest, Mapping) or str(manifest.get("fingerprint") or "") != fingerprint:
+        raise RuntimeError(f"detached supervisor source snapshot manifest is invalid: {manifest_path}")
+    expected_files = set(bundle)
+    expected_snapshot_files = expected_files | {SUPERVISOR_SOURCE_MANIFEST_FILENAME}
+    observed_files: set[str] = set()
+    for candidate in snapshot_root.rglob("*"):
+        if candidate.is_symlink():
+            raise RuntimeError(
+                f"detached supervisor source snapshot contains a symlink: {candidate}"
+            )
+        if candidate.is_file():
+            observed_files.add(candidate.relative_to(snapshot_root).as_posix())
+    unexpected = sorted(observed_files - expected_snapshot_files)
+    missing = sorted(expected_snapshot_files - observed_files)
+    if unexpected:
+        raise RuntimeError(
+            "detached supervisor source snapshot contains an unexpected file: "
+            + ", ".join(unexpected[:20])
+        )
+    if missing:
+        raise RuntimeError(
+            "detached supervisor source snapshot is incomplete: "
+            + ", ".join(missing[:20])
+        )
+
+    raw_records = manifest.get("files")
+    if not isinstance(raw_records, Sequence) or isinstance(raw_records, (str, bytes)):
+        raise RuntimeError(f"detached supervisor source snapshot manifest is invalid: {manifest_path}")
+    manifest_files: dict[str, str] = {}
+    for record in raw_records:
+        if not isinstance(record, Mapping):
+            raise RuntimeError(f"detached supervisor source snapshot manifest is invalid: {manifest_path}")
+        relative = str(record.get("path") or "").strip()
+        digest = str(record.get("sha256") or "").strip()
+        if not relative or not digest or relative in manifest_files:
+            raise RuntimeError(f"detached supervisor source snapshot manifest is invalid: {manifest_path}")
+        manifest_files[relative] = digest
+    expected_manifest_files = {
+        relative: "sha256:" + sha256(content).hexdigest()
+        for relative, content in bundle.items()
+    }
+    if manifest_files != expected_manifest_files:
         raise RuntimeError(f"detached supervisor source snapshot manifest is invalid: {manifest_path}")
     for relative, expected in bundle.items():
         candidate = snapshot_root / relative
@@ -1305,6 +1544,8 @@ def _heartbeat(paths: WorkflowPaths, *, owner: str, status: str | None) -> None:
         "heartbeat_at": utc_timestamp(),
         "pid": os.getpid(),
         "host": socket.gethostname(),
+        "process_start_time": _process_start_time(os.getpid()),
+        "runtime_source_fingerprint": PROCESS_RUNTIME_SOURCE_SNAPSHOT.fingerprint,
     }
     if status is not None:
         updates["status"] = status
@@ -1461,19 +1702,7 @@ def _supervisor_host(metadata: Mapping[str, Any]) -> str | None:
 
 
 def _host_is_local(host: str | None) -> bool | None:
-    if not host:
-        return None
-
-    def aliases(value: str) -> set[str]:
-        normalized = value.strip().lower().rstrip(".")
-        if not normalized:
-            return set()
-        return {normalized, normalized.split(".", 1)[0]}
-
-    local_aliases: set[str] = set()
-    for value in (socket.gethostname(), socket.getfqdn()):
-        local_aliases.update(aliases(value))
-    return bool(local_aliases.intersection(aliases(host)))
+    return process_host_is_local(host)
 
 
 def _workflow_config_problem(project: Path, message: str) -> dict[str, Any]:
@@ -1505,15 +1734,11 @@ def _parse_iso_timestamp(value: object) -> datetime | None:
 def _pid_exists(pid: int | None) -> bool | None:
     if pid is None:
         return None
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    except OSError:
-        return None
-    return True
+    return process_pid_exists(pid)
+
+
+def _process_start_time(pid: int) -> str | None:
+    return read_process_start_time(pid)
 
 
 def _positive_int(value: object) -> int | None:

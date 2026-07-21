@@ -22,6 +22,11 @@ from runtime.adapters.base import utc_timestamp
 from runtime.agent_status import is_success_worker_status, normalize_worker_status
 from runtime.exit_codes import EXIT_GENERIC_FAILURE, EXIT_INVALID_CONFIG
 from runtime.path_resolution import WorkflowPathError
+from runtime.process_identity import (
+    host_is_local as process_host_is_local,
+    pid_exists as process_pid_exists,
+    process_start_time as read_process_start_time,
+)
 from runtime.scheduler import (
     ALLOWED_BACKGROUND_JOB_STATUSES,
     BACKGROUND_JOB_SAFE_STATUSES,
@@ -265,6 +270,7 @@ def start_background_job(
     job.update(
         {
             "supervisor_pid": supervisor.pid,
+            "supervisor_process_start_time": _process_start_time(supervisor.pid),
             "pid": supervisor.pid,
             "heartbeat_at": launched_at,
             "updated_at": launched_at,
@@ -670,6 +676,7 @@ def _run_supervisor(project: Path, *, workflow_id: str, job_id: str, launch_path
         )
         return EXIT_INVALID_CONFIG
     supervisor_host = socket.gethostname()
+    supervisor_process_start_time = _process_start_time(os.getpid())
     initial_job = _supervisor_update_job(
         paths,
         workflow_id=workflow_id,
@@ -681,6 +688,7 @@ def _run_supervisor(project: Path, *, workflow_id: str, job_id: str, launch_path
             job,
             {
                 "supervisor_pid": os.getpid(),
+                "supervisor_process_start_time": supervisor_process_start_time,
                 "supervisor_host": supervisor_host,
                 "heartbeat_at": utc_timestamp(),
                 "updated_at": utc_timestamp(),
@@ -723,6 +731,7 @@ def _run_supervisor(project: Path, *, workflow_id: str, job_id: str, launch_path
                 stderr=stderr,
                 start_new_session=True,
             )
+            child_process_start_time = _process_start_time(process.pid)
             _append_log(supervisor_log, f"command_started pid={process.pid}")
             started_job = _supervisor_update_job(
                 paths,
@@ -736,7 +745,9 @@ def _run_supervisor(project: Path, *, workflow_id: str, job_id: str, launch_path
                     {
                         "pid": process.pid,
                         "child_pid": process.pid,
+                        "child_process_start_time": child_process_start_time,
                         "supervisor_pid": os.getpid(),
+                        "supervisor_process_start_time": supervisor_process_start_time,
                         "supervisor_host": supervisor_host,
                         "heartbeat_at": utc_timestamp(),
                         "updated_at": utc_timestamp(),
@@ -833,7 +844,9 @@ def _run_supervisor(project: Path, *, workflow_id: str, job_id: str, launch_path
                         {
                             "pid": process.pid,
                             "child_pid": process.pid,
+                            "child_process_start_time": child_process_start_time,
                             "supervisor_pid": os.getpid(),
+                            "supervisor_process_start_time": supervisor_process_start_time,
                             "supervisor_host": supervisor_host,
                             "heartbeat_at": utc_timestamp(),
                             "updated_at": utc_timestamp(),
@@ -1044,7 +1057,7 @@ def _run_watchdog_check(
             job_id=job_id,
             supervisor_log=supervisor_log,
             operation="watchdog_error",
-            durable=False,
+            durable=True,
             update=lambda job: _job_with_watchdog_update(job, _watchdog_record_update(job, record, "inspector_error")),
         )
         return {"stop_job": False, "status": "running"}
@@ -1078,7 +1091,7 @@ def _run_watchdog_check(
         job_id=job_id,
         supervisor_log=supervisor_log,
         operation="watchdog_complete",
-        durable=False,
+        durable=True,
         update=lambda job: _job_with_watchdog_update(
             job,
             _watchdog_record_update(
@@ -1607,8 +1620,8 @@ def _refresh_job(project: Path, paths: Any, job: Mapping[str, Any]) -> dict[str,
                 and
                 child_pid is not None
                 and supervisor_pid is not None
-                and _pid_exists(child_pid)
-                and _pid_exists(supervisor_pid)
+                and _job_process_liveness(refreshed, child_pid, role="child") is True
+                and _job_process_liveness(refreshed, supervisor_pid, role="supervisor") is True
             ):
                 # Both independently recorded process levels are live.  This
                 # covers synchronous watchdog inspections (which cannot emit a
@@ -1627,7 +1640,7 @@ def _refresh_job(project: Path, paths: Any, job: Mapping[str, Any]) -> dict[str,
         if (
             pid is not None
             and _job_supervisor_is_local(refreshed)
-            and _pid_exists(pid) is False
+            and _job_process_liveness(refreshed, pid, role="current") is False
         ):
             if _pid_missing_is_within_startup_grace(refreshed, pid=pid, age_seconds=age):
                 refreshed["next_prompt_ready"] = False
@@ -1705,7 +1718,10 @@ def _agent_status_job_fragment(job: Mapping[str, Any]) -> dict[str, Any]:
         "next_prompt_ready",
         "wake_next_agent_when",
         "pid",
+        "child_pid",
+        "child_process_start_time",
         "supervisor_pid",
+        "supervisor_process_start_time",
         "supervisor_host",
         "logs",
         "exit_code_file",
@@ -1919,15 +1935,11 @@ def _reap_process_async(process: subprocess.Popen[Any]) -> None:
 
 
 def _pid_exists(pid: int) -> bool | None:
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    except OSError:
-        return None
-    return True
+    return process_pid_exists(pid)
+
+
+def _process_start_time(pid: int) -> str | None:
+    return read_process_start_time(pid)
 
 
 def _pid_is_zombie(pid: int) -> bool:
@@ -1961,7 +1973,7 @@ def _job_supervisor_is_local(job: Mapping[str, Any]) -> bool:
     """
 
     supervisor_host = _non_empty_text(job.get("supervisor_host"))
-    return supervisor_host is not None and _hostnames_match(supervisor_host, socket.gethostname())
+    return process_host_is_local(supervisor_host) is True
 
 
 def _job_pid_probe_may_confirm_liveness(job: Mapping[str, Any]) -> bool:
@@ -1975,12 +1987,41 @@ def _job_pid_probe_may_confirm_liveness(job: Mapping[str, Any]) -> bool:
     return _job_supervisor_is_local(job)
 
 
-def _hostnames_match(left: str, right: str) -> bool:
-    left_normalized = left.strip().lower().rstrip(".")
-    right_normalized = right.strip().lower().rstrip(".")
-    if not left_normalized or not right_normalized:
+def _job_process_liveness(
+    job: Mapping[str, Any],
+    pid: int,
+    *,
+    role: str,
+) -> bool | None:
+    if not _job_supervisor_is_local(job):
+        return None
+    alive = _pid_exists(pid)
+    if alive is not True:
+        return alive
+    expected_start = _job_expected_process_start(job, pid=pid, role=role)
+    if expected_start is None:
+        return True
+    observed_start = _process_start_time(pid)
+    if observed_start is None:
+        return None
+    if observed_start != expected_start:
         return False
-    return left_normalized == right_normalized or left_normalized.split(".", 1)[0] == right_normalized.split(".", 1)[0]
+    return True
+
+
+def _job_expected_process_start(
+    job: Mapping[str, Any],
+    *,
+    pid: int,
+    role: str,
+) -> str | None:
+    child_pid = _positive_int(job.get("child_pid"))
+    supervisor_pid = _positive_int(job.get("supervisor_pid"))
+    if role == "child" or (role == "current" and child_pid == pid):
+        return _non_empty_text(job.get("child_process_start_time"))
+    if role == "supervisor" or (role == "current" and supervisor_pid == pid):
+        return _non_empty_text(job.get("supervisor_process_start_time"))
+    return None
 
 
 def _terminate_process_group(pid: int) -> bool:

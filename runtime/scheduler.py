@@ -71,6 +71,11 @@ from runtime.plan_objectives import (
     parse_plan_objectives,
 )
 from runtime.planning import inspect_active_plan
+from runtime.process_identity import (
+    host_is_local as process_host_is_local,
+    pid_exists as process_pid_exists,
+    process_start_time as read_process_start_time,
+)
 from runtime.prompt_builder import PromptBuildError, build_prompt_for_prepared_run
 from runtime.schema_validation import check_project_schema_version, schema_validation_exit_code
 from runtime.version_control import capture_run_git_metadata, create_git_checkpoint
@@ -252,7 +257,7 @@ class AtomicOwnerLock:
         age_seconds = max(0, int((datetime.now(UTC) - heartbeat).total_seconds()))
         owner_host = _non_empty_text(owner.get("hostname"))
         owner_provably_gone = False
-        if owner_host is not None and _hostnames_match(owner_host, socket.gethostname()):
+        if owner_host is not None and process_host_is_local(owner_host) is True:
             pid = _lock_owner_pid(owner)
             if pid is not None:
                 pid_liveness = _pid_exists(pid)
@@ -503,6 +508,8 @@ def prepare_run(
         "heartbeat_at": prepared_at,
         "lease_expires_at": _timestamp_after(prepared_at, lease_ttl_seconds),
         "scheduler_pid": os.getpid(),
+        "scheduler_host": socket.gethostname(),
+        "scheduler_process_start_time": _process_start_time(os.getpid()),
         "adapter_pid": None,
         "adapter_child_pid": None,
         "lease_ttl_seconds": lease_ttl_seconds,
@@ -1310,12 +1317,35 @@ def _read_active_run_leases(paths: WorkflowPaths, *, now: datetime) -> list[dict
         process_liveness = _active_lease_process_liveness(lease)
         alive = process_liveness.get("alive")
         liveness = str(process_liveness.get("liveness") or "unavailable")
+        stale_starting_without_adapter = (
+            status == "starting"
+            and not fresh
+            and _positive_int(lease.get("adapter_pid")) is None
+            and _positive_int(lease.get("adapter_child_pid")) is None
+        )
+        starting_controller_active = (
+            stale_starting_without_adapter
+            and _starting_lease_controller_is_active(paths, lease, now=now)
+        )
         status_problem = None
         normalized_status = status
         reclaimed = False
+        released_reason = "runner_process_dead_and_heartbeat_stale"
         if status not in ACTIVE_RUN_LEASE_ACTIVE_STATUSES:
             normalized_status = "needs_recovery"
             status_problem = f"unknown_status:{status}"
+        elif stale_starting_without_adapter and not starting_controller_active:
+            # ``prepare_run`` writes a starting lease before an adapter process
+            # exists.  The scheduler PID is only the controller and must not
+            # keep that pre-launch lease alive forever after its heartbeat and
+            # expiry have elapsed.  A fresh starting lease remains protected by
+            # the normal freshness gate above.
+            normalized_status = "released"
+            status_problem = "stale_starting_lease_without_adapter_reclaimed"
+            released_reason = "adapter_never_started_and_starting_lease_expired"
+            reclaimed = True
+        elif starting_controller_active:
+            status_problem = "stale_heartbeat_preparing_controller_active"
         elif not fresh and alive is True:
             status_problem = "stale_heartbeat_process_alive"
         elif not fresh and alive is False:
@@ -1334,7 +1364,13 @@ def _read_active_run_leases(paths: WorkflowPaths, *, now: datetime) -> list[dict
             normalized_status = "stale"
             status_problem = "stale_heartbeat"
         if reclaimed:
-            _release_stale_dead_run_lease(paths, lease_file, lease)
+            _release_stale_dead_run_lease(
+                paths,
+                lease_file,
+                lease,
+                status_problem=status_problem or "stale_heartbeat_process_dead_reclaimed",
+                released_reason=released_reason,
+            )
             # Released leases are inactive: drop from the active set so the
             # scheduler can proceed with normal work on this same tick.
             continue
@@ -1355,6 +1391,49 @@ def _read_active_run_leases(paths: WorkflowPaths, *, now: datetime) -> list[dict
             record["status_problem"] = status_problem
         leases.append(record)
     return leases
+
+
+def _starting_lease_controller_is_active(
+    paths: WorkflowPaths,
+    lease: Mapping[str, Any],
+    *,
+    now: datetime,
+) -> bool:
+    """Protect a slow, still-authoritative pre-launch preparation from reclaim."""
+
+    lease_owner = _non_empty_text(lease.get("scheduler_owner"))
+    lease_pid = _positive_int(lease.get("scheduler_pid"))
+    if lease_owner is None or lease_pid is None:
+        return False
+    owner_path = paths.runtime_dir / "lock" / "scheduler_instance_lock" / OWNER_FILENAME
+    owner = _read_json_object(owner_path, default={})
+    if not isinstance(owner, Mapping):
+        return False
+    if _non_empty_text(owner.get("owner")) != lease_owner:
+        return False
+    if _lock_owner_pid(owner) != lease_pid:
+        return False
+    heartbeat = _parse_iso_timestamp(owner.get("heartbeat_at") or owner.get("started_at"))
+    ttl_seconds = max(
+        1,
+        _int_value(owner.get("ttl_seconds"), default=SCHEDULER_LOCK_TTL_SECONDS),
+    )
+    if heartbeat is None or max(0, int((now - heartbeat).total_seconds())) > ttl_seconds:
+        return False
+    owner_host = _non_empty_text(owner.get("hostname"))
+    if owner_host is not None and process_host_is_local(owner_host) is True:
+        if _pid_exists(lease_pid) is not True:
+            return False
+        expected_start = _non_empty_text(owner.get("process_start_time"))
+        observed_start = _process_start_time(lease_pid)
+        if (
+            expected_start is not None
+            and expected_start.startswith("proc:")
+            and observed_start is not None
+            and observed_start != expected_start
+        ):
+            return False
+    return True
 
 
 def _archive_old_inactive_run_leases(paths: WorkflowPaths, *, lease_dir: Path) -> None:
@@ -1441,16 +1520,22 @@ def _release_stale_dead_run_lease(
     paths: WorkflowPaths,
     lease_file: Path,
     lease: Mapping[str, Any],
+    *,
+    status_problem: str = "stale_heartbeat_process_dead_reclaimed",
+    released_reason: str = "runner_process_dead_and_heartbeat_stale",
 ) -> None:
-    """Persist a 'released' terminal status onto a stale lease whose runner is
-    confirmed dead, so the reclaim survives across ticks and is auditable. Best
-    effort: a failed write simply leaves the lease for the next tick to retry."""
+    """Persist a safe, auditable terminal status onto a reclaimable stale lease.
+
+    This covers both a definitively dead adapter and a pre-launch ``starting``
+    lease that never acquired an adapter PID before its lease expired. Best
+    effort: a failed write simply leaves the lease for the next tick to retry.
+    """
     try:
         record = dict(lease)
         record["status"] = "released"
-        record["status_problem"] = "stale_heartbeat_process_dead_reclaimed"
+        record["status_problem"] = status_problem
         record["released_at"] = utc_timestamp()
-        record["released_reason"] = "runner_process_dead_and_heartbeat_stale"
+        record["released_reason"] = released_reason
         recovery_reset = _reset_abandoned_recovery_failure(paths, lease)
         if recovery_reset is not None:
             record["failure_recovery_reset"] = recovery_reset
@@ -6421,6 +6506,19 @@ def _refresh_active_run_lease(
     ttl_seconds = _int_value(lease.get("lease_ttl_seconds"), default=ACTIVE_RUN_LEASE_TTL_SECONDS)
     now = utc_timestamp()
     heartbeat_count = _int_value(lease.get("heartbeat_count"), default=0) + 1
+    scheduler_pid = os.getpid()
+    scheduler_host = socket.gethostname()
+    child_pid = _adapter_child_pid(prepared) or _int_value(
+        lease.get("adapter_child_pid"), default=None
+    )
+    previous_child_pid = _positive_int(lease.get("adapter_child_pid"))
+    child_start_time = (
+        _process_start_time(child_pid)
+        if child_pid is not None and child_pid != previous_child_pid
+        else _non_empty_text(lease.get("adapter_child_process_start_time"))
+    )
+    if child_pid is not None and child_start_time is None:
+        child_start_time = _process_start_time(child_pid)
     lease.update(
         {
             "schema_version": SCHEMA_VERSION,
@@ -6433,10 +6531,16 @@ def _refresh_active_run_lease(
             "status": status,
             "heartbeat_at": now,
             "lease_expires_at": _timestamp_after(now, ttl_seconds),
-            "scheduler_pid": os.getpid(),
+            "scheduler_pid": scheduler_pid,
+            "scheduler_host": scheduler_host,
+            "scheduler_process_start_time": _process_start_time(scheduler_pid),
             "adapter_pid": adapter_pid,
-            "adapter_child_pid": _adapter_child_pid(prepared)
-            or _int_value(lease.get("adapter_child_pid"), default=None),
+            "adapter_host": scheduler_host if adapter_pid is not None else lease.get("adapter_host"),
+            "adapter_process_start_time": (
+                _process_start_time(adapter_pid) if adapter_pid is not None else None
+            ),
+            "adapter_child_pid": child_pid,
+            "adapter_child_process_start_time": child_start_time,
             "scheduler_owner": owner,
             "lease_ttl_seconds": ttl_seconds,
             "heartbeat_count": heartbeat_count,
@@ -7169,10 +7273,12 @@ def _evaluate_background_job_record(
             child_pid = _positive_int(job.get("pid") or job.get("child_pid"))
             supervisor_pid = _positive_int(job.get("supervisor_pid"))
             if (
+                _background_job_supervisor_is_local(job)
+                and
                 child_pid is not None
                 and supervisor_pid is not None
-                and _pid_exists(child_pid)
-                and _pid_exists(supervisor_pid)
+                and _background_job_pid_liveness(job, child_pid, role="child") is True
+                and _background_job_pid_liveness(job, supervisor_pid, role="supervisor") is True
             ):
                 # Both independently recorded process levels are live.  This
                 # is stronger evidence than a metadata heartbeat during a
@@ -7187,9 +7293,9 @@ def _evaluate_background_job_record(
             job["next_prompt_ready"] = False
             return job
         pid_value = job.get("pid")
-        if pid_value is not None:
+        if pid_value is not None and _background_job_supervisor_is_local(job):
             pid = _positive_int(pid_value)
-            if pid is None or _pid_exists(pid) is False:
+            if pid is None or _background_job_pid_liveness(job, pid, role="current") is False:
                 if pid is not None and _background_pid_missing_is_within_startup_grace(job, pid=pid, age_seconds=age):
                     job["next_prompt_ready"] = False
                     return job
@@ -7266,6 +7372,50 @@ def _background_pid_missing_is_within_startup_grace(job: Mapping[str, Any], *, p
     return age_seconds <= BACKGROUND_JOB_PID_STARTUP_GRACE_SECONDS
 
 
+def _background_job_supervisor_is_local(job: Mapping[str, Any]) -> bool:
+    """Whether PID evidence in a shared background record is local authority."""
+
+    supervisor_host = _non_empty_text(job.get("supervisor_host"))
+    return process_host_is_local(supervisor_host) is True
+
+
+def _background_job_pid_liveness(
+    job: Mapping[str, Any],
+    pid: int,
+    *,
+    role: str,
+) -> bool | None:
+    if not _background_job_supervisor_is_local(job):
+        return None
+    alive = _pid_exists(pid)
+    if alive is not True:
+        return alive
+    expected_start = _background_job_expected_process_start(job, pid=pid, role=role)
+    if expected_start is None:
+        return True
+    observed_start = _process_start_time(pid)
+    if observed_start is None:
+        return None
+    if observed_start != expected_start:
+        return False
+    return True
+
+
+def _background_job_expected_process_start(
+    job: Mapping[str, Any],
+    *,
+    pid: int,
+    role: str,
+) -> str | None:
+    child_pid = _positive_int(job.get("child_pid"))
+    supervisor_pid = _positive_int(job.get("supervisor_pid"))
+    if role == "child" or (role == "current" and child_pid == pid):
+        return _non_empty_text(job.get("child_process_start_time"))
+    if role == "supervisor" or (role == "current" and supervisor_pid == pid):
+        return _non_empty_text(job.get("supervisor_process_start_time"))
+    return None
+
+
 def _status_from_wake_check(paths: WorkflowPaths, job: Mapping[str, Any]) -> str | None:
     wake_check = job.get("wake_check")
     if not isinstance(wake_check, Mapping):
@@ -7280,8 +7430,13 @@ def _status_from_wake_check(paths: WorkflowPaths, job: Mapping[str, Any]) -> str
     if not resolved or not all(path is not None and path.exists() for path in resolved):
         return None
     if wake_type == "file_exists_and_process_exited":
+        exit_status = _status_from_exit_code_file(paths, job)
+        if exit_status is not None:
+            return exit_status
+        if not _background_job_supervisor_is_local(job):
+            return None
         pid = _positive_int(job.get("pid"))
-        if pid is not None and _pid_exists(pid) is True:
+        if pid is not None and _background_job_pid_liveness(job, pid, role="current") is True:
             return None
     return _status_from_exit_code_file(paths, job) or "completed"
 
@@ -7321,20 +7476,51 @@ def _active_lease_process_liveness(lease: Mapping[str, Any]) -> dict[str, Any]:
             if raw_pid is not None:
                 entries.append({"field": field, "pid": raw_pid, "liveness": "invalid"})
             continue
-        alive = _pid_exists(pid)
-        entries.append(
-            {
-                "field": field,
-                "pid": pid,
-                "liveness": "alive" if alive is True else ("dead" if alive is False else "unavailable"),
-            }
-        )
-    runner_entries = [
-        entry
-        for entry in entries
-        if str(entry.get("field") or "") in {"adapter_child_pid", "adapter_pid"}
+        host = _active_lease_process_host(lease, field=field, pid=pid)
+        host_is_local = process_host_is_local(host)
+        expected_start = _active_lease_expected_process_start(lease, field=field)
+        observed_start: str | None = None
+        identity_mismatch = False
+        if host_is_local is False:
+            alive = None
+        else:
+            alive = _pid_exists(pid)
+            if alive is True and expected_start is not None:
+                observed_start = _process_start_time(pid)
+                identity_mismatch = observed_start is not None and observed_start != expected_start
+                if observed_start is None:
+                    # The process may have exited between kill(0) and reading
+                    # its birth marker. Unknown identity cannot be authoritative.
+                    alive = None
+                elif identity_mismatch:
+                    alive = False
+        entry = {
+            "field": field,
+            "pid": pid,
+            "liveness": "alive" if alive is True else ("dead" if alive is False else "unavailable"),
+            "pid_probe_scope": "remote" if host_is_local is False else "local",
+        }
+        if host is not None:
+            entry["host"] = host
+        if expected_start is not None:
+            entry["expected_process_start_time"] = expected_start
+        if observed_start is not None:
+            entry["observed_process_start_time"] = observed_start
+        if identity_mismatch:
+            entry["status_problem"] = "process_identity_mismatch"
+        entries.append(entry)
+    child_entries = [
+        entry for entry in entries if entry.get("field") == "adapter_child_pid"
     ]
-    aggregate_entries = runner_entries or entries
+    adapter_entries = [
+        entry for entry in entries if entry.get("field") == "adapter_pid"
+    ]
+    scheduler_entries = [
+        entry for entry in entries if entry.get("field") == "scheduler_pid"
+    ]
+    # Once a child PID has been recorded it is the actual workload identity.
+    # A long-lived controller process must not mask a dead or reused child PID.
+    aggregate_entries = child_entries or adapter_entries or scheduler_entries
     if any(entry.get("liveness") == "alive" for entry in aggregate_entries):
         liveness = "alive"
         alive: bool | None = True
@@ -7354,16 +7540,51 @@ def _active_lease_process_liveness(lease: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def _pid_exists(pid: int) -> bool | None:
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    except OSError:
+def _active_lease_process_host(
+    lease: Mapping[str, Any],
+    *,
+    field: str,
+    pid: int,
+) -> str | None:
+    fields = (
+        ("adapter_host", "scheduler_host")
+        if field in {"adapter_child_pid", "adapter_pid"}
+        else ("scheduler_host",)
+    )
+    for host_field in fields:
+        host = _non_empty_text(lease.get(host_field))
+        if host is not None:
+            return host
+    owner = _non_empty_text(lease.get("scheduler_owner"))
+    if owner is None:
         return None
-    return True
+    parts = owner.rsplit(":", 2)
+    if len(parts) != 3 or _positive_int(parts[1]) is None:
+        return None
+    owner_pid = _positive_int(parts[1])
+    scheduler_pid = _positive_int(lease.get("scheduler_pid"))
+    if field == "scheduler_pid" and owner_pid not in {None, pid}:
+        return None
+    if scheduler_pid is not None and owner_pid != scheduler_pid:
+        return None
+    return parts[0].strip() or None
+
+
+def _active_lease_expected_process_start(
+    lease: Mapping[str, Any],
+    *,
+    field: str,
+) -> str | None:
+    start_field = {
+        "adapter_child_pid": "adapter_child_process_start_time",
+        "adapter_pid": "adapter_process_start_time",
+        "scheduler_pid": "scheduler_process_start_time",
+    }[field]
+    return _non_empty_text(lease.get(start_field))
+
+
+def _pid_exists(pid: int) -> bool | None:
+    return process_pid_exists(pid)
 
 
 def _positive_int(value: object) -> int | None:
@@ -7844,29 +8065,118 @@ def _ingest_failed_background_jobs(
         return []
 
     changed: list[dict[str, Any]] = []
+    failures_by_background_id: dict[str, dict[str, Any]] = {}
 
     def update(registry: dict[str, Any]) -> None:
         failures = registry.setdefault("failures", [])
         if not isinstance(failures, list):
             failures = []
             registry["failures"] = failures
-        known_background_ids = {
-            str(failure.get("source_background_job_id") or "")
+        known_background_failures = {
+            str(failure.get("source_background_job_id") or ""): failure
             for failure in failures
-            if isinstance(failure, Mapping)
+            if isinstance(failure, dict)
+            and str(failure.get("source_background_job_id") or "")
         }
         for candidate in candidates:
             source_id = str(candidate.get("source_background_job_id") or "")
-            if source_id in known_background_ids:
+            existing = known_background_failures.get(source_id)
+            if existing is not None:
+                failures_by_background_id[source_id] = dict(existing)
                 continue
             record = dict(candidate)
             _refresh_failure_budget(record)
             failures.append(record)
-            known_background_ids.add(source_id)
+            known_background_failures[source_id] = record
+            failures_by_background_id[source_id] = dict(record)
             changed.append(dict(record))
 
     _update_failure_registry_locked(paths, workflow_id=workflow_id, update=update)
+    terminalized_ids = _mark_background_jobs_failure_ingested(
+        paths,
+        workflow_id=workflow_id,
+        failures_by_background_id=failures_by_background_id,
+    )
+    changed_ids = {
+        str(failure.get("source_background_job_id") or "")
+        for failure in changed
+    }
+    for source_id in terminalized_ids:
+        if source_id not in changed_ids:
+            failure = failures_by_background_id.get(source_id)
+            if failure is not None:
+                changed.append(dict(failure))
+                changed_ids.add(source_id)
     return changed
+
+
+def _mark_background_jobs_failure_ingested(
+    paths: WorkflowPaths,
+    *,
+    workflow_id: str,
+    failures_by_background_id: Mapping[str, Mapping[str, Any]],
+) -> list[str]:
+    """Make stale supervision states terminal after recovery owns the failure.
+
+    ``stale`` and ``needs_recovery`` describe a scheduler observation, not a
+    state a job can ever leave by itself.  Once an auditable failure record has
+    been created, persist ``failed`` in the job registry and link both records.
+    This prevents every health probe from reporting the same lost process as an
+    active inconsistency while retaining the original status and diagnostics.
+    """
+
+    if not failures_by_background_id:
+        return []
+    changed_source_ids: list[str] = []
+    observed_at = utc_timestamp()
+
+    def update(registry: dict[str, Any]) -> None:
+        jobs = registry.get("jobs")
+        if not isinstance(jobs, list):
+            return
+        for index, raw_job in enumerate(jobs):
+            if not isinstance(raw_job, Mapping):
+                continue
+            job = raw_job if isinstance(raw_job, dict) else dict(raw_job)
+            if job is not raw_job:
+                jobs[index] = job
+            source_id = _record_id(job)
+            if source_id is None:
+                continue
+            failure = failures_by_background_id.get(source_id)
+            if failure is None:
+                continue
+            failure_id = str(failure.get("failure_id") or "")
+            if (
+                job.get("failure_ingested") is True
+                and str(job.get("failure_id") or "") == failure_id
+            ):
+                continue
+            status = str(job.get("status") or "").strip().lower()
+            original_status = str(
+                failure.get("source_background_status") or status or "unknown"
+            )
+            job["ingested_background_status"] = original_status
+            if status in {"stale", "needs_recovery"}:
+                job["status"] = "failed"
+            job["failure_ingested"] = True
+            job["failure_id"] = failure_id
+            job["failure_ingested_at"] = observed_at
+            job["next_prompt_ready"] = False
+            job.setdefault("ended_at", observed_at)
+            job["updated_at"] = observed_at
+            changed_source_ids.append(source_id)
+        if changed_source_ids:
+            registry["schema_version"] = SCHEMA_VERSION
+            registry["workflow_id"] = workflow_id
+            registry["updated_at"] = observed_at
+
+    _update_background_registry_locked(
+        paths,
+        workflow_id=workflow_id,
+        update=update,
+    )
+    return changed_source_ids
 
 
 def _record_worker_failure(
@@ -10108,19 +10418,7 @@ def _lock_owner_pid(owner: Mapping[str, Any]) -> int | None:
 
 
 def _process_start_time(pid: int) -> str | None:
-    try:
-        stat_fields = (Path("/proc") / str(pid) / "stat").read_text(encoding="utf-8").rsplit(") ", 1)[1].split()
-        return f"proc:{stat_fields[19]}"
-    except (OSError, IndexError):
-        return None
-
-
-def _hostnames_match(left: str, right: str) -> bool:
-    left_normalized = left.strip().lower().rstrip(".")
-    right_normalized = right.strip().lower().rstrip(".")
-    if not left_normalized or not right_normalized:
-        return False
-    return left_normalized == right_normalized or left_normalized.split(".", 1)[0] == right_normalized.split(".", 1)[0]
+    return read_process_start_time(pid)
 
 
 def _unlink_owned_lock_path(path: Path, *, fd: int, lock_id: str | None) -> bool:

@@ -206,19 +206,22 @@ a content-addressed directory under the workflow runtime directory and starts
 the supervisor from that snapshot. This keeps imported Python and prompt
 templates on one generation even if the installation checkout is updated while
 the controller is alive. `supervisor.json` records the snapshot fingerprint,
-path, manifest, and file count; a deliberate runtime upgrade takes effect on
-the next supervisor launch or restart.
+path, manifest, source checkout, and file count. The supervisor compares that
+immutable baseline with the mutable source checkout; when tracked runtime or
+template content changes, it materializes a new verified snapshot and replaces
+itself from that snapshot before running another scheduler tick. Snapshot reuse
+rejects missing, extra, symlinked, or manifest-mismatched files.
 
 Detached supervisor metadata is stored in the configured runtime directory as
 `supervisor.json`; the default flat compatibility path is
 `.loopplane/runtime/supervisor.json`. The record includes the workflow ID, project
-root, command, PID/process handle, start/update/heartbeat timestamps, compact
-last scheduler result, last follow-up result, log paths, and terminal exit
-status. Supervisor stdout and stderr are written under
+root, command, PID/process handle, process birth identity, host, runtime source
+fingerprint, start/update/heartbeat timestamps, compact last scheduler result,
+last follow-up result, log paths, and terminal exit status. Supervisor stdout and stderr are written under
 the resolved runtime supervisor log directory. `runtime.control` reads this
 metadata for `loopplane status`, `loopplane attach`, and `loopplane logs`, and classifies
-active metadata as stale when the PID is dead, the heartbeat is old, or
-required active fields are missing.
+active metadata as stale when the PID is dead or reused, the heartbeat is old,
+the workflow/source identity differs, or required active fields are missing.
 
 Control commands are durable request records, not direct state mutations.
 `pause`, `resume`, `stop`, dashboard control buttons, and the detached

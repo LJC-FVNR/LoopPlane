@@ -12,6 +12,11 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from runtime.loopplane_home import loopplane_home_layout
+from runtime.process_identity import (
+    host_is_local as process_host_is_local,
+    pid_exists as process_pid_exists,
+    process_start_time as read_process_start_time,
+)
 
 try:
     import fcntl
@@ -203,7 +208,7 @@ def inspect_runner_lock(
     heartbeat_age = _age_seconds(observed_at, heartbeat) if heartbeat is not None else None
     acquired_age = _age_seconds(observed_at, acquired) if acquired is not None else None
     owner_host = str(metadata.get("hostname") or "").strip()
-    host_is_local = _hostnames_match(owner_host, socket.gethostname()) if owner_host else None
+    host_is_local = process_host_is_local(owner_host or None)
     pid_alive = _pid_exists(pid) if host_is_local is not False else None
     summary = _metadata_summary(metadata, pid_alive=pid_alive, heartbeat_age=heartbeat_age, acquired_age=acquired_age)
 
@@ -421,7 +426,7 @@ def _runner_lock_owner_is_stale(metadata: Mapping[str, Any], adapter_input: Any)
     )
     heartbeat_expired = _age_seconds(datetime.now(UTC), heartbeat) > ttl_seconds
     owner_host = str(metadata.get("hostname") or "").strip()
-    if owner_host and _hostnames_match(owner_host, socket.gethostname()):
+    if owner_host and process_host_is_local(owner_host) is True:
         pid = _positive_int(metadata.get("pid"), default=-1)
         if _pid_exists(pid) is not True:
             return True
@@ -485,19 +490,7 @@ def _timestamp_after(timestamp: str, seconds: int) -> str:
 
 
 def _process_start_time(pid: int) -> str | None:
-    try:
-        fields = (Path("/proc") / str(pid) / "stat").read_text(encoding="utf-8").rsplit(") ", 1)[1].split()
-        return f"proc:{fields[19]}"
-    except (OSError, IndexError):
-        return None
-
-
-def _hostnames_match(left: str, right: str) -> bool:
-    left_normalized = left.strip().lower().rstrip(".")
-    right_normalized = right.strip().lower().rstrip(".")
-    if not left_normalized or not right_normalized:
-        return False
-    return left_normalized == right_normalized or left_normalized.split(".", 1)[0] == right_normalized.split(".", 1)[0]
+    return read_process_start_time(pid)
 
 
 def _acquire_runner_file_lock(fd: int, *, blocking: bool) -> bool:
@@ -688,12 +681,4 @@ def _age_seconds(now: datetime, then: datetime) -> int:
 
 
 def _pid_exists(pid: int) -> bool | None:
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    except OSError:
-        return None
-    return True
+    return process_pid_exists(pid)

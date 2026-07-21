@@ -25,6 +25,8 @@ ATTACH_ACTIVE_SUPERVISOR_STATUSES = frozenset(
         "waiting_config",
         "waiting_approval",
         "waiting_background",
+        "waiting_runner_availability",
+        "restarting_source_update",
     }
 )
 CONTROL_REQUEST_TYPES = frozenset(

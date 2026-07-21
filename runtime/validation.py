@@ -17,6 +17,7 @@ from runtime.file_discovery import discover_files_bounded
 from runtime.path_resolution import WorkflowPathError, WorkflowPaths, load_workflow_config
 from runtime.plan_objectives import is_task_block_terminator
 from runtime.prompt_context import file_reference, prompt_reference_index
+from runtime.source_guard import read_process_template
 from runtime.workspace_boundary_policy import evaluate_worker_write_boundary, worker_write_boundary_message
 
 
@@ -572,7 +573,7 @@ def _build_validator_prompt(
     deterministic_result: Mapping[str, Any],
     review_path: Path,
 ) -> str:
-    template = _read_text(VALIDATOR_TEMPLATE_PATH)
+    template = read_process_template(VALIDATOR_TEMPLATE_PATH)
     context_manifest = _write_validator_context_manifest(
         project=project,
         paths=paths,

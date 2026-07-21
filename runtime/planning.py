@@ -36,6 +36,7 @@ from runtime.plan_objectives import (
     parse_plan_objectives,
 )
 from runtime.prompt_context import file_reference, prompt_reference_index
+from runtime.source_guard import read_process_template
 from runtime.version_control import create_git_checkpoint
 from runtime.workflow_lifecycle import mark_workflow_active
 
@@ -1716,7 +1717,7 @@ def build_planner_prompt(
     plan_draft_path: Path,
     readiness_report_path: Path,
 ) -> str:
-    template = PLANNER_TEMPLATE_PATH.read_text(encoding="utf-8")
+    template = read_process_template(PLANNER_TEMPLATE_PATH)
     workflow_id = _workflow_id(workflow_config)
     planning_config = workflow_config.get("planning") if isinstance(workflow_config.get("planning"), Mapping) else {}
     context_manifest = _write_planning_prompt_context_manifest(
@@ -1766,7 +1767,7 @@ def build_auditor_prompt(
     readiness_report_path: Path,
     audit_report_path: Path,
 ) -> str:
-    template = AUDITOR_TEMPLATE_PATH.read_text(encoding="utf-8")
+    template = read_process_template(AUDITOR_TEMPLATE_PATH)
     workflow_id = _workflow_id(workflow_config)
     context_manifest = _write_planning_prompt_context_manifest(
         project=project,

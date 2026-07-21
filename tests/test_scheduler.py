@@ -614,6 +614,53 @@ class SchedulerSelectionTest(unittest.TestCase):
             self.assertEqual(action["selected"]["job_id"], "bg_starting")
             self.assertEqual(action["selected"]["job"]["status"], "starting")
 
+    def test_fresh_remote_background_job_does_not_use_local_pid_namespace(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "Remote background PIDs belong to their launch host.")
+            workflow = json.loads(
+                (project / ".loopplane" / "config" / "workflow.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            registry_path = project / ".loopplane" / "runtime" / "background_jobs.json"
+            write_json(
+                registry_path,
+                {
+                    "schema_version": "1.5",
+                    "workflow_id": workflow["workflow_id"],
+                    "jobs": [
+                        {
+                            "job_id": "bg_remote_fresh",
+                            "workflow_id": workflow["workflow_id"],
+                            "task_id": "P0.T001",
+                            "run_id": "run_remote_fresh",
+                            "status": "running",
+                            "next_prompt_ready": False,
+                            "started_at": timestamp(),
+                            "heartbeat_at": timestamp(),
+                            "pid": 999_999_991,
+                            "child_pid": 999_999_991,
+                            "supervisor_pid": 999_999_992,
+                            "supervisor_host": f"{socket.gethostname().split('.', 1)[0]}.remote.invalid",
+                            "wake_next_agent_when": "Wait for remote completion.",
+                        }
+                    ],
+                },
+            )
+
+            snapshot = load_scheduler_snapshot(project)
+
+            job = next(
+                item
+                for item in snapshot["background_jobs"]
+                if item["job_id"] == "bg_remote_fresh"
+            )
+            self.assertEqual(job["status"], "running")
+            self.assertNotEqual(job.get("status_problem"), "process_not_live")
+            persisted = json.loads(registry_path.read_text(encoding="utf-8"))["jobs"][0]
+            self.assertEqual(persisted["status"], "running")
+
     def test_malformed_background_status_requires_attention_and_persists_needs_recovery(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             project = Path(tmp) / "project"
@@ -720,6 +767,7 @@ class SchedulerSelectionTest(unittest.TestCase):
                                 "heartbeat_at": "2000-01-01T00:00:00Z",
                                 "pid": os.getpid(),
                                 "supervisor_pid": os.getpid(),
+                                "supervisor_host": socket.gethostname(),
                                 "status_problem": "stale_heartbeat",
                                 "watchdog": {
                                     "enabled": True,
@@ -879,6 +927,17 @@ class SchedulerSelectionTest(unittest.TestCase):
             self.assertEqual(failure["failure_class"], "background_job_failed")
             self.assertEqual(failure["source_background_job_id"], "bg_needs_recovery")
             self.assertEqual(failure["status"], "recovered")
+            background_registry = json.loads(registry_path.read_text(encoding="utf-8"))
+            background_job = background_registry["jobs"][0]
+            self.assertEqual(background_job["status"], "failed")
+            self.assertEqual(
+                background_job["ingested_background_status"], "needs_recovery"
+            )
+            self.assertTrue(background_job["failure_ingested"])
+            self.assertEqual(background_job["failure_id"], failure["failure_id"])
+            self.assertEqual(
+                background_job["status_problem"], "watchdog:needs_recovery"
+            )
             state = json.loads((project / ".loopplane" / "runtime" / "state.json").read_text(encoding="utf-8"))
             self.assertNotEqual(state["status"], "requires_attention")
             self.assertEqual(state["requires_attention"], [])
@@ -1439,14 +1498,305 @@ class SchedulerSelectionTest(unittest.TestCase):
             self.assertEqual(lease["runner_liveness"], "alive")
             self.assertEqual(lease["status_problem"], "stale_heartbeat_process_alive")
             processes = lease["process_liveness"]["processes"]
-            self.assertIn(
-                {"field": "adapter_child_pid", "pid": os.getpid(), "liveness": "alive"},
-                processes,
+            child = next(item for item in processes if item["field"] == "adapter_child_pid")
+            adapter = next(item for item in processes if item["field"] == "adapter_pid")
+            self.assertEqual(child["pid"], os.getpid())
+            self.assertEqual(child["liveness"], "alive")
+            self.assertEqual(adapter["pid"], 99999999)
+            self.assertEqual(adapter["liveness"], "dead")
+
+    def test_dead_child_is_not_masked_by_live_adapter_controller(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "The worker child is authoritative once recorded.")
+            write_active_plan(project, {"P0.T001": " ", "P1.T001": " "})
+            lease_path = (
+                project
+                / ".loopplane"
+                / "runtime"
+                / "active_run_leases"
+                / "run_dead_child.json"
             )
-            self.assertIn(
-                {"field": "adapter_pid", "pid": 99999999, "liveness": "dead"},
-                processes,
+            write_json(
+                lease_path,
+                {
+                    "schema_version": "1.5",
+                    "workflow_id": "wf_test",
+                    "run_id": "run_dead_child",
+                    "node_id": "node_worker_P0_T001_run_dead_child",
+                    "task_id": "P0.T001",
+                    "role": "worker",
+                    "runner_id": "worker",
+                    "status": "running",
+                    "heartbeat_at": "2000-01-01T00:00:00Z",
+                    "lease_expires_at": "2000-01-01T00:00:01Z",
+                    "adapter_pid": os.getpid(),
+                    "adapter_child_pid": 999_999_993,
+                    "scheduler_pid": os.getpid(),
+                    "adapter_host": socket.gethostname(),
+                    "scheduler_host": socket.gethostname(),
+                },
             )
+
+            snapshot = load_scheduler_snapshot(project)
+
+            self.assertFalse(
+                any(
+                    lease.get("run_id") == "run_dead_child"
+                    for lease in snapshot["active_run_leases"]
+                )
+            )
+            released = json.loads(lease_path.read_text(encoding="utf-8"))
+            self.assertEqual(released["status"], "released")
+            self.assertEqual(
+                released["status_problem"],
+                "stale_heartbeat_process_dead_reclaimed",
+            )
+
+    def test_remote_stale_active_lease_is_never_reclaimed_from_local_pids(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "Remote leases require remote liveness authority.")
+            write_active_plan(project, {"P0.T001": " ", "P1.T001": " "})
+            lease_path = (
+                project
+                / ".loopplane"
+                / "runtime"
+                / "active_run_leases"
+                / "run_remote_stale.json"
+            )
+            remote_host = f"{socket.gethostname().split('.', 1)[0]}.remote.invalid"
+            write_json(
+                lease_path,
+                {
+                    "schema_version": "1.5",
+                    "workflow_id": "wf_test",
+                    "run_id": "run_remote_stale",
+                    "node_id": "node_worker_P0_T001_run_remote_stale",
+                    "task_id": "P0.T001",
+                    "role": "worker",
+                    "runner_id": "worker",
+                    "status": "running",
+                    "heartbeat_at": "2000-01-01T00:00:00Z",
+                    "lease_expires_at": "2000-01-01T00:00:01Z",
+                    "adapter_pid": 999_999_994,
+                    "adapter_child_pid": 999_999_995,
+                    "scheduler_pid": 999_999_996,
+                    "adapter_host": remote_host,
+                    "scheduler_host": remote_host,
+                    "scheduler_owner": f"{remote_host}:999999996:owner",
+                },
+            )
+
+            snapshot = load_scheduler_snapshot(project)
+
+            lease = next(
+                item
+                for item in snapshot["active_run_leases"]
+                if item["run_id"] == "run_remote_stale"
+            )
+            self.assertEqual(lease["status"], "stale")
+            self.assertEqual(lease["runner_liveness"], "unavailable")
+            self.assertEqual(lease["status_problem"], "stale_heartbeat")
+            persisted = json.loads(lease_path.read_text(encoding="utf-8"))
+            self.assertEqual(persisted["status"], "running")
+
+    def test_reused_child_pid_does_not_keep_stale_lease_alive(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "PID reuse must not impersonate the recorded worker.")
+            lease_path = (
+                project
+                / ".loopplane"
+                / "runtime"
+                / "active_run_leases"
+                / "run_reused_child.json"
+            )
+            write_json(
+                lease_path,
+                {
+                    "schema_version": "1.5",
+                    "workflow_id": "wf_test",
+                    "run_id": "run_reused_child",
+                    "role": "worker",
+                    "task_id": "P0.T001",
+                    "status": "running",
+                    "heartbeat_at": "2000-01-01T00:00:00Z",
+                    "lease_expires_at": "2000-01-01T00:00:01Z",
+                    "adapter_pid": os.getpid(),
+                    "adapter_child_pid": os.getpid(),
+                    "adapter_child_process_start_time": "proc:not-this-process",
+                    "scheduler_pid": os.getpid(),
+                    "adapter_host": socket.gethostname(),
+                    "scheduler_host": socket.gethostname(),
+                },
+            )
+
+            snapshot = load_scheduler_snapshot(project)
+
+            self.assertFalse(
+                any(
+                    lease.get("run_id") == "run_reused_child"
+                    for lease in snapshot["active_run_leases"]
+                )
+            )
+            released = json.loads(lease_path.read_text(encoding="utf-8"))
+            self.assertEqual(released["status"], "released")
+
+    def test_unreadable_child_birth_identity_does_not_confirm_liveness(self) -> None:
+        lease = {
+            "adapter_child_pid": os.getpid(),
+            "adapter_child_process_start_time": "proc:recorded",
+            "adapter_host": socket.gethostname(),
+        }
+
+        with (
+            patch.object(scheduler_module, "_pid_exists", return_value=True),
+            patch.object(scheduler_module, "_process_start_time", return_value=None),
+        ):
+            liveness = scheduler_module._active_lease_process_liveness(lease)
+
+        self.assertEqual(liveness["liveness"], "unavailable")
+        self.assertIsNone(liveness["alive"])
+        self.assertEqual(liveness["processes"][0]["liveness"], "unavailable")
+
+    def test_expired_starting_lease_without_adapter_is_reclaimed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "An adapter that never launched must not wedge scheduling.")
+            write_active_plan(project, {"P0.T001": " ", "P1.T001": " "})
+            lease_path = (
+                project
+                / ".loopplane"
+                / "runtime"
+                / "active_run_leases"
+                / "run_never_launched.json"
+            )
+            write_json(
+                lease_path,
+                {
+                    "schema_version": "1.5",
+                    "workflow_id": "wf_test",
+                    "run_id": "run_never_launched",
+                    "task_id": "P0.T001",
+                    "role": "worker",
+                    "runner_id": "worker",
+                    "status": "starting",
+                    "heartbeat_at": "2000-01-01T00:00:00Z",
+                    "lease_expires_at": "2000-01-01T00:00:01Z",
+                    # The still-live scheduler is a controller, not evidence
+                    # that an adapter was ever started for this old lease.
+                    "scheduler_pid": os.getpid(),
+                },
+            )
+
+            snapshot = load_scheduler_snapshot(project)
+
+            self.assertEqual(snapshot["active_run_leases"], [])
+            released = json.loads(lease_path.read_text(encoding="utf-8"))
+            self.assertEqual(released["status"], "released")
+            self.assertEqual(
+                released["status_problem"],
+                "stale_starting_lease_without_adapter_reclaimed",
+            )
+            self.assertEqual(
+                released["released_reason"],
+                "adapter_never_started_and_starting_lease_expired",
+            )
+
+    def test_fresh_starting_lease_without_adapter_remains_active(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "A newly prepared adapter retains its launch grace period.")
+            write_active_plan(project, {"P0.T001": " ", "P1.T001": " "})
+            lease_path = (
+                project
+                / ".loopplane"
+                / "runtime"
+                / "active_run_leases"
+                / "run_launching.json"
+            )
+            write_json(
+                lease_path,
+                {
+                    "schema_version": "1.5",
+                    "workflow_id": "wf_test",
+                    "run_id": "run_launching",
+                    "task_id": "P0.T001",
+                    "role": "worker",
+                    "runner_id": "worker",
+                    "status": "starting",
+                    "heartbeat_at": timestamp(),
+                    "lease_expires_at": timestamp(timedelta(minutes=2)),
+                    "scheduler_pid": os.getpid(),
+                },
+            )
+
+            snapshot = load_scheduler_snapshot(project)
+
+            self.assertEqual(len(snapshot["active_run_leases"]), 1)
+            self.assertEqual(snapshot["active_run_leases"][0]["run_id"], "run_launching")
+            persisted = json.loads(lease_path.read_text(encoding="utf-8"))
+            self.assertEqual(persisted["status"], "starting")
+
+    def test_stale_starting_lease_keeps_fresh_preparing_controller_authority(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "A slow prompt build must retain its active controller lease.")
+            write_active_plan(project, {"P0.T001": " ", "P1.T001": " "})
+            owner = f"{socket.gethostname()}:{os.getpid()}:slow_prepare"
+            write_json(
+                project
+                / ".loopplane"
+                / "runtime"
+                / "lock"
+                / "scheduler_instance_lock"
+                / "owner.json",
+                {
+                    "schema_version": "1.5",
+                    "owner": owner,
+                    "hostname": socket.gethostname(),
+                    "pid": os.getpid(),
+                    "started_at": timestamp(),
+                    "heartbeat_at": timestamp(),
+                    "ttl_seconds": 120,
+                },
+            )
+            lease_path = (
+                project
+                / ".loopplane"
+                / "runtime"
+                / "active_run_leases"
+                / "run_slow_prepare.json"
+            )
+            write_json(
+                lease_path,
+                {
+                    "schema_version": "1.5",
+                    "workflow_id": "wf_test",
+                    "run_id": "run_slow_prepare",
+                    "task_id": "P0.T001",
+                    "role": "worker",
+                    "runner_id": "worker",
+                    "status": "starting",
+                    "heartbeat_at": "2000-01-01T00:00:00Z",
+                    "lease_expires_at": "2000-01-01T00:00:01Z",
+                    "scheduler_pid": os.getpid(),
+                    "scheduler_owner": owner,
+                },
+            )
+
+            snapshot = load_scheduler_snapshot(project)
+
+            self.assertEqual(len(snapshot["active_run_leases"]), 1)
+            lease = snapshot["active_run_leases"][0]
+            self.assertEqual(lease["status"], "starting")
+            self.assertEqual(
+                lease["status_problem"],
+                "stale_heartbeat_preparing_controller_active",
+            )
+            persisted = json.loads(lease_path.read_text(encoding="utf-8"))
+            self.assertEqual(persisted["status"], "starting")
 
     def test_stale_dead_active_run_lease_is_reclaimed_and_does_not_block(self) -> None:
         # A lease whose runner process is *definitively* dead and whose heartbeat
@@ -2791,6 +3141,11 @@ class WorkerRunExecutionTest(unittest.TestCase):
             self.assertEqual(lease["adapter_pid"], os.getpid())
             self.assertIsInstance(lease["adapter_child_pid"], int)
             self.assertGreater(lease["adapter_child_pid"], 0)
+            self.assertEqual(lease["adapter_host"], socket.gethostname())
+            self.assertEqual(lease["scheduler_host"], socket.gethostname())
+            self.assertTrue(lease["adapter_process_start_time"])
+            self.assertTrue(lease["adapter_child_process_start_time"])
+            self.assertTrue(lease["scheduler_process_start_time"])
 
             plan_text = (project / "PLAN.md").read_text(encoding="utf-8")
             self.assertIn("- [x] P0.T001: First task", plan_text)
@@ -4630,7 +4985,7 @@ class SchedulerMainLoopTest(unittest.TestCase):
                     "schema_version": "1.5",
                     "lock_id": "remote-stale-token",
                     "owner": "remote-owner",
-                    "hostname": f"remote-{socket.gethostname()}",
+                    "hostname": f"{socket.gethostname().split('.', 1)[0]}.remote.invalid",
                     "pid": os.getpid(),
                     "started_at": timestamp(timedelta(hours=-1)),
                     "heartbeat_at": timestamp(timedelta(hours=-1)),

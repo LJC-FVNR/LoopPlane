@@ -57,7 +57,17 @@ ACTIVE_RUN_LEASE_ACTIVE_STATUSES = frozenset({"starting", "running", "pending", 
 ACTIVE_RUN_LEASE_INACTIVE_STATUSES = frozenset({"completed", "succeeded", "failed", "cancelled", "aborted", "released"})
 TERMINAL_SUPERVISOR_STATUSES = frozenset({"completed", "stopped", "requires_attention", "failed", "exited"})
 ACTIVE_SUPERVISOR_STATUSES = frozenset(
-    {"launching", "running", "paused", "waiting_config", "waiting_approval", "waiting_background", "unknown"}
+    {
+        "launching",
+        "running",
+        "paused",
+        "waiting_config",
+        "waiting_approval",
+        "waiting_background",
+        "waiting_runner_availability",
+        "restarting_source_update",
+        "unknown",
+    }
 )
 SCHEDULER_LOCK_TTL_SECONDS = 120
 ACTIVE_RUN_LEASE_TTL_SECONDS = 120

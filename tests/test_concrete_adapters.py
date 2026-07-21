@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import socket
 import subprocess
 import sys
 import tempfile
@@ -651,6 +652,35 @@ class ConcreteAdapterTest(unittest.TestCase):
                     held.release()
 
             self.assertFalse((home / "locks" / "runner_locks" / "advisory_owner_runner.lock").exists())
+
+    def test_remote_fqdn_runner_lock_is_not_local_by_short_name_collision(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = runner_config(
+                adapter="shell",
+                command=sys.executable,
+                resource_policy={
+                    "global_concurrency_limit": 1,
+                    "lock_scope": "machine",
+                    "lock_key": "remote_fqdn_runner",
+                    "queue_when_busy": True,
+                },
+            )
+            prepared_input = adapter_input(root, config)
+            metadata = {
+                "hostname": f"{socket.gethostname().split('.', 1)[0]}.remote.invalid",
+                "pid": os.getpid(),
+                "acquired_at": "2000-01-01T00:00:00Z",
+                "heartbeat_at": "2000-01-01T00:00:00Z",
+                "lease_ttl_seconds": 1,
+            }
+
+            self.assertTrue(
+                runner_locks_module._runner_lock_owner_is_stale(
+                    metadata,
+                    prepared_input,
+                )
+            )
 
     def test_machine_runner_lock_fail_closed_does_not_leave_empty_lock_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

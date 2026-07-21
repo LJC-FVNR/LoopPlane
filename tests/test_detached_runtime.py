@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import socket
 import subprocess
 import sys
 import tempfile
@@ -19,13 +20,16 @@ from runtime.detached import (
     _action_failure_backoff_seconds,
     _action_failure_signature,
     _materialize_supervisor_source_snapshot,
+    _reexec_supervisor_after_source_drift,
     _should_continue_after_tick,
     load_supervisor_status,
     run_supervisor,
 )
 from runtime.init_workflow import init_project
 from runtime.plan_objectives import objective_structure_fingerprint, parse_plan_objectives
-from runtime.scheduler import SchedulerLockError
+from runtime.process_identity import process_start_time
+from runtime.scheduler import SchedulerLockError, load_scheduler_context
+from runtime.source_guard import PROCESS_RUNTIME_SOURCE_SNAPSHOT
 from tests.test_objective_gates import configure_fake_objective_verifier
 
 
@@ -374,6 +378,126 @@ class DetachedRuntimeTest(unittest.TestCase):
             manifest = json.loads(Path(first["manifest_path"]).read_text(encoding="utf-8"))
             self.assertEqual(manifest["fingerprint"], first["fingerprint"])
 
+            (second_root / "sitecustomize.py").write_text(
+                "raise RuntimeError('unexpected snapshot code')\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(RuntimeError, "unexpected file"):
+                _materialize_supervisor_source_snapshot(source, snapshots)
+
+    def test_supervisor_reexecs_before_next_tick_when_source_guard_detects_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "Source drift must stop the old scheduler before another tick.")
+            drift = {
+                "baseline_fingerprint": "sha256:old",
+                "current_fingerprint": "sha256:new",
+                "changed_files": ["templates/worker_prompt.template.md"],
+                "changed_file_count": 1,
+            }
+
+            with (
+                mock.patch("runtime.detached.RuntimeSourceGuard.poll", return_value=drift),
+                mock.patch(
+                    "runtime.detached._reexec_supervisor_after_source_drift",
+                    side_effect=OSError("restart failed"),
+                ) as restart,
+                mock.patch("runtime.detached.run_scheduler") as scheduler,
+            ):
+                with self.assertRaisesRegex(OSError, "restart failed"):
+                    run_supervisor(project)
+
+            scheduler.assert_not_called()
+            restart.assert_called_once()
+            self.assertEqual(restart.call_args.kwargs["drift"], drift)
+            metadata = json.loads(
+                (project / ".loopplane" / "runtime" / "supervisor.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(metadata["status"], "failed")
+            self.assertEqual(metadata["runtime_source_drift"], drift)
+            self.assertEqual(metadata["stop_reason"], "source_restart_failed:OSError")
+
+    def test_source_drift_reexec_records_restart_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "A detached supervisor must adopt runtime source updates.")
+            context_result = load_scheduler_context(project)
+            self.assertTrue(context_result["ok"], context_result)
+            paths = context_result["context"].paths
+            drift = {
+                "baseline_fingerprint": "sha256:old",
+                "current_fingerprint": "sha256:new",
+                "changed_files": ["runtime/scheduler.py"],
+                "changed_file_count": 1,
+            }
+            source_root = Path(tmp) / "mutable-source"
+            snapshot_root = Path(tmp) / "new-snapshot"
+            snapshot = {
+                "root": snapshot_root.as_posix(),
+                "manifest_path": (snapshot_root / "source_manifest.json").as_posix(),
+                "fingerprint": "sha256:new-snapshot",
+                "file_count": 42,
+            }
+
+            with (
+                mock.patch.dict(
+                    os.environ,
+                    {"LOOPPLANE_SUPERVISOR_SOURCE_ROOT": source_root.as_posix()},
+                ),
+                mock.patch(
+                    "runtime.detached._materialize_supervisor_source_snapshot",
+                    return_value=snapshot,
+                ) as materialize,
+                mock.patch("runtime.detached.os.chdir") as chdir,
+                mock.patch("runtime.detached.os.execv", return_value=None) as old_execv,
+                mock.patch("runtime.detached.os.execve", return_value=None) as execve,
+            ):
+                with self.assertRaisesRegex(OSError, "returned without replacing"):
+                    _reexec_supervisor_after_source_drift(
+                        project,
+                        paths=paths,
+                        drift=drift,
+                    )
+
+            argv = [
+                sys.executable,
+                "-m",
+                "runtime.detached",
+                "supervisor",
+                "--project",
+                project.as_posix(),
+            ]
+            materialize.assert_called_once_with(
+                source_root,
+                paths.runtime_dir / "supervisor_sources",
+            )
+            chdir.assert_called_once_with(snapshot_root)
+            old_execv.assert_not_called()
+            execve.assert_called_once()
+            executable, actual_argv, restart_env = execve.call_args.args
+            self.assertEqual(executable, sys.executable)
+            self.assertEqual(actual_argv, argv)
+            self.assertEqual(
+                restart_env["LOOPPLANE_SUPERVISOR_SOURCE_ROOT"],
+                source_root.as_posix(),
+            )
+            self.assertEqual(
+                restart_env["PYTHONPATH"].split(os.pathsep)[0],
+                snapshot_root.as_posix(),
+            )
+            metadata = json.loads(
+                (project / ".loopplane" / "runtime" / "supervisor.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(metadata["status"], "restarting_source_update")
+            self.assertEqual(metadata["runtime_source_restart_count"], 1)
+            self.assertEqual(metadata["runtime_source_drift"], drift)
+            self.assertEqual(metadata["restart_command"], argv)
+            self.assertEqual(metadata["source_snapshot"]["fingerprint"], snapshot["fingerprint"])
+
     def test_expansion_planner_failure_signature_and_backoff_are_stable_and_bounded(self) -> None:
         selected = {
             "action": "run_expansion_planner",
@@ -651,6 +775,11 @@ class DetachedRuntimeTest(unittest.TestCase):
             snapshot_root = project / source_snapshot["path"]
             self.assertTrue((snapshot_root / "runtime" / "detached.py").is_file())
             self.assertTrue((snapshot_root / "templates" / "expansion_planner_prompt.template.md").is_file())
+            self.assertTrue(start["supervisor"]["metadata"]["process_start_time"])
+            self.assertEqual(
+                start["supervisor"]["metadata"]["runtime_source_fingerprint"],
+                PROCESS_RUNTIME_SOURCE_SNAPSHOT.fingerprint,
+            )
             self.assertTrue((project / ".loopplane" / "runtime" / "supervisor.json").is_file())
             self.assertFalse((project / ".loopplane" / "results" / "T001" / "latest.json").exists())
             self.assertTrue(wait_until(lambda: (project / "worker_started.txt").is_file()))
@@ -1129,20 +1258,27 @@ class DetachedRuntimeTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             project = Path(tmp) / "project"
             init_project(project, "Remote foreground supervisor heartbeat fixture.")
+            workflow = json.loads(
+                (project / ".loopplane" / "config" / "workflow.json").read_text(
+                    encoding="utf-8"
+                )
+            )
             metadata_path = project / ".loopplane" / "runtime" / "supervisor.json"
             now = datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
             metadata_path.write_text(
                 json.dumps(
                     {
                         "schema_version": "1.5",
-                        "workflow_id": "wf_test",
+                        "workflow_id": workflow["workflow_id"],
                         "project_root": project.as_posix(),
                         "status": "running",
                         "pid": 999999999,
                         "owner": "remote-compute.invalid:999999999:fixture",
+                        "process_start_time": "proc:remote-fixture",
                         "started_at": now,
                         "updated_at": now,
                         "heartbeat_at": now,
+                        "runtime_source_fingerprint": PROCESS_RUNTIME_SOURCE_SNAPSHOT.fingerprint,
                         "exit_status": None,
                     },
                     indent=2,
@@ -1165,6 +1301,11 @@ class DetachedRuntimeTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             project = Path(tmp) / "project"
             init_project(project, "Active lease covers blocking supervisor tick.")
+            workflow = json.loads(
+                (project / ".loopplane" / "config" / "workflow.json").read_text(
+                    encoding="utf-8"
+                )
+            )
             runtime_dir = project / ".loopplane" / "runtime"
             metadata_path = runtime_dir / "supervisor.json"
             old = (datetime.now(UTC) - timedelta(minutes=10)).replace(microsecond=0).isoformat().replace("+00:00", "Z")
@@ -1173,13 +1314,16 @@ class DetachedRuntimeTest(unittest.TestCase):
                 json.dumps(
                     {
                         "schema_version": "1.5",
-                        "workflow_id": "wf_test",
+                        "workflow_id": workflow["workflow_id"],
                         "project_root": project.as_posix(),
                         "status": "running",
                         "pid": os.getpid(),
+                        "host": socket.gethostname(),
+                        "process_start_time": process_start_time(os.getpid()),
                         "started_at": old,
                         "updated_at": old,
                         "heartbeat_at": old,
+                        "runtime_source_fingerprint": PROCESS_RUNTIME_SOURCE_SNAPSHOT.fingerprint,
                         "command": [sys.executable, "-m", "runtime.detached", "supervisor"],
                         "log_paths": {"stdout": "supervisor_stdout.log", "stderr": "supervisor_stderr.log"},
                         "exit_status": None,

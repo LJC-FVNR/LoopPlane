@@ -15,7 +15,9 @@ import runtime.health as health_module
 from runtime.exit_codes import EXIT_HEALTH_FAILURE
 from runtime.health import health_exit_code, run_health_probe
 from runtime.init_workflow import LAYOUT_CANONICAL_V16, init_project
+from runtime.process_identity import process_start_time
 from runtime.scheduler import append_event, load_scheduler_context
+from runtime.source_guard import PROCESS_RUNTIME_SOURCE_SNAPSHOT
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -51,6 +53,7 @@ class HealthProbeTest(unittest.TestCase):
             expected_checks = {
                 "schema_validation",
                 "scheduler_lock",
+                "supervisor_liveness",
                 "active_run_leases",
                 "runner_liveness",
                 "machine_runner_locks",
@@ -70,6 +73,169 @@ class HealthProbeTest(unittest.TestCase):
             self.assertTrue(report_path.is_file())
             written = json.loads(report_path.read_text(encoding="utf-8"))
             self.assertEqual(written["status"], "healthy")
+
+    def test_detached_scheduler_with_dead_supervisor_is_unhealthy(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "Health must detect a crashed detached supervisor.")
+            state_path = project / ".loopplane" / "runtime" / "state.json"
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            state["status"] = "running"
+            state["scheduler"].update(
+                {
+                    "running": True,
+                    "detach_requested": True,
+                    "stop_requested": False,
+                }
+            )
+            write_json(state_path, state)
+            write_json(
+                project / ".loopplane" / "runtime" / "supervisor.json",
+                {
+                    "schema_version": "1.5",
+                    "workflow_id": state["workflow_id"],
+                    "status": "running",
+                    "pid": 999999999,
+                    "host": socket.gethostname(),
+                    "heartbeat_at": timestamp(),
+                },
+            )
+
+            result = run_health_probe(project)
+
+            check = check_by_name(result, "supervisor_liveness")
+            self.assertEqual(check["status"], "fail", json.dumps(result, indent=2, sort_keys=True))
+            self.assertEqual(check["severity"], "unhealthy")
+            self.assertIn("supervisor process is dead", check["details"]["problems"])
+            self.assertEqual(result["status"], "unhealthy")
+
+    def test_paused_detached_scheduler_still_expects_live_supervisor(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "A paused detached workflow keeps its supervisor.")
+            state_path = project / ".loopplane" / "runtime" / "state.json"
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            state["status"] = "paused"
+            state["scheduler"].update(
+                {
+                    "running": False,
+                    "paused": True,
+                    "detach_requested": True,
+                    "stop_requested": False,
+                }
+            )
+            write_json(state_path, state)
+            write_json(
+                project / ".loopplane" / "runtime" / "supervisor.json",
+                {
+                    "schema_version": "1.5",
+                    "workflow_id": state["workflow_id"],
+                    "status": "paused",
+                    "pid": os.getpid(),
+                    "host": socket.gethostname(),
+                    "process_start_time": process_start_time(os.getpid()),
+                    "heartbeat_at": timestamp(),
+                    "runtime_source_fingerprint": PROCESS_RUNTIME_SOURCE_SNAPSHOT.fingerprint,
+                },
+            )
+
+            result = run_health_probe(project)
+
+            check = check_by_name(result, "supervisor_liveness")
+            self.assertEqual(check["status"], "pass", json.dumps(result, indent=2, sort_keys=True))
+            self.assertTrue(check["details"]["supervisor_expected"])
+
+    def test_live_supervisor_must_match_workflow_source_and_process_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "Health must authenticate a live supervisor record.")
+            state_path = project / ".loopplane" / "runtime" / "state.json"
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            state["status"] = "running"
+            state["scheduler"].update(
+                {
+                    "running": True,
+                    "detach_requested": True,
+                    "stop_requested": False,
+                }
+            )
+            write_json(state_path, state)
+            metadata_path = project / ".loopplane" / "runtime" / "supervisor.json"
+            current_start = process_start_time(os.getpid())
+            base = {
+                "schema_version": "1.5",
+                "workflow_id": state["workflow_id"],
+                "status": "running",
+                "pid": os.getpid(),
+                "host": socket.gethostname(),
+                "process_start_time": current_start,
+                "heartbeat_at": timestamp(),
+                "runtime_source_fingerprint": PROCESS_RUNTIME_SOURCE_SNAPSHOT.fingerprint,
+            }
+            cases = [
+                (
+                    "wrong_workflow",
+                    {**base, "workflow_id": "wf_wrong"},
+                    "supervisor workflow_id does not match the active workflow",
+                ),
+                (
+                    "wrong_source",
+                    {**base, "runtime_source_fingerprint": "sha256:not-current"},
+                    "runtime_source_fingerprint does not match the current LoopPlane source",
+                ),
+                (
+                    "missing_source",
+                    {
+                        key: value
+                        for key, value in base.items()
+                        if key != "runtime_source_fingerprint"
+                    },
+                    "runtime_source_fingerprint is missing",
+                ),
+            ]
+            if current_start is not None:
+                cases.extend(
+                    [
+                        (
+                            "wrong_process",
+                            {**base, "process_start_time": "proc:not-current"},
+                            "supervisor process identity does not match metadata",
+                        ),
+                        (
+                            "missing_process",
+                            {
+                                key: value
+                                for key, value in base.items()
+                                if key != "process_start_time"
+                            },
+                            "process_start_time is missing",
+                        ),
+                    ]
+                )
+
+            for label, metadata, expected_problem in cases:
+                with self.subTest(label=label):
+                    write_json(metadata_path, metadata)
+                    result = run_health_probe(project)
+                    check = check_by_name(result, "supervisor_liveness")
+                    self.assertEqual(
+                        check["status"],
+                        "fail",
+                        json.dumps(result, indent=2, sort_keys=True),
+                    )
+                    self.assertIn(expected_problem, check["details"]["problems"])
+                    self.assertEqual(result["status"], "unhealthy")
+
+            if current_start is not None:
+                write_json(metadata_path, base)
+                with patch.object(health_module, "_process_start_time", return_value=None):
+                    result = run_health_probe(project)
+                check = check_by_name(result, "supervisor_liveness")
+                self.assertEqual(check["status"], "fail")
+                self.assertIn(
+                    "supervisor process liveness is unknown",
+                    check["details"]["problems"],
+                )
 
     def test_normal_health_uses_bounded_operational_history_checks(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -624,7 +790,7 @@ class HealthProbeTest(unittest.TestCase):
                             "next_prompt_ready": False,
                             "heartbeat_at": timestamp(),
                             "pid": 99999999,
-                            "supervisor_host": f"remote-{socket.gethostname()}",
+                            "supervisor_host": f"{socket.gethostname().split('.', 1)[0]}.remote.invalid",
                             "wake_next_agent_when": "Wait for remote completion.",
                         }
                     ],
@@ -889,7 +1055,7 @@ class HealthProbeTest(unittest.TestCase):
                     "heartbeat_at": heartbeat,
                     "lease_expires_at": expires,
                     "adapter_pid": 99999999,
-                    "scheduler_owner": f"remote-{socket.gethostname()}:99999999:owner",
+                    "scheduler_owner": f"{socket.gethostname().split('.', 1)[0]}.remote.invalid:99999999:owner",
                 },
             )
 
@@ -939,6 +1105,49 @@ class HealthProbeTest(unittest.TestCase):
             self.assertEqual(check["status"], "pass", json.dumps(result, indent=2, sort_keys=True))
             self.assertTrue(check["details"]["heartbeat_covered_by_active_run_lease"])
             self.assertEqual(check["details"]["active_run_lease"]["run_id"], "run_live")
+
+    def test_remote_scheduler_lock_is_not_covered_by_colliding_local_pid(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "Remote lock PIDs are not local liveness evidence.")
+            now = datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+            remote_host = f"{socket.gethostname().split('.', 1)[0]}.remote.invalid"
+            write_json(
+                project / ".loopplane" / "runtime" / "lock" / "scheduler_instance_lock" / "owner.json",
+                {
+                    "owner": f"{remote_host}:{os.getpid()}:owner",
+                    "pid": os.getpid(),
+                    "hostname": remote_host,
+                    "started_at": "2000-01-01T00:00:00Z",
+                    "heartbeat_at": "2000-01-01T00:00:00Z",
+                    "ttl_seconds": 1,
+                },
+            )
+            write_json(
+                project / ".loopplane" / "runtime" / "active_run_leases" / "run_remote.json",
+                {
+                    "schema_version": "1.5",
+                    "run_id": "run_remote",
+                    "task_id": "T001",
+                    "role": "worker",
+                    "runner_id": "worker",
+                    "status": "running",
+                    "blocks_scheduler": True,
+                    "heartbeat_at": now,
+                    "lease_ttl_seconds": 120,
+                    "adapter_pid": os.getpid(),
+                    "adapter_child_pid": os.getpid(),
+                    "scheduler_pid": os.getpid(),
+                    "adapter_host": remote_host,
+                    "scheduler_host": remote_host,
+                },
+            )
+
+            result = run_health_probe(project)
+
+            check = check_by_name(result, "scheduler_lock")
+            self.assertEqual(check["status"], "fail", json.dumps(result, indent=2, sort_keys=True))
+            self.assertNotIn("heartbeat_covered_by_active_run_lease", check.get("details", {}))
 
     def _stale_scheduler_lock(self, project: Path) -> None:
         write_json(

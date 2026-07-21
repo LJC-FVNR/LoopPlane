@@ -16,6 +16,7 @@ from runtime.file_discovery import discover_files_bounded
 from runtime.path_resolution import WorkflowPathError, WorkflowPaths, load_workflow_config
 from runtime.reconciliation import parse_plan_tasks
 from runtime.scheduler import SCHEMA_VERSION, SchedulerError, append_event, load_event_log_projection, prepare_run
+from runtime.source_guard import read_process_template
 
 
 CHAT_REQUESTS_FILENAME = "chat_requests.jsonl"
@@ -396,7 +397,7 @@ def _build_agent_inspector_prompt(
     context_paths: Sequence[str],
     change_request: Mapping[str, Any] | None,
 ) -> str:
-    template = INSPECTOR_TEMPLATE_PATH.read_text(encoding="utf-8")
+    template = read_process_template(INSPECTOR_TEMPLATE_PATH)
     response_path = prepared.role_output_dir / "inspection_response.json"
     variables = {
         "project_root": project.as_posix(),

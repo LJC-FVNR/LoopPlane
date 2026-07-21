@@ -161,6 +161,9 @@ class BackgroundJobRuntimeTest(unittest.TestCase):
 
             self.assertTrue(result["ok"], json.dumps(result, indent=2, sort_keys=True))
             job_id = result["job_id"]
+            self.assertTrue(
+                result["background_job"]["supervisor_process_start_time"]
+            )
             self.assertEqual(result["agent_status_fragment"]["status"], "running_background")
             self.assertFalse(result["agent_status_fragment"]["next_prompt_ready"])
             try:
@@ -874,7 +877,7 @@ class BackgroundJobRuntimeTest(unittest.TestCase):
                         "heartbeat_at": now,
                         "pid": 999_999_999,
                         "supervisor_pid": 999_999_998,
-                        "supervisor_host": f"remote-{socket.gethostname()}",
+                        "supervisor_host": f"{socket.gethostname().split('.', 1)[0]}.remote.invalid",
                     }
                 ],
             )
@@ -907,7 +910,7 @@ class BackgroundJobRuntimeTest(unittest.TestCase):
                         "pid": os.getpid(),
                         "child_pid": os.getpid(),
                         "supervisor_pid": os.getpid(),
-                        "supervisor_host": f"remote-{socket.gethostname()}",
+                        "supervisor_host": f"{socket.gethostname().split('.', 1)[0]}.remote.invalid",
                     }
                 ],
             )
@@ -972,7 +975,7 @@ class BackgroundJobRuntimeTest(unittest.TestCase):
                         "pid": os.getpid(),
                         "child_pid": os.getpid(),
                         "supervisor_pid": os.getpid(),
-                        "supervisor_host": f"remote-{socket.gethostname()}",
+                        "supervisor_host": f"{socket.gethostname().split('.', 1)[0]}.remote.invalid",
                     }
                 ],
             )
@@ -1061,6 +1064,59 @@ class BackgroundJobRuntimeTest(unittest.TestCase):
             self.assertFalse(job["next_prompt_ready"])
             self.assertNotIn("status_problem", job)
 
+    def test_reused_child_pid_is_not_treated_as_live_background_work(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "Background PID identity includes process birth time.")
+            workflow_config = load_workflow_config(project)
+            workflow_id = str(workflow_config["workflow_id"])
+            paths = WorkflowPaths.from_config(project, workflow_config)
+            now = utc_timestamp()
+            self._write_background_registry(
+                paths,
+                workflow_id,
+                [
+                    {
+                        "job_id": "reused_child_pid_fixture",
+                        "workflow_id": workflow_id,
+                        "status": "running",
+                        "next_prompt_ready": False,
+                        "started_at": now,
+                        "heartbeat_at": now,
+                        "pid": os.getpid(),
+                        "child_pid": os.getpid(),
+                        "child_process_start_time": "proc:not-this-process",
+                        "supervisor_pid": os.getpid(),
+                        "supervisor_host": socket.gethostname(),
+                    }
+                ],
+            )
+
+            status = list_background_jobs(project, job_id="reused_child_pid_fixture")
+
+            job = status["jobs"][0]
+            self.assertEqual(job["status"], "stale")
+            self.assertEqual(job["status_problem"], "process_not_live")
+
+    def test_unreadable_birth_identity_does_not_confirm_background_liveness(self) -> None:
+        job = {
+            "child_pid": os.getpid(),
+            "child_process_start_time": "proc:recorded",
+            "supervisor_host": socket.gethostname(),
+        }
+
+        with (
+            mock.patch.object(background_jobs_runtime, "_pid_exists", return_value=True),
+            mock.patch.object(background_jobs_runtime, "_process_start_time", return_value=None),
+        ):
+            alive = background_jobs_runtime._job_process_liveness(
+                job,
+                os.getpid(),
+                role="child",
+            )
+
+        self.assertIsNone(alive)
+
     def test_status_refresh_reconciles_completed_source_agent_status(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             project = Path(tmp) / "project"
@@ -1141,7 +1197,7 @@ class BackgroundJobRuntimeTest(unittest.TestCase):
 
             result = start_background_job(
                 project,
-                command=[sys.executable, "-c", "import time; time.sleep(2)"],
+                command=[sys.executable, "-c", "import time; time.sleep(3)"],
                 task_id="P0.T001",
                 run_id="run_background_watchdog",
                 watchdog_interval_seconds=1,

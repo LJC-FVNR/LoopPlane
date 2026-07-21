@@ -33,6 +33,7 @@ from runtime.plan_objectives import (
 )
 from runtime.read_models import rebuild_read_models
 from runtime.schema_validation import validate_json_value_against_schema
+from runtime.source_guard import read_process_template
 from runtime.version_control import create_git_checkpoint
 from runtime.workflow_lifecycle import mark_workflow_completed
 
@@ -759,7 +760,7 @@ def _build_final_reviewer_prompt(
     review_path: Path,
     tasks: Sequence[FinalVerifierTask],
 ) -> str:
-    template = _read_text(FINAL_REVIEWER_TEMPLATE_PATH)
+    template = read_process_template(FINAL_REVIEWER_TEMPLATE_PATH)
     deliverables = [
         {
             "task_id": task.task_id,

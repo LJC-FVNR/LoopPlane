@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import os
-import socket
 from datetime import UTC, datetime
 from hashlib import sha256
 from pathlib import Path
@@ -14,6 +13,11 @@ from runtime.agent_runners import AgentRunnerConfigError, load_agent_runners
 from runtime.exit_codes import EXIT_HEALTH_FAILURE, EXIT_SUCCESS
 from runtime.file_discovery import discover_files_bounded
 from runtime.path_resolution import WorkflowPaths
+from runtime.process_identity import (
+    host_is_local as process_host_is_local,
+    pid_exists as process_pid_exists,
+    process_start_time as read_process_start_time,
+)
 from runtime.runner_locks import (
     RUNNER_LOCK_ACTIVE,
     RUNNER_LOCK_ABSENT,
@@ -25,6 +29,7 @@ from runtime.runner_locks import (
 )
 from runtime.scheduler import SCHEMA_VERSION, completion_marker_status, load_scheduler_context
 from runtime.schema_validation import validate_project_schemas
+from runtime.source_guard import PROCESS_RUNTIME_SOURCE_SNAPSHOT
 from runtime.version_control import SubprocessGitCommandRunner, run_git_doctor
 
 
@@ -58,6 +63,22 @@ ALLOWED_BACKGROUND_JOB_STATUSES = frozenset(
 )
 BACKGROUND_JOB_SAFE_STATUSES = frozenset({"completed", "cancelled"})
 BACKGROUND_JOB_PROBLEM_STATUSES = frozenset({"failed", "timed_out", "stale", "needs_recovery"})
+
+TERMINAL_SUPERVISOR_STATUSES = frozenset(
+    {"completed", "stopped", "requires_attention", "failed", "exited"}
+)
+ACTIVE_SUPERVISOR_STATUSES = frozenset(
+    {
+        "launching",
+        "running",
+        "paused",
+        "waiting_config",
+        "waiting_approval",
+        "waiting_background",
+        "waiting_runner_availability",
+        "restarting_source_update",
+    }
+)
 
 INACTIVE_RUN_STATUSES = frozenset({"completed", "succeeded", "failed", "cancelled", "aborted", "released"})
 ACTIVE_RUN_STATUSES = frozenset({"running", "pending", "starting", "waiting"})
@@ -120,6 +141,7 @@ def run_health_probe(
     checks: list[dict[str, Any]] = []
     checks.append(_check_schema_validation(project))
     checks.append(_check_scheduler_lock(paths, now))
+    checks.append(_check_supervisor_liveness(paths, now))
     leases_check, active_leases = _check_active_run_leases(paths, now)
     checks.append(leases_check)
     checks.append(_check_runner_liveness(active_leases))
@@ -262,8 +284,15 @@ def _check_scheduler_lock(paths: WorkflowPaths, now: datetime) -> dict[str, Any]
             details={"owner": owner.get("owner"), "age_seconds": age, "ttl_seconds": ttl},
         )
     owner_pid = _positive_int(owner.get("pid"), 0)
+    owner_host = _non_empty_string(owner.get("hostname"))
+    owner_is_local = process_host_is_local(owner_host)
     covering_lease = _fresh_scheduler_lock_owner_lease(paths, now=now, owner_pid=owner_pid)
-    if owner_pid > 0 and _pid_exists(owner_pid) is True and covering_lease is not None:
+    if (
+        owner_pid > 0
+        and owner_is_local is not False
+        and _pid_exists(owner_pid) is True
+        and covering_lease is not None
+    ):
         return _check(
             "scheduler_lock",
             PASS,
@@ -286,6 +315,214 @@ def _check_scheduler_lock(paths: WorkflowPaths, now: datetime) -> dict[str, Any]
         path=_relative(paths, owner_path),
         details={"owner": owner.get("owner"), "age_seconds": age, "ttl_seconds": ttl},
     )
+
+
+def _check_supervisor_liveness(paths: WorkflowPaths, now: datetime) -> dict[str, Any]:
+    """Verify that a requested detached scheduler has a live supervisor."""
+
+    state_path = paths.runtime_dir / "state.json"
+    state, state_error = _read_json_object(state_path)
+    if state_error:
+        return _check(
+            "supervisor_liveness",
+            FAIL,
+            f"Runtime state is unreadable, so detached supervisor intent cannot be determined: {state_error}.",
+            severity=UNHEALTHY,
+            path=_relative(paths, state_path),
+        )
+
+    scheduler = state.get("scheduler")
+    scheduler_state = scheduler if isinstance(scheduler, Mapping) else {}
+    detached_requested = scheduler_state.get("detach_requested") is True
+    scheduler_running = scheduler_state.get("running") is True
+    scheduler_paused = scheduler_state.get("paused") is True
+    stop_requested = scheduler_state.get("stop_requested") is True
+    supervisor_expected = (
+        detached_requested
+        and (scheduler_running or scheduler_paused)
+        and not stop_requested
+    )
+    metadata_path = paths.runtime_dir / "supervisor.json"
+    base_details: dict[str, Any] = {
+        "supervisor_expected": supervisor_expected,
+        "detach_requested": detached_requested,
+        "scheduler_running": scheduler_running,
+        "scheduler_paused": scheduler_paused,
+        "stop_requested": stop_requested,
+        "runtime_status": state.get("status"),
+    }
+
+    if not metadata_path.exists():
+        if supervisor_expected:
+            return _check(
+                "supervisor_liveness",
+                FAIL,
+                "Detached scheduling is marked running, but supervisor metadata is missing.",
+                severity=UNHEALTHY,
+                path=_relative(paths, metadata_path),
+                details=base_details,
+            )
+        return _check(
+            "supervisor_liveness",
+            PASS,
+            "No detached supervisor is expected.",
+            path=_relative(paths, metadata_path),
+            details=base_details,
+        )
+
+    metadata, metadata_error = _read_json_object(metadata_path)
+    if metadata_error:
+        return _check(
+            "supervisor_liveness",
+            FAIL,
+            f"Supervisor metadata is unreadable: {metadata_error}.",
+            severity=UNHEALTHY if supervisor_expected else DEGRADED,
+            path=_relative(paths, metadata_path),
+            details=base_details,
+        )
+
+    status = str(metadata.get("status") or "unknown").strip().lower()
+    pid = _maybe_int(metadata.get("pid"))
+    if pid is not None and pid <= 0:
+        pid = None
+    heartbeat = _parse_timestamp(metadata.get("heartbeat_at"))
+    heartbeat_age = _age_seconds(now, heartbeat) if heartbeat is not None else None
+    heartbeat_ttl = _positive_int(
+        metadata.get("heartbeat_ttl_seconds"), DEFAULT_HEARTBEAT_TTL_SECONDS
+    )
+    heartbeat_fresh = heartbeat_age is not None and heartbeat_age <= heartbeat_ttl
+    supervisor_host = _supervisor_host(metadata)
+    host_is_local = _supervisor_host_is_local(supervisor_host)
+    raw_pid_alive = _pid_exists(pid) if pid is not None and host_is_local is not False else None
+    expected_process_start = _non_empty_string(metadata.get("process_start_time"))
+    observed_process_start = (
+        _process_start_time(pid)
+        if pid is not None and host_is_local is not False and raw_pid_alive is True
+        else None
+    )
+    process_identity_matches: bool | None = None
+    if expected_process_start is not None and observed_process_start is not None:
+        process_identity_matches = expected_process_start == observed_process_start
+    if raw_pid_alive is True and process_identity_matches is False:
+        pid_alive: bool | None = False
+    elif raw_pid_alive is True and expected_process_start is not None and observed_process_start is None:
+        pid_alive = None
+    else:
+        pid_alive = raw_pid_alive
+    expected_workflow_id = _non_empty_string(paths.workflow_id)
+    metadata_workflow_id = _non_empty_string(metadata.get("workflow_id"))
+    current_source_fingerprint = PROCESS_RUNTIME_SOURCE_SNAPSHOT.fingerprint
+    metadata_source_fingerprint = _non_empty_string(
+        metadata.get("runtime_source_fingerprint")
+    )
+    source_fingerprint_matches = metadata_source_fingerprint == current_source_fingerprint
+    details = {
+        **base_details,
+        "metadata_status": status,
+        "pid": pid,
+        "supervisor_host": supervisor_host,
+        "pid_probe_scope": "remote" if host_is_local is False else "local",
+        "pid_alive": pid_alive,
+        "raw_pid_alive": raw_pid_alive,
+        "expected_process_start_time": expected_process_start,
+        "observed_process_start_time": observed_process_start,
+        "process_identity_matches": process_identity_matches,
+        "expected_workflow_id": expected_workflow_id,
+        "metadata_workflow_id": metadata_workflow_id,
+        "current_runtime_source_fingerprint": current_source_fingerprint,
+        "metadata_runtime_source_fingerprint": metadata_source_fingerprint,
+        "runtime_source_fingerprint_matches": source_fingerprint_matches,
+        "heartbeat_at": metadata.get("heartbeat_at"),
+        "heartbeat_age_seconds": heartbeat_age,
+        "heartbeat_ttl_seconds": heartbeat_ttl,
+        "heartbeat_fresh": heartbeat_fresh,
+    }
+
+    if not supervisor_expected:
+        if status in ACTIVE_SUPERVISOR_STATUSES and (
+            pid_alive is True or (host_is_local is False and heartbeat_fresh)
+        ):
+            return _check(
+                "supervisor_liveness",
+                WARN,
+                "A detached supervisor is alive although detached scheduling is not marked running.",
+                path=_relative(paths, metadata_path),
+                details=details,
+            )
+        return _check(
+            "supervisor_liveness",
+            PASS,
+            "Detached supervisor state is inactive and no supervisor is expected.",
+            path=_relative(paths, metadata_path),
+            details=details,
+        )
+
+    problems: list[str] = []
+    if status in TERMINAL_SUPERVISOR_STATUSES:
+        problems.append(f"metadata status is terminal ({status})")
+    elif status not in ACTIVE_SUPERVISOR_STATUSES:
+        problems.append(f"metadata status is not active ({status})")
+    if pid is None:
+        problems.append("pid is missing")
+    elif raw_pid_alive is True and process_identity_matches is False:
+        problems.append("supervisor process identity does not match metadata")
+    elif host_is_local is not False and pid_alive is False:
+        problems.append("supervisor process is dead")
+    elif host_is_local is not False and pid_alive is None:
+        problems.append("supervisor process liveness is unknown")
+    if not heartbeat_fresh:
+        problems.append("heartbeat is missing or stale")
+    if metadata_workflow_id != expected_workflow_id:
+        problems.append("supervisor workflow_id does not match the active workflow")
+    if metadata_source_fingerprint is None:
+        problems.append("runtime_source_fingerprint is missing")
+    elif not source_fingerprint_matches:
+        problems.append("runtime_source_fingerprint does not match the current LoopPlane source")
+    if (
+        host_is_local is not False
+        and raw_pid_alive is True
+        and observed_process_start is not None
+        and expected_process_start is None
+    ):
+        problems.append("process_start_time is missing")
+
+    if problems:
+        details["problems"] = problems
+        return _check(
+            "supervisor_liveness",
+            FAIL,
+            "Detached scheduling is marked running, but its supervisor is not healthy.",
+            severity=UNHEALTHY,
+            path=_relative(paths, metadata_path),
+            details=details,
+        )
+    return _check(
+        "supervisor_liveness",
+        PASS,
+        "Detached scheduler supervisor is alive with a fresh heartbeat.",
+        path=_relative(paths, metadata_path),
+        details=details,
+    )
+
+
+def _supervisor_host(metadata: Mapping[str, Any]) -> str | None:
+    explicit = _non_empty_string(metadata.get("host"))
+    if explicit:
+        return explicit.strip()
+    owner = _non_empty_string(metadata.get("owner"))
+    if owner:
+        parts = owner.rsplit(":", 2)
+        if len(parts) == 3 and parts[0].strip():
+            return parts[0].strip()
+    return None
+
+
+def _supervisor_host_is_local(host: str | None) -> bool | None:
+    if host is None:
+        # Legacy metadata did not record a host; its PID was historically in
+        # the same namespace as the health command.
+        return None
+    return process_host_is_local(host)
 
 
 def _fresh_scheduler_lock_owner_lease(
@@ -375,6 +612,11 @@ def _check_active_run_leases(paths: WorkflowPaths, now: datetime) -> tuple[dict[
             "run_id": run_id,
             "status": status,
             "adapter_pid": lease.get("adapter_pid"),
+            "adapter_process_start_time": lease.get("adapter_process_start_time"),
+            "adapter_child_pid": lease.get("adapter_child_pid"),
+            "adapter_child_process_start_time": lease.get("adapter_child_process_start_time"),
+            "scheduler_pid": lease.get("scheduler_pid"),
+            "scheduler_process_start_time": lease.get("scheduler_process_start_time"),
             "adapter_host": lease.get("adapter_host"),
             "scheduler_host": lease.get("scheduler_host"),
             "scheduler_owner": lease.get("scheduler_owner"),
@@ -407,10 +649,12 @@ def _check_runner_liveness(active_leases: Sequence[Mapping[str, Any]]) -> dict[s
     for lease in active_leases:
         run_id = str(lease.get("run_id") or lease.get("path") or "unknown")
         runner_host = _lease_runner_host(lease)
-        if runner_host and not _hostnames_match(runner_host, socket.gethostname()):
+        if runner_host and process_host_is_local(runner_host) is False:
             remote_pid.append(run_id)
             continue
-        pid_value = lease.get("adapter_pid")
+        child_pid_value = lease.get("adapter_child_pid")
+        using_child = child_pid_value is not None
+        pid_value = child_pid_value if using_child else lease.get("adapter_pid")
         if pid_value is None:
             missing_pid.append(run_id)
             continue
@@ -419,6 +663,19 @@ def _check_runner_liveness(active_leases: Sequence[Mapping[str, Any]]) -> dict[s
             dead_pid.append(run_id)
             continue
         alive = _pid_exists(pid)
+        expected_start = _non_empty_string(
+            lease.get(
+                "adapter_child_process_start_time"
+                if using_child
+                else "adapter_process_start_time"
+            )
+        )
+        if alive is True and expected_start is not None:
+            observed_start = _process_start_time(pid)
+            if observed_start is None:
+                alive = None
+            elif observed_start != expected_start:
+                alive = False
         if alive is None:
             missing_pid.append(run_id)
         elif alive:
@@ -446,17 +703,16 @@ def _lease_runner_host(lease: Mapping[str, Any]) -> str | None:
     owner = _non_empty_string(lease.get("scheduler_owner"))
     if owner:
         parts = owner.rsplit(":", 2)
-        if len(parts) == 3 and parts[0].strip():
+        owner_pid = _maybe_int(parts[1]) if len(parts) == 3 else None
+        scheduler_pid = _maybe_int(lease.get("scheduler_pid"))
+        if (
+            len(parts) == 3
+            and parts[0].strip()
+            and owner_pid is not None
+            and (scheduler_pid is None or scheduler_pid == owner_pid)
+        ):
             return parts[0].strip()
     return None
-
-
-def _hostnames_match(left: str, right: str) -> bool:
-    left_normalized = left.strip().lower().rstrip(".")
-    right_normalized = right.strip().lower().rstrip(".")
-    if not left_normalized or not right_normalized:
-        return False
-    return left_normalized == right_normalized or left_normalized.split(".", 1)[0] == right_normalized.split(".", 1)[0]
 
 
 def _lease_blocks_scheduler(lease: Mapping[str, Any]) -> bool:
@@ -612,10 +868,18 @@ def _check_background_jobs(paths: WorkflowPaths, now: datetime) -> dict[str, Any
             warnings.append(f"{label}: next_prompt_ready=false should include wake_next_agent_when")
         pid_value = job.get("pid")
         supervisor_host = str(job.get("supervisor_host") or "").strip()
-        pid_probe_is_local = not supervisor_host or supervisor_host == socket.gethostname()
+        pid_probe_is_local = process_host_is_local(supervisor_host or None) is True
         if pid_value is not None and pid_probe_is_local:
             pid = _positive_int(pid_value, -1)
-            if pid <= 0 or _pid_exists(pid) is False:
+            pid_alive = _pid_exists(pid) if pid > 0 else False
+            expected_start = _background_job_expected_process_start(job, pid=pid)
+            if pid_alive is True and expected_start is not None:
+                observed_start = _process_start_time(pid)
+                if observed_start is None:
+                    warnings.append(f"{label}: process identity could not be verified")
+                elif observed_start != expected_start:
+                    pid_alive = False
+            if pid <= 0 or pid_alive is False:
                 problems.append(f"{label}: process is not live")
         wake_check = job.get("wake_check")
         if isinstance(wake_check, Mapping) and wake_check.get("type") == "file_exists_and_process_exited":
@@ -668,6 +932,20 @@ def _resolved_background_job_failures(paths: WorkflowPaths) -> dict[str, dict[st
     for job_id in unresolved_job_ids:
         resolved.pop(job_id, None)
     return resolved
+
+
+def _background_job_expected_process_start(
+    job: Mapping[str, Any],
+    *,
+    pid: int,
+) -> str | None:
+    child_pid = _maybe_int(job.get("child_pid"))
+    if child_pid == pid:
+        return _non_empty_string(job.get("child_process_start_time"))
+    supervisor_pid = _maybe_int(job.get("supervisor_pid"))
+    if supervisor_pid == pid:
+        return _non_empty_string(job.get("supervisor_process_start_time"))
+    return None
 
 
 def _check_agent_status_files(paths: WorkflowPaths) -> dict[str, Any]:
@@ -1379,15 +1657,11 @@ def _age_seconds(now: datetime, then: datetime) -> int:
 
 
 def _pid_exists(pid: int) -> bool | None:
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    except OSError:
-        return None
-    return True
+    return process_pid_exists(pid)
+
+
+def _process_start_time(pid: int) -> str | None:
+    return read_process_start_time(pid)
 
 
 def _maybe_int(value: object) -> int | None:

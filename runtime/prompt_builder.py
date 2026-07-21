@@ -11,6 +11,7 @@ from typing import Any, Mapping, Sequence
 from runtime.adapters.base import utc_timestamp
 from runtime.path_resolution import WORKFLOW_PATH_FIELDS, WorkflowPathError, WorkflowPaths, load_workflow_config
 from runtime.plan_objectives import is_task_block_terminator
+from runtime.source_guard import read_process_template
 
 
 SCHEMA_VERSION = "1.5"
@@ -741,9 +742,19 @@ def _path_attr(value: Any, name: str) -> Path:
 
 def _read_required_text(path: Path, label: str) -> str:
     try:
+        if _is_runtime_template(path):
+            return read_process_template(path)
         return path.read_text(encoding="utf-8")
     except OSError as error:
         raise PromptBuildError(f"Unable to read {label} at {path}: {error}") from error
+
+
+def _is_runtime_template(path: Path) -> bool:
+    try:
+        path.expanduser().resolve().relative_to(TEMPLATE_DIR.resolve())
+    except ValueError:
+        return False
+    return True
 
 
 def _atomic_write_text(path: Path, text: str) -> None:
