@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import shutil
 import socket
 import threading
@@ -4753,22 +4754,44 @@ def _load_runner_and_adapter(project: Path, runner_id: str | None) -> tuple[Runn
     runner_config = load_agent_runners(project).runner(runner_id)
     if not runner_config.enabled:
         raise AgentRunnerConfigError(f"runner {runner_config.runner_id!r} is disabled")
-    command_problem = _runner_command_preflight_problem(project, runner_config)
+    adapter = get_adapter(runner_config.adapter)
+    command_problem = _runner_command_preflight_problem(project, runner_config, adapter=adapter)
     if command_problem is not None:
         raise AgentRunnerConfigError(command_problem)
-    return runner_config, get_adapter(runner_config.adapter)
+    return runner_config, adapter
 
 
-def _runner_command_preflight_problem(project: Path, runner_config: RunnerConfig) -> str | None:
+def _runner_command_preflight_problem(
+    project: Path,
+    runner_config: RunnerConfig,
+    *,
+    adapter: Any | None = None,
+) -> str | None:
     command = str(runner_config.command or "").strip()
     if not command:
         return f"runner {runner_config.runner_id!r} command is empty"
+    try:
+        command_parts = shlex.split(command)
+    except ValueError as error:
+        return f"runner {runner_config.runner_id!r} command cannot be parsed: {error}"
+    if not command_parts:
+        return f"runner {runner_config.runner_id!r} command is empty"
+    program = command_parts[0]
     env = dict(os.environ)
     env.update({str(key): str(value) for key, value in runner_config.env.items()})
-    if os.path.isabs(command) or os.sep in command or (os.altsep and os.altsep in command):
-        candidate = Path(command).expanduser()
+    cwd = _resolve_cwd(project, runner_config.cwd)
+    executable_resolver = getattr(adapter, "executable_resolver", None)
+    if callable(executable_resolver):
+        try:
+            resolution = executable_resolver(program, env=env, cwd=cwd)
+        except (OSError, ValueError):
+            resolution = None
+        if resolution is not None and bool(getattr(resolution, "available", False)):
+            return None
+    if os.path.isabs(program) or os.sep in program or (os.altsep and os.altsep in program):
+        candidate = Path(program).expanduser()
         if not candidate.is_absolute():
-            candidate = _resolve_cwd(project, runner_config.cwd) / candidate
+            candidate = cwd / candidate
         try:
             usable = candidate.is_file() and os.access(candidate, os.X_OK)
         except OSError:
@@ -4779,8 +4802,8 @@ def _runner_command_preflight_problem(project: Path, runner_config: RunnerConfig
                 f"{candidate}"
             )
         return None
-    if shutil.which(command, path=env.get("PATH")) is None:
-        return f"runner {runner_config.runner_id!r} executable not found on PATH: {command}"
+    if shutil.which(program, path=env.get("PATH")) is None:
+        return f"runner {runner_config.runner_id!r} executable not found on PATH: {program}"
     return None
 
 

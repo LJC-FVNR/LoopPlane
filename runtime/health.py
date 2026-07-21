@@ -562,8 +562,10 @@ def _check_background_jobs(paths: WorkflowPaths, now: datetime) -> dict[str, Any
     if not jobs:
         return _check("background_jobs", PASS, "No background jobs are registered.", count=0)
 
+    resolved_failures = _resolved_background_job_failures(paths)
     problems: list[str] = []
     warnings: list[str] = []
+    resolved_records: list[dict[str, str]] = []
     for index, job in enumerate(jobs):
         label = str(job.get("job_id") or f"job[{index}]")
         status = str(job.get("status") or "").strip().lower()
@@ -576,6 +578,20 @@ def _check_background_jobs(paths: WorkflowPaths, now: datetime) -> dict[str, Any
             problems.append(f"{label}: status {status!r} is not allowed")
         if job.get("next_prompt_ready") is not None and not isinstance(job.get("next_prompt_ready"), bool):
             problems.append(f"{label}: next_prompt_ready must be boolean when present")
+        resolved_failure = resolved_failures.get(label)
+        if status in BACKGROUND_JOB_PROBLEM_STATUSES and resolved_failure is not None:
+            resolved_record = {
+                "job_id": label,
+                "job_status": status,
+                "failure_id": resolved_failure["failure_id"],
+                "failure_status": resolved_failure["failure_status"],
+            }
+            resolved_records.append(resolved_record)
+            warnings.append(
+                f"{label}: historical status {status!r} is linked to "
+                f"{resolved_failure['failure_status']} failure {resolved_failure['failure_id']}; retained for audit"
+            )
+            continue
         if status in {"failed", "timed_out"}:
             # These are valid terminal execution records. They must remain in
             # the registry as failure evidence and are ingested by the
@@ -608,10 +624,50 @@ def _check_background_jobs(paths: WorkflowPaths, now: datetime) -> dict[str, Any
                 problems.append(f"{label}: wake_check paths must be a non-empty string list")
 
     if problems:
-        return _check("background_jobs", FAIL, "One or more background job records are inconsistent.", details={"problems": problems, "warnings": warnings})
+        return _check(
+            "background_jobs",
+            FAIL,
+            "One or more background job records are inconsistent.",
+            details={"problems": problems, "warnings": warnings, "resolved": resolved_records},
+        )
     if warnings:
-        return _check("background_jobs", WARN, "Background job records are parseable with advisory issues.", details={"warnings": warnings})
+        return _check(
+            "background_jobs",
+            WARN,
+            "Background job records are parseable with advisory issues.",
+            details={"warnings": warnings, "resolved": resolved_records},
+        )
     return _check("background_jobs", PASS, f"{len(jobs)} background job record(s) are well formed.", count=len(jobs))
+
+
+def _resolved_background_job_failures(paths: WorkflowPaths) -> dict[str, dict[str, str]]:
+    data, error = _read_json(paths.runtime_dir / "failure_registry.json")
+    if error or not isinstance(data, Mapping):
+        return {}
+    failures = data.get("failures")
+    if not isinstance(failures, Sequence) or isinstance(failures, (str, bytes)):
+        return {}
+    resolved: dict[str, dict[str, str]] = {}
+    unresolved_job_ids: set[str] = set()
+    for failure in failures:
+        if not isinstance(failure, Mapping):
+            continue
+        if str(failure.get("failure_class") or "").strip() != "background_job_failed":
+            continue
+        job_id = str(failure.get("source_background_job_id") or "").strip()
+        if not job_id:
+            continue
+        failure_status = str(failure.get("status") or "").strip().lower()
+        if failure_status not in RESOLVED_FAILURE_STATUSES:
+            unresolved_job_ids.add(job_id)
+            continue
+        resolved[job_id] = {
+            "failure_id": str(failure.get("failure_id") or "unknown_failure"),
+            "failure_status": failure_status,
+        }
+    for job_id in unresolved_job_ids:
+        resolved.pop(job_id, None)
+    return resolved
 
 
 def _check_agent_status_files(paths: WorkflowPaths) -> dict[str, Any]:

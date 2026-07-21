@@ -3,14 +3,17 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import uuid
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
+from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +31,10 @@ SUPERVISOR_FILENAME = "supervisor.json"
 SUPERVISOR_LOG_DIRNAME = "supervisor"
 SUPERVISOR_STDOUT_FILENAME = "supervisor_stdout.log"
 SUPERVISOR_STDERR_FILENAME = "supervisor_stderr.log"
+SUPERVISOR_SOURCE_SNAPSHOTS_DIRNAME = "supervisor_sources"
+SUPERVISOR_SOURCE_MANIFEST_FILENAME = "source_manifest.json"
+SUPERVISOR_SOURCE_ROOTS = ("runtime", "templates")
+SUPERVISOR_SOURCE_READ_ATTEMPTS = 3
 SUPERVISOR_HEARTBEAT_TTL_SECONDS = 120
 SUPERVISOR_METADATA_LOCK = threading.RLock()
 
@@ -1047,7 +1054,12 @@ def _launch_supervisor_process(project: Path, context: Mapping[str, Any], *, sta
     for path in logs.values():
         path.parent.mkdir(parents=True, exist_ok=True)
 
-    repo_root = Path(__file__).resolve().parents[1]
+    source_root = Path(__file__).resolve().parents[1]
+    source_snapshot = _materialize_supervisor_source_snapshot(
+        source_root,
+        paths.runtime_dir / SUPERVISOR_SOURCE_SNAPSHOTS_DIRNAME,
+    )
+    repo_root = Path(str(source_snapshot["root"]))
     command = [
         sys.executable,
         "-m",
@@ -1058,6 +1070,13 @@ def _launch_supervisor_process(project: Path, context: Mapping[str, Any], *, sta
     ]
     env = dict(os.environ)
     env["PYTHONPATH"] = _pythonpath_with_repo(repo_root, env.get("PYTHONPATH"))
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    snapshot_metadata = {
+        "fingerprint": source_snapshot["fingerprint"],
+        "path": _path_for_record(project, repo_root),
+        "manifest_path": _path_for_record(project, Path(str(source_snapshot["manifest_path"]))),
+        "file_count": source_snapshot["file_count"],
+    }
     _merge_supervisor_metadata(
         paths,
         {
@@ -1071,6 +1090,8 @@ def _launch_supervisor_process(project: Path, context: Mapping[str, Any], *, sta
             "pid": None,
             "command": command,
             "command_display": _display_command(command),
+            "command_cwd": repo_root.as_posix(),
+            "source_snapshot": snapshot_metadata,
             "log_paths": _relative_log_paths(project, logs),
             "exit_status": None,
             "exit_code": None,
@@ -1101,6 +1122,140 @@ def _launch_supervisor_process(project: Path, context: Mapping[str, Any], *, sta
         },
     )
     return load_supervisor_status(project)
+
+
+def _materialize_supervisor_source_snapshot(
+    source_root: Path | str,
+    snapshot_parent: Path | str,
+) -> dict[str, Any]:
+    """Create a content-addressed runtime/template tree for one supervisor.
+
+    Detached supervisors import Python once but build prompts throughout their
+    lifetime.  Running from a mutable checkout can therefore combine old
+    imported code with newly updated templates.  A content-addressed snapshot
+    keeps every module and template on the same immutable generation.
+    """
+
+    source = Path(source_root).expanduser().resolve()
+    parent = Path(snapshot_parent).expanduser().resolve()
+    bundle: dict[str, bytes] | None = None
+    fingerprint = ""
+    for _attempt in range(SUPERVISOR_SOURCE_READ_ATTEMPTS):
+        first = _read_supervisor_source_bundle(source)
+        second = _read_supervisor_source_bundle(source)
+        first_fingerprint = _supervisor_source_fingerprint(first)
+        second_fingerprint = _supervisor_source_fingerprint(second)
+        if first_fingerprint == second_fingerprint:
+            bundle = second
+            fingerprint = second_fingerprint
+            break
+    if bundle is None:
+        raise RuntimeError(
+            f"LoopPlane source changed while creating a detached supervisor snapshot: {source}"
+        )
+
+    digest = fingerprint.removeprefix("sha256:")
+    target = parent / digest
+    manifest_path = target / SUPERVISOR_SOURCE_MANIFEST_FILENAME
+    if target.exists():
+        _validate_supervisor_source_snapshot(target, bundle=bundle, fingerprint=fingerprint)
+        return {
+            "root": target.as_posix(),
+            "manifest_path": manifest_path.as_posix(),
+            "fingerprint": fingerprint,
+            "file_count": len(bundle),
+        }
+
+    parent.mkdir(parents=True, exist_ok=True)
+    temporary = Path(tempfile.mkdtemp(prefix=".source-snapshot-", dir=parent))
+    try:
+        file_records: list[dict[str, str]] = []
+        for relative, content in sorted(bundle.items()):
+            destination = temporary / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(content)
+            file_records.append(
+                {
+                    "path": relative,
+                    "sha256": "sha256:" + sha256(content).hexdigest(),
+                }
+            )
+        manifest = {
+            "schema_version": SCHEMA_VERSION,
+            "fingerprint": fingerprint,
+            "created_at": utc_timestamp(),
+            "source_root": source.as_posix(),
+            "files": file_records,
+        }
+        (temporary / SUPERVISOR_SOURCE_MANIFEST_FILENAME).write_text(
+            json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        try:
+            os.replace(temporary, target)
+        except OSError:
+            if not target.exists():
+                raise
+            _validate_supervisor_source_snapshot(target, bundle=bundle, fingerprint=fingerprint)
+    finally:
+        if temporary.exists():
+            shutil.rmtree(temporary)
+
+    return {
+        "root": target.as_posix(),
+        "manifest_path": manifest_path.as_posix(),
+        "fingerprint": fingerprint,
+        "file_count": len(bundle),
+    }
+
+
+def _read_supervisor_source_bundle(source_root: Path) -> dict[str, bytes]:
+    bundle: dict[str, bytes] = {}
+    for root_name in SUPERVISOR_SOURCE_ROOTS:
+        source_dir = source_root / root_name
+        if not source_dir.is_dir():
+            raise FileNotFoundError(f"detached supervisor source directory is missing: {source_dir}")
+        for path in sorted(source_dir.rglob("*")):
+            if not path.is_file():
+                continue
+            relative = path.relative_to(source_root)
+            if "__pycache__" in relative.parts or path.suffix in {".pyc", ".pyo"}:
+                continue
+            bundle[relative.as_posix()] = path.read_bytes()
+    if not bundle:
+        raise RuntimeError(f"detached supervisor source bundle is empty: {source_root}")
+    return bundle
+
+
+def _supervisor_source_fingerprint(bundle: Mapping[str, bytes]) -> str:
+    digest = sha256()
+    for relative, content in sorted(bundle.items()):
+        encoded_path = relative.encode("utf-8")
+        digest.update(len(encoded_path).to_bytes(8, "big"))
+        digest.update(encoded_path)
+        digest.update(len(content).to_bytes(8, "big"))
+        digest.update(content)
+    return "sha256:" + digest.hexdigest()
+
+
+def _validate_supervisor_source_snapshot(
+    snapshot_root: Path,
+    *,
+    bundle: Mapping[str, bytes],
+    fingerprint: str,
+) -> None:
+    manifest_path = snapshot_root / SUPERVISOR_SOURCE_MANIFEST_FILENAME
+    manifest = _read_json(manifest_path, default={})
+    if not isinstance(manifest, Mapping) or str(manifest.get("fingerprint") or "") != fingerprint:
+        raise RuntimeError(f"detached supervisor source snapshot manifest is invalid: {manifest_path}")
+    for relative, expected in bundle.items():
+        candidate = snapshot_root / relative
+        try:
+            actual = candidate.read_bytes()
+        except OSError as error:
+            raise RuntimeError(f"detached supervisor source snapshot is incomplete: {candidate}") from error
+        if actual != expected:
+            raise RuntimeError(f"detached supervisor source snapshot content changed: {candidate}")
 
 
 def _detached_resume_launch_reason(paths: WorkflowPaths, supervisor: Mapping[str, Any]) -> str | None:

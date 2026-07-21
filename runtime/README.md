@@ -201,6 +201,14 @@ During controller replacement it retries a pre-existing scheduler-instance lock
 for a bounded 150-second startup grace, allowing the old 120-second lease to
 expire without requiring a second manual submission.
 
+Each detached launch copies the current `runtime/` and `templates/` trees into
+a content-addressed directory under the workflow runtime directory and starts
+the supervisor from that snapshot. This keeps imported Python and prompt
+templates on one generation even if the installation checkout is updated while
+the controller is alive. `supervisor.json` records the snapshot fingerprint,
+path, manifest, and file count; a deliberate runtime upgrade takes effect on
+the next supervisor launch or restart.
+
 Detached supervisor metadata is stored in the configured runtime directory as
 `supervisor.json`; the default flat compatibility path is
 `.loopplane/runtime/supervisor.json`. The record includes the workflow ID, project

@@ -528,6 +528,85 @@ class HealthProbeTest(unittest.TestCase):
             self.assertNotIn("process is not live", json.dumps(check, sort_keys=True))
             self.assertNotIn("stale heartbeat", json.dumps(check, sort_keys=True))
 
+    def test_resolved_stale_background_job_is_historical_warning(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            init_project(project, "Resolved historical background jobs should not degrade health.")
+            write_json(
+                project / ".loopplane" / "runtime" / "background_jobs.json",
+                {
+                    "schema_version": "1.5",
+                    "jobs": [
+                        {
+                            "job_id": "bg_resolved_stale",
+                            "task_id": "P0.T001",
+                            "run_id": "run_resolved_stale",
+                            "status": "stale",
+                            "status_problem": "process_not_live",
+                            "next_prompt_ready": False,
+                            "heartbeat_at": "2000-01-01T00:00:00Z",
+                            "pid": 99999999,
+                        }
+                    ],
+                },
+            )
+            registry_path = project / ".loopplane" / "runtime" / "failure_registry.json"
+            registry = json.loads(registry_path.read_text(encoding="utf-8"))
+            registry["failures"] = [
+                {
+                    "failure_id": "fail_resolved_background",
+                    "task_id": "P0.T001",
+                    "run_id": "run_resolved_stale",
+                    "status": "recovered",
+                    "failure_class": "background_job_failed",
+                    "failure_signature": "background_job_failed:stale:none:process_not_live",
+                    "source_background_job_id": "bg_resolved_stale",
+                    "recovery_attempts": 1,
+                    "max_recovery_attempts": 1,
+                    "budget_remaining": False,
+                }
+            ]
+            write_json(registry_path, registry)
+
+            result = run_health_probe(project)
+
+            check = check_by_name(result, "background_jobs")
+            self.assertEqual(result["status"], "healthy_with_warnings", json.dumps(result, indent=2, sort_keys=True))
+            self.assertEqual(check["status"], "warn")
+            self.assertEqual(
+                check["details"]["resolved"],  # type: ignore[index]
+                [
+                    {
+                        "job_id": "bg_resolved_stale",
+                        "job_status": "stale",
+                        "failure_id": "fail_resolved_background",
+                        "failure_status": "recovered",
+                    }
+                ],
+            )
+            self.assertNotIn("stale heartbeat", json.dumps(check, sort_keys=True))
+            self.assertNotIn("process is not live", json.dumps(check, sort_keys=True))
+
+            registry["failures"].append(
+                {
+                    "failure_id": "fail_unresolved_background",
+                    "task_id": "P0.T001",
+                    "run_id": "run_resolved_stale",
+                    "status": "exhausted",
+                    "failure_class": "background_job_failed",
+                    "failure_signature": "background_job_failed:stale:retry:process_not_live",
+                    "source_background_job_id": "bg_resolved_stale",
+                    "recovery_attempts": 1,
+                    "max_recovery_attempts": 1,
+                    "budget_remaining": False,
+                }
+            )
+            write_json(registry_path, registry)
+
+            unresolved = run_health_probe(project)
+
+            self.assertEqual(check_by_name(unresolved, "background_jobs")["status"], "fail")
+
     def test_remote_background_supervisor_does_not_use_local_pid_namespace(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             project = Path(tmp) / "project"

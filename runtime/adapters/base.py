@@ -437,6 +437,12 @@ class AdapterDoctorResult:
 
 class AgentAdapter(ABC):
     adapter_name: str
+    # Optional adapter-aware executable resolver used by scheduler preflight.
+    # Resolvers accept the configured program plus ``env`` and ``cwd`` keyword
+    # arguments and return an object exposing ``available`` and
+    # ``resolved_path``.  Adapters without special recovery semantics leave
+    # this as ``None`` and use the scheduler's ordinary PATH/file checks.
+    executable_resolver: Any = None
 
     @abstractmethod
     def run(self, adapter_input: AdapterInput) -> AdapterOutput:

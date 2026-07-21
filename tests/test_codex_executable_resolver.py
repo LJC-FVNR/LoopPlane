@@ -11,6 +11,8 @@ from runtime.adapters.base import AdapterInput
 from runtime.adapters.codex_cli_adapter import CodexCliAdapter
 from runtime.adapters.codex_executable_resolver import resolve_codex_executable
 from runtime.agent_runners import RunnerConfig
+from runtime.init_workflow import init_project
+from runtime.scheduler import _load_runner_and_adapter
 
 
 def _make_executable(path: Path, body: str = "print('ok')") -> Path:
@@ -206,6 +208,56 @@ class CodexExecutableResolverTest(unittest.TestCase):
                 (root / "runtime" / "run_resolver" / "adapter_input.json").read_text(encoding="utf-8")
             )
             self.assertEqual(saved_input["command"], stale.as_posix())
+
+    def test_scheduler_preflight_uses_codex_recovery_for_stale_extension_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project = root / "project"
+            home = root / "home"
+            current = _make_executable(
+                home
+                / ".vscode-server"
+                / "extensions"
+                / "openai.chatgpt-2.0.0-linux-x64"
+                / "bin"
+                / "linux-x86_64"
+                / "codex"
+            )
+            stale = (
+                home
+                / ".vscode-server"
+                / "extensions"
+                / "openai.chatgpt-1.0.0-linux-x64"
+                / "bin"
+                / "linux-x86_64"
+                / "codex"
+            )
+            init_project(project, "Scheduler preflight should share Codex executable recovery.")
+            config_path = project / ".loopplane" / "config" / "agent_runners.json"
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+            runner = config["runners"]["worker"]
+            runner["adapter"] = "codex_cli"
+            runner["command"] = stale.as_posix()
+            runner["cwd"] = "{{project_root}}"
+            runner["env"] = {
+                "HOME": home.as_posix(),
+                "PATH": "/usr/bin:/bin",
+                "LOOPPLANE_CODEX_BIN": "",
+                "VSCODE_AGENT_FOLDER": "",
+            }
+            config_path.write_text(json.dumps(config, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+            runner_config, adapter = _load_runner_and_adapter(project, "worker")
+
+            self.assertEqual(runner_config.command, stale.as_posix())
+            self.assertEqual(adapter.adapter_name, "codex_cli")
+            resolution = adapter.executable_resolver(
+                runner_config.command,
+                env=runner_config.env,
+                cwd=project,
+            )
+            self.assertEqual(resolution.resolved_path, current.resolve().as_posix())
+            self.assertTrue(resolution.recovered)
 
 
 if __name__ == "__main__":

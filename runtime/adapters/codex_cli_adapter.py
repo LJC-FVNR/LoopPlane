@@ -23,6 +23,7 @@ from runtime.adapters.shell_adapter import (
 
 class CodexCliAdapter(ShellAdapter):
     adapter_name = "codex_cli"
+    executable_resolver = staticmethod(resolve_codex_executable)
 
     def run(self, adapter_input: AdapterInput) -> AdapterOutput:
         return super().run(adapter_input)

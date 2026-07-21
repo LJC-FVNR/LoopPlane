@@ -18,6 +18,7 @@ from typing import Any
 from runtime.detached import (
     _action_failure_backoff_seconds,
     _action_failure_signature,
+    _materialize_supervisor_source_snapshot,
     _should_continue_after_tick,
     load_supervisor_status,
     run_supervisor,
@@ -339,6 +340,40 @@ def write_stale_supervisor_metadata(
 
 
 class DetachedRuntimeTest(unittest.TestCase):
+    def test_supervisor_source_snapshot_is_content_addressed_and_immutable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "source"
+            snapshots = root / "snapshots"
+            (source / "runtime").mkdir(parents=True)
+            (source / "templates").mkdir(parents=True)
+            (source / "runtime" / "__init__.py").write_text("GENERATION = 1\n", encoding="utf-8")
+            template = source / "templates" / "expansion_planner_prompt.template.md"
+            template.write_text("generation one\n", encoding="utf-8")
+            cache = source / "runtime" / "__pycache__" / "ignored.pyc"
+            cache.parent.mkdir(parents=True)
+            cache.write_bytes(b"ignored")
+
+            first = _materialize_supervisor_source_snapshot(source, snapshots)
+            first_root = Path(first["root"])
+            template.write_text("generation two\n", encoding="utf-8")
+            second = _materialize_supervisor_source_snapshot(source, snapshots)
+            second_root = Path(second["root"])
+
+            self.assertNotEqual(first["fingerprint"], second["fingerprint"])
+            self.assertNotEqual(first_root, second_root)
+            self.assertEqual(
+                (first_root / "templates" / template.name).read_text(encoding="utf-8"),
+                "generation one\n",
+            )
+            self.assertEqual(
+                (second_root / "templates" / template.name).read_text(encoding="utf-8"),
+                "generation two\n",
+            )
+            self.assertFalse((first_root / "runtime" / "__pycache__").exists())
+            manifest = json.loads(Path(first["manifest_path"]).read_text(encoding="utf-8"))
+            self.assertEqual(manifest["fingerprint"], first["fingerprint"])
+
     def test_expansion_planner_failure_signature_and_backoff_are_stable_and_bounded(self) -> None:
         selected = {
             "action": "run_expansion_planner",
@@ -611,6 +646,11 @@ class DetachedRuntimeTest(unittest.TestCase):
             self.assertEqual(start["status"], "started")
             self.assertTrue(start["supervisor"]["pid"])
             self.assertEqual(start["supervisor"]["liveness"], "alive")
+            source_snapshot = start["supervisor"]["metadata"]["source_snapshot"]
+            self.assertTrue(str(source_snapshot["fingerprint"]).startswith("sha256:"))
+            snapshot_root = project / source_snapshot["path"]
+            self.assertTrue((snapshot_root / "runtime" / "detached.py").is_file())
+            self.assertTrue((snapshot_root / "templates" / "expansion_planner_prompt.template.md").is_file())
             self.assertTrue((project / ".loopplane" / "runtime" / "supervisor.json").is_file())
             self.assertFalse((project / ".loopplane" / "results" / "T001" / "latest.json").exists())
             self.assertTrue(wait_until(lambda: (project / "worker_started.txt").is_file()))
